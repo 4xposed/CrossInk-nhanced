@@ -111,14 +111,15 @@ bool hasHeapForFileEntryAppend(const std::vector<std::string>& files, size_t ent
 }
 
 bool hasFileMetadata(const std::string& path) {
-  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasXtcExtension(path) || FsHelpers::hasTxtExtension(path) ||
-         FsHelpers::hasMarkdownExtension(path);
+  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasAnkiDeckExtension(path) ||
+         FsHelpers::hasXtcExtension(path) || FsHelpers::hasTxtExtension(path) || FsHelpers::hasMarkdownExtension(path);
 }
 
 bool isSupportedBrowserFile(std::string_view filename) {
-  return FsHelpers::hasEpubExtension(filename) || FsHelpers::hasXtcExtension(filename) ||
-         FsHelpers::hasTxtExtension(filename) || FsHelpers::hasMarkdownExtension(filename) ||
-         FsHelpers::hasBmpExtension(filename) || FsHelpers::hasPngExtension(filename);
+  return FsHelpers::hasEpubExtension(filename) || FsHelpers::hasAnkiDeckExtension(filename) ||
+         FsHelpers::hasXtcExtension(filename) || FsHelpers::hasTxtExtension(filename) ||
+         FsHelpers::hasMarkdownExtension(filename) || FsHelpers::hasBmpExtension(filename) ||
+         FsHelpers::hasPngExtension(filename);
 }
 
 bool acceptCommon(const char* name, bool isDir) {

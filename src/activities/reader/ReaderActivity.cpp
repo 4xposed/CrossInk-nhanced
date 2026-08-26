@@ -1,5 +1,7 @@
 #include "ReaderActivity.h"
 
+#include <AnkiDeck.h>
+
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -13,9 +15,12 @@
 #include "TxtReaderActivity.h"
 #include "Xtc.h"
 #include "XtcReaderActivity.h"
+#include "activities/anki/AnkiReviewActivity.h"
 #include "activities/util/BmpViewerActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
 #include "components/UITheme.h"
+
+bool ReaderActivity::isAnkiDeckFile(const std::string& path) { return FsHelpers::hasAnkiDeckExtension(path); }
 
 bool ReaderActivity::isXtcFile(const std::string& path) { return FsHelpers::hasXtcExtension(path); }
 
@@ -34,7 +39,7 @@ bool ReaderActivity::shouldShowLoadingPopup(const std::string& path) {
   // just add an extra full e-ink refresh (~3s on X3) before the reader paints
   // its first page; that page's own refresh is the visible "working" feedback.
   // Other formats, and EPUBs without a metadata cache yet, keep the popup.
-  if (isXtcFile(path) || isTxtFile(path) || isImagePreviewFile(path)) {
+  if (isAnkiDeckFile(path) || isXtcFile(path) || isTxtFile(path) || isImagePreviewFile(path)) {
     return true;
   }
   return !Epub::hasCache(path, "/.crosspoint");
@@ -88,6 +93,24 @@ ReaderActivity::EpubOpenResult ReaderActivity::loadEpub(const std::string& path)
   LOG_ERR("READER", "Failed to load epub");
   result.failure = epub->getLastLoadFailure();
   return result;
+}
+
+std::unique_ptr<AnkiDeck> ReaderActivity::loadAnkiDeck(const std::string& path) {
+  if (!Storage.exists(path.c_str())) {
+    LOG_ERR("READER", "Anki deck does not exist: %s", path.c_str());
+    return nullptr;
+  }
+
+  auto deck = makeUniqueNoThrow<AnkiDeck>();
+  if (!deck) {
+    LOG_ERR("READER", "OOM: Anki deck object");
+    return nullptr;
+  }
+  if (!deck->load(path)) {
+    LOG_ERR("READER", "Malformed Anki deck: %s", path.c_str());
+    return nullptr;
+  }
+  return deck;
 }
 
 void ReaderActivity::queueEpubOpenAlert(const Epub::OpenFailure failure) {
@@ -158,6 +181,21 @@ void ReaderActivity::onGoToEpubReader(std::unique_ptr<Epub> epub,
       cleanImageBaseOnEntry, skipRecentBookUpdateOnEntry));
 }
 
+void ReaderActivity::onGoToAnkiReview(std::unique_ptr<AnkiDeck> deck) {
+  currentBookPath = deck->getPath();
+  auto activity = makeUniqueNoThrow<AnkiReviewActivity>(renderer, mappedInput, std::move(deck), initialRefreshCountdown());
+  if (!activity) {
+    LOG_ERR("READER", "OOM: Anki review activity");
+    snprintf(APP_STATE.pendingAlertTitle, sizeof(APP_STATE.pendingAlertTitle), "%s", tr(STR_MEMORY_ERROR));
+    snprintf(APP_STATE.pendingAlertBody, sizeof(APP_STATE.pendingAlertBody), "%s", tr(STR_MEMORY_ERROR));
+    APP_STATE.pendingAlertGoHomeOnBack.store(false, std::memory_order_relaxed);
+    APP_STATE.hasPendingAlert.store(true, std::memory_order_release);
+    onGoBack();
+    return;
+  }
+  activityManager.replaceActivity(std::move(activity));
+}
+
 void ReaderActivity::onGoToBmpViewer(const std::string& path) {
   activityManager.replaceActivity(std::make_unique<BmpViewerActivity>(renderer, mappedInput, path));
 }
@@ -198,7 +236,18 @@ void ReaderActivity::onEnter() {
   }
 
   currentBookPath = initialBookPath;
-  if (isXtcFile(initialBookPath)) {
+  if (isAnkiDeckFile(initialBookPath)) {
+    auto deck = loadAnkiDeck(initialBookPath);
+    if (!deck) {
+      snprintf(APP_STATE.pendingAlertTitle, sizeof(APP_STATE.pendingAlertTitle), "%s", tr(STR_ANKI_INVALID_DECK));
+      snprintf(APP_STATE.pendingAlertBody, sizeof(APP_STATE.pendingAlertBody), "%s", tr(STR_ANKI_INVALID_DECK));
+      APP_STATE.pendingAlertGoHomeOnBack.store(false, std::memory_order_relaxed);
+      APP_STATE.hasPendingAlert.store(true, std::memory_order_release);
+      onGoBack();
+      return;
+    }
+    onGoToAnkiReview(std::move(deck));
+  } else if (isXtcFile(initialBookPath)) {
     auto xtc = loadXtc(initialBookPath);
     if (!xtc) {
       onGoBack();

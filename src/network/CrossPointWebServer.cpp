@@ -33,6 +33,7 @@
 #include "html/FilesPageHtml.generated.h"
 #include "html/FontsPageHtml.generated.h"
 #include "html/HomePageHtml.generated.h"
+#include "html/AnkiPageHtml.generated.h"
 #include "html/LogoPng.generated.h"
 #include "html/SettingsPageHtml.generated.h"
 #include "html/StyleCss.generated.h"
@@ -350,6 +351,7 @@ void CrossPointWebServer::begin() {
   // Setup routes
   server->on("/", HTTP_GET, [this] { handleRoot(); });
   server->on("/files", HTTP_GET, [this] { handleFileList(); });
+  server->on("/anki", HTTP_GET, [this] { handleAnkiPage(); });
   server->on("/js/jszip.min.js", HTTP_GET, [this] { handleJszip(); });
   server->on("/style.css", HTTP_GET, [this] { handleStyleCss(); });
   server->on("/logo.png", HTTP_GET, [this] { handleLogo(); });
@@ -559,6 +561,9 @@ static void sendStaticContent(WebServer* server, const char* data, size_t len, c
 
 void CrossPointWebServer::handleRoot() const {
   sendStaticContent(server.get(), HomePageHtml, sizeof(HomePageHtml), HomePageHtmlETag);
+}
+void CrossPointWebServer::handleAnkiPage() const {
+  sendStaticContent(server.get(), AnkiPageHtml, AnkiPageHtmlCompressedSize, AnkiPageHtmlETag);
 }
 
 void CrossPointWebServer::handleJszip() const {

@@ -6,6 +6,7 @@
 #include "activities/home/FileBrowserActivity.h"
 
 class Epub;
+class AnkiDeck;
 class Xtc;
 class Txt;
 
@@ -23,8 +24,10 @@ class ReaderActivity final : public Activity {
   bool cleanImageBaseOnEntry = false;
   // Non-static (unlike the other loaders): draws the first-open indexing popup, which needs the renderer.
   EpubOpenResult loadEpub(const std::string& path);
+  static std::unique_ptr<AnkiDeck> loadAnkiDeck(const std::string& path);
   static std::unique_ptr<Xtc> loadXtc(const std::string& path);
   static std::unique_ptr<Txt> loadTxt(const std::string& path);
+  static bool isAnkiDeckFile(const std::string& path);
   static bool isXtcFile(const std::string& path);
   static bool isTxtFile(const std::string& path);
   // Whether to paint the "Loading" popup on entry. Skipped for already-cached
@@ -34,6 +37,7 @@ class ReaderActivity final : public Activity {
 
   void goToLibrary(const std::string& fromBookPath = "");
   void onGoToEpubReader(std::unique_ptr<Epub> epub, EpubReaderActivity::BookReaderSettingsData readerSettings);
+  void onGoToAnkiReview(std::unique_ptr<AnkiDeck> deck);
   void onGoToXtcReader(std::unique_ptr<Xtc> xtc);
   void onGoToTxtReader(std::unique_ptr<Txt> txt);
   void onGoToBmpViewer(const std::string& path);

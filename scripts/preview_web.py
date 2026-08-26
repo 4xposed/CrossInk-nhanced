@@ -24,6 +24,7 @@ JSZIP = os.path.join(ROOT, "src", "network", "html", "js", "jszip.min.js")
 PAGES = {
     "home":     ("/",         "CrossInk",                   "home",     ""),
     "files":    ("/files",    "Files - CrossInk",           "files",    '  <script src="/js/jszip.min.js"></script>'),
+    "anki":     ("/anki",     "Anki - CrossInk",            "anki",     '  <script src="/js/jszip.min.js"></script>\n  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.14.2/sql-wasm.js"></script>'),
     "settings": ("/settings", "Settings - CrossInk Reader", "settings", ""),
     "fonts":    ("/fonts",    "Fonts - CrossInk",           "fonts",    ""),
 }
@@ -35,13 +36,14 @@ def read(*parts):
 
 def render_page(slug):
     _route, title, active, head_extra = PAGES[slug]
-    js = read(WEB, "pages", f"{slug}.js").strip()
+    js_files = ("anki-converter.js", "anki.js") if slug == "anki" else (f"{slug}.js",)
+    js = "\n".join(read(WEB, "pages", filename).strip() for filename in js_files)
     values = {
         "title": title, "v": "dev", "head_extra": head_extra,
         "styles": read(WEB, "pages", f"{slug}.css"),
         "body": read(WEB, "pages", f"{slug}.html"),
         "script": f"<script>\n{js}\n</script>" if js else "",
-        "cls_home": "", "cls_files": "", "cls_settings": "", "cls_fonts": "",
+        "cls_home": "", "cls_files": "", "cls_anki": "", "cls_settings": "", "cls_fonts": "",
     }
     values[f"cls_{active}"] = ' class="active"'
     base = read(WEB, "templates", "base.html")

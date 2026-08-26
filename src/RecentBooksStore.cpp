@@ -1,6 +1,8 @@
 #include "RecentBooksStore.h"
 
 #include <Epub.h>
+#include <AnkiDeck.h>
+
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
@@ -177,6 +179,11 @@ RecentBook RecentBooksStore::getDataFromBook(std::string path) const {
     Epub epub(path, "/.crosspoint");
     epub.load(false, true, Epub::XLocationLoadMode::Skip);
     return RecentBook{path, epub.getTitle(), epub.getAuthor(), epub.getThumbBmpPath()};
+  } else if (FsHelpers::hasAnkiDeckExtension(lastBookFileName)) {
+    AnkiDeck deck;
+    if (deck.load(path)) {
+      return RecentBook{path, deck.title(), "", ""};
+    }
   } else if (FsHelpers::hasXtcExtension(lastBookFileName)) {
     // Handle XTC file
     Xtc xtc(path, "/.crosspoint");

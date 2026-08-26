@@ -67,12 +67,14 @@ std::vector<FileBrowserActionActivity::MenuItem> buildBookActionItems(const std:
 }
 
 bool hasClearableBookCache(const std::string& path) {
-  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasXtcExtension(path);
+  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasAnkiDeckExtension(path) ||
+         FsHelpers::hasXtcExtension(path);
 }
 
 bool canSendNearby(const std::string& path) {
-  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasTxtExtension(path) || FsHelpers::hasXtcExtension(path) ||
-         FsHelpers::hasPngExtension(path) || FsHelpers::hasBmpExtension(path);
+  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasAnkiDeckExtension(path) ||
+         FsHelpers::hasTxtExtension(path) || FsHelpers::hasXtcExtension(path) || FsHelpers::hasPngExtension(path) ||
+         FsHelpers::hasBmpExtension(path);
 }
 
 void clearFileMetadata(const std::string& fullPath) {
@@ -80,6 +82,8 @@ void clearFileMetadata(const std::string& fullPath) {
     Epub(fullPath, "/.crosspoint").clearCache();
     BookmarkStore::deleteForFilePath(fullPath, "epub");
     ClippingStore::deleteForFilePath(fullPath, "epub");
+  } else if (FsHelpers::hasAnkiDeckExtension(fullPath)) {
+    clearBookCachePreservingUserState(fullPath);
   } else if (FsHelpers::hasXtcExtension(fullPath)) {
     BookmarkStore::deleteForFilePath(fullPath, "xtc");
   } else if (FsHelpers::hasTxtExtension(fullPath) || FsHelpers::hasMarkdownExtension(fullPath)) {
@@ -88,7 +92,8 @@ void clearFileMetadata(const std::string& fullPath) {
 }
 
 bool clearBookCache(const std::string& fullPath) {
-  if (FsHelpers::hasEpubExtension(fullPath) || FsHelpers::hasXtcExtension(fullPath)) {
+  if (FsHelpers::hasEpubExtension(fullPath) || FsHelpers::hasAnkiDeckExtension(fullPath) ||
+      FsHelpers::hasXtcExtension(fullPath)) {
     return clearBookCachePreservingUserState(fullPath);
   }
   return false;

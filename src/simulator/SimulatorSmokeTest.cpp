@@ -2,7 +2,14 @@
 
 #include "SimulatorSmokeTest.h"
 
+#include <AnkiDeck.h>
+
 #include <HalStorage.h>
+#include <FsHelpers.h>
+#include <ReviewStateStore.h>
+
+#include "components/TouchRegistry.h"
+
 #include <Logging.h>
 
 #include <algorithm>
@@ -40,6 +47,7 @@ enum class SmokeStep : uint8_t {
   ReaderOptions,
   ReaderMenu,
   Sleep,
+  OpenDeckFromBooks,
   Reader,
   ReaderInput,
   Done,
@@ -72,12 +80,16 @@ class SimulatorSmokeTest {
     AssertTouchscreenDisabled,
     AssertTouchscreenEnabled,
     OpenSmokeBook,
+    OpenBooks,
     DisableReaderTouch,
     EnableReaderTouch,
     TouchDown,
     TouchMove,
     TouchRelease,
+    TouchButtonDown,
+    TouchButtonRelease,
     AssertActivity,
+    AssertAnkiNextCandidate,
     Render
   };
 
@@ -97,6 +109,8 @@ class SimulatorSmokeTest {
   size_t scriptIndex = 0;
   SmokeStep inputCompletionStep = SmokeStep::Done;
 
+  int touchButtonX = 0;
+  int touchButtonY = 0;
   static bool enabled() { return std::getenv("CROSSINK_SIMULATOR_SMOKE_TEST") != nullptr; }
 
   static int pageTurnCount() {
@@ -110,6 +124,11 @@ class SimulatorSmokeTest {
   static bool landscapeReaderRequested() {
     const char* raw = std::getenv("CROSSINK_SIMULATOR_SMOKE_LANDSCAPE_READER");
     return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+  }
+
+  static bool isAnkiDeckSmokeBook() {
+    const char* bookPath = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
+    return bookPath != nullptr && FsHelpers::hasAnkiDeckExtension(bookPath);
   }
 
   static void applyRequestedTheme() {
@@ -385,6 +404,22 @@ class SimulatorSmokeTest {
         break;
 
       case SmokeStep::FileBrowser:
+        if (isAnkiDeckSmokeBook()) {
+          LOG_INF("SMOKE", "Opening Anki deck from Books");
+#if CROSSINK_APP_CAP_TOUCH
+          if (mappedInputManager.hasTouch()) {
+            if (!findTouchButtonHint(MappedInputManager::Button::Confirm, touchButtonX, touchButtonY)) {
+              fail("Missing touch button hint for Anki Books open");
+            }
+            mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+          } else
+#endif
+          {
+            mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+          }
+          queueStep(nullptr, SmokeStep::OpenDeckFromBooks, 0);
+          break;
+        }
 #if CROSSINK_APP_CAP_TOUCH
         if (mappedInputManager.hasTouchHardware()) {
           buildFileBrowserInputScript();
@@ -446,6 +481,17 @@ class SimulatorSmokeTest {
         break;
       }
 
+      case SmokeStep::OpenDeckFromBooks:
+#if CROSSINK_APP_CAP_TOUCH
+        if (mappedInputManager.hasTouch()) {
+          mappedInputManager.simulatorInjectTouchRelease(touchButtonX, touchButtonY);
+        } else
+#endif
+        {
+          mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+        }
+        queueStep("Anki review opened from Books", SmokeStep::Reader, 8);
+        break;
       case SmokeStep::Reader:
         buildReaderInputScript();
         step = SmokeStep::ReaderInput;
@@ -513,6 +559,10 @@ class SimulatorSmokeTest {
     return {ScriptActionType::EnableReaderTouch, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
   }
 
+  static ScriptAction openBooks() {
+    return {ScriptActionType::OpenBooks, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
+  }
+
   static ScriptAction render(const char* label, int framesToSettle = 3) {
     return {ScriptActionType::Render, MappedInputManager::Button::Back, label, framesToSettle, 0, 0};
   }
@@ -527,21 +577,111 @@ class SimulatorSmokeTest {
   static ScriptAction touchRelease(const int x, const int y) {
     return {ScriptActionType::TouchRelease, MappedInputManager::Button::Back, nullptr, 0, x, y};
   }
+#endif
+
   static ScriptAction assertActivity(const char* name) {
     return {ScriptActionType::AssertActivity, MappedInputManager::Button::Back, name, 0, 0, 0};
   }
-#endif
+
+  static ScriptAction assertAnkiNextCandidate() {
+    return {ScriptActionType::AssertAnkiNextCandidate, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
+  }
+
+  static ScriptAction touchButtonDown(const MappedInputManager::Button button) {
+    return {ScriptActionType::TouchButtonDown, button, nullptr, 0, 0, 0};
+  }
+
+  static ScriptAction touchButtonRelease(const MappedInputManager::Button button) {
+    return {ScriptActionType::TouchButtonRelease, button, nullptr, 0, 0, 0};
+  }
 
   void addTap(MappedInputManager::Button button) {
     inputScript.push_back(press(button));
     inputScript.push_back(release(button));
   }
 
-  void buildReaderInputScript() {
+  void addAnkiTap(const MappedInputManager::Button button) {
+#if CROSSINK_APP_CAP_TOUCH
+    if (mappedInputManager.hasTouch()) {
+      inputScript.push_back(touchButtonDown(button));
+      inputScript.push_back(touchButtonRelease(button));
+      return;
+    }
+#endif
+    addTap(button);
+  }
+
+#if CROSSINK_APP_CAP_TOUCH
+  int touchTargetIdFor(const MappedInputManager::Button button) const {
+    const bool readerMapping = SETTINGS.readerFrontButtonsEnabled != 0;
+    switch (button) {
+      case MappedInputManager::Button::Back:
+        return readerMapping ? SETTINGS.readerFrontButtonBack : SETTINGS.frontButtonBack;
+      case MappedInputManager::Button::Confirm:
+        return readerMapping ? SETTINGS.readerFrontButtonConfirm : SETTINGS.frontButtonConfirm;
+      case MappedInputManager::Button::Left:
+        return readerMapping ? SETTINGS.readerFrontButtonLeft : SETTINGS.frontButtonLeft;
+      case MappedInputManager::Button::Right:
+        return readerMapping ? SETTINGS.readerFrontButtonRight : SETTINGS.frontButtonRight;
+      default:
+        return -1;
+    }
+  }
+
+  bool findTouchButtonHint(const MappedInputManager::Button button, int& x, int& y) const {
+    const int targetId = touchTargetIdFor(button);
+    if (targetId < 0) return false;
+
+    for (int row = 0; row < renderer.getScreenHeight(); ++row) {
+      for (int column = 0; column < renderer.getScreenWidth(); ++column) {
+        int hitId = -1;
+        if (TouchRegistry::getInstance().hitTest(column, row, TouchRegistry::Kind::Button, hitId) &&
+            hitId == targetId) {
+          x = column;
+          y = row;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+#endif
+
+  void buildAnkiDeckInputScript() {
     inputScript.clear();
     scriptIndex = 0;
     inputCompletionStep = SmokeStep::Done;
 
+    inputScript.push_back(assertActivity("AnkiReview"));
+    addAnkiTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Anki answer revealed", 4));
+    inputScript.push_back(assertActivity("AnkiReview"));
+    addAnkiTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Anki next card after Good", 4));
+    inputScript.push_back(assertActivity("AnkiReview"));
+    addAnkiTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Home after Anki exit", 4));
+    inputScript.push_back(assertActivity("Home"));
+    inputScript.push_back(assertAnkiNextCandidate());
+    inputScript.push_back(openBooks());
+    inputScript.push_back(render("Books reopened for Anki", 4));
+    addAnkiTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Anki review reopened on next card", 8));
+    inputScript.push_back(assertActivity("AnkiReview"));
+    addAnkiTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Home after reopened Anki exit", 4));
+    inputScript.push_back(assertActivity("Home"));
+  }
+
+  void buildReaderInputScript() {
+    if (isAnkiDeckSmokeBook()) {
+      buildAnkiDeckInputScript();
+      return;
+    }
+
+    inputScript.clear();
+    scriptIndex = 0;
+    inputCompletionStep = SmokeStep::Done;
     const int turns = pageTurnCount();
 #if CROSSINK_APP_CAP_TOUCH
     if (mappedInputManager.hasTouch()) {
@@ -890,6 +1030,23 @@ class SimulatorSmokeTest {
       case ScriptActionType::AssertTouchscreenEnabled:
         if (SETTINGS.disableReaderTouchscreen) fail("Expected reader touchscreen to be enabled");
         break;
+      case ScriptActionType::TouchButtonDown:
+#if CROSSINK_APP_CAP_TOUCH
+        if (!findTouchButtonHint(action.button, touchButtonX, touchButtonY)) {
+          fail("Missing touch button hint for Anki action");
+        }
+        mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+        break;
+#else
+        fail("Touch button action is unavailable in this simulator");
+#endif
+      case ScriptActionType::TouchButtonRelease:
+#if CROSSINK_APP_CAP_TOUCH
+        mappedInputManager.simulatorInjectTouchRelease(touchButtonX, touchButtonY);
+        break;
+#else
+        fail("Touch button action is unavailable in this simulator");
+#endif
       case ScriptActionType::OpenSmokeBook: {
         const char* bookPath = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
         if (bookPath == nullptr || bookPath[0] == '\0') fail("Smoke test book path is missing");
@@ -901,6 +1058,9 @@ class SimulatorSmokeTest {
         break;
       case ScriptActionType::EnableReaderTouch:
         SETTINGS.disableReaderTouchscreen = false;
+        break;
+      case ScriptActionType::OpenBooks:
+        activityManager.goToFileBrowser("/books");
         break;
       case ScriptActionType::TouchDown:
 #if CROSSINK_APP_CAP_TOUCH
@@ -920,6 +1080,25 @@ class SimulatorSmokeTest {
       case ScriptActionType::AssertActivity:
         if (!activityManager.isCurrentActivityNamed(action.label)) fail("Expected current activity: %s", action.label);
         break;
+      case ScriptActionType::AssertAnkiNextCandidate: {
+        const char* bookPath = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
+        if (bookPath == nullptr || bookPath[0] == '\0') fail("Smoke test book path is missing");
+
+        AnkiDeck deck;
+        if (!deck.load(bookPath)) fail("Could not reload Anki smoke deck");
+        ReviewStateStore state;
+        if (!state.open(deck)) fail("Could not reopen Anki review state");
+
+        ReviewState first{};
+        ReviewState second{};
+        if (!state.read(0, first) || !state.read(1, second)) fail("Could not read Anki review state");
+        if (state.reviewCount() != 1 || first.kind != ReviewKind::Review ||
+            first.dueDay != state.reviewCount() + 1 || second.kind != ReviewKind::New) {
+          fail("Good grade did not persist the review count and next Anki candidate");
+        }
+        LOG_INF("SMOKE", "Verified Anki review counter and next candidate after Good");
+        break;
+      }
       case ScriptActionType::Render:
         queueStep(action.label, SmokeStep::ReaderInput, action.settleFrames);
         break;

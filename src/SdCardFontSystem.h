@@ -3,10 +3,10 @@
 #include <SdCardFontManager.h>
 #include <SdCardFontRegistry.h>
 
+#include <cstddef>
+
 #include <atomic>
-
 #include "ReaderFontSizeStep.h"
-
 class GfxRenderer;
 
 struct DictionaryFontActivation {
@@ -57,6 +57,15 @@ class SdCardFontSystem {
   /// Resolve an SD card font ID from family name + selected point size.
   /// Returns 0 if not found. Used by CrossPointSettings::getReaderFontId().
   int resolveFontId(const char* familyName, uint8_t pointSize) const;
+
+  /// List exact active-family sizes at or above the selected reader size,
+  /// largest first, without loading any font assets. The caller provides the
+  /// fixed-capacity output array.
+  size_t listActiveFamilyCandidateSizes(uint8_t* pointSizes, size_t capacity);
+
+  /// Replace the active family with one exact installed size without changing
+  /// the saved reader selection. At most this one family size remains resident.
+  int activateActiveFamilySize(GfxRenderer& renderer, uint8_t pointSize);
 
   /// Change the reader font size using the active SD family when one is selected.
   bool changeReaderFontSize(bool larger, FontSizeStepMode mode = FontSizeStepMode::Wrap);

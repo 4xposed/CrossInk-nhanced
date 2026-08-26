@@ -360,9 +360,7 @@ void LyraTheme::drawListWithMetrics(const GfxRenderer& renderer, Rect rect, int 
 }
 
 void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                                const char* btn4, const bool allowInvertedText) const {
-  if (gpio.hasTouch()) return;
-
+                                const char* btn4, const bool allowInvertedText, const ButtonHintLayout layout) const {
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
   const bool invertText = allowInvertedText && orig_orientation == GfxRenderer::Orientation::PortraitInverted;
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -379,6 +377,46 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   constexpr int wideButtonPositions[] = {65, 157, 291, 383};
   const int* buttonPositions = renderer.getScreenWidth() >= 528 ? wideButtonPositions : narrowButtonPositions;
   const char* labels[] = {btn1, btn2, btn3, btn4};
+  const bool compactPrimary = layout == ButtonHintLayout::CompactPrimary && !invertText && btn1 != nullptr &&
+                              btn1[0] != '\0' && btn2 != nullptr && btn2[0] != '\0' &&
+                              (btn3 == nullptr || btn3[0] == '\0') && (btn4 == nullptr || btn4[0] == '\0');
+  if (compactPrimary) {
+    constexpr int controlGap = 8;
+    const int footerLeft = buttonPositions[0];
+    const int footerRight = buttonPositions[3] + buttonWidth;
+    const int backWidth =
+        std::min(renderer.getTextWidth(SMALL_FONT_ID, btn1) + 16, buttonPositions[1] - buttonPositions[0] - controlGap);
+    const int primaryX = footerLeft + backWidth + controlGap;
+    const int primaryWidth = footerRight - primaryX;
+    const int buttonTop = pageHeight - buttonY;
+
+    renderer.fillRect(footerLeft, buttonTop, footerRight - footerLeft, buttonHeight, false);
+    TouchRegistry::getInstance().add(Rect{footerLeft, buttonTop, backWidth, buttonHeight}, 0, TouchRegistry::Button);
+    TouchRegistry::getInstance().add(Rect{primaryX, buttonTop, primaryWidth, buttonHeight}, 1, TouchRegistry::Button);
+    renderer.fillRoundedRect(footerLeft, buttonTop, backWidth, buttonHeight, cornerRadius, Color::White);
+    renderer.drawRoundedRect(footerLeft, buttonTop, backWidth, buttonHeight, 1, cornerRadius, true, true, false, false,
+                             true);
+    renderer.fillRoundedRect(primaryX, buttonTop, primaryWidth, buttonHeight, cornerRadius, Color::White);
+    renderer.drawRoundedRect(primaryX, buttonTop, primaryWidth, buttonHeight, 1, cornerRadius, true, true, false, false,
+                             true);
+
+    const int textY = buttonTop + textYOffset;
+    const int backX = footerLeft + (backWidth - renderer.getTextWidth(SMALL_FONT_ID, btn1)) / 2;
+    const int primaryTextX = primaryX + (primaryWidth - renderer.getTextWidth(SMALL_FONT_ID, btn2)) / 2;
+    renderer.drawText(SMALL_FONT_ID, backX, textY, btn1);
+    renderer.drawText(SMALL_FONT_ID, primaryTextX, textY, btn2);
+    renderer.setOrientation(orig_orientation);
+    return;
+  }
+  if (gpio.hasTouch()) {
+    for (int i = 0; i < 4; ++i) {
+      if (labels[i] != nullptr && labels[i][0] != '\0') {
+        TouchRegistry::getInstance().add(Rect{buttonPositions[i], pageHeight - buttonY, buttonWidth, buttonHeight}, i,
+                                         TouchRegistry::Button);
+      }
+    }
+    return;
+  }
 
   for (int i = 0; i < 4; i++) {
     const int x = buttonPositions[i];

@@ -57,7 +57,8 @@ class MinimalTheme : public LyraTheme {
                 const std::function<bool(int index)>& isHeader = nullptr, int rowHeightScale = 1,
                 bool showSelection = true) const override;
   void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3, const char* btn4,
-                       bool allowInvertedText = false) const override;
+                       bool allowInvertedText = false,
+                       ButtonHintLayout layout = ButtonHintLayout::Default) const override;
   void drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std::vector<RecentBook>& recentBooks,
                            int selectorIndex, bool& coverRendered, bool& coverBufferStored, bool& bufferRestored,
                            const std::function<bool()>& storeCoverBuffer, const BookReadingStats* stats = nullptr,

@@ -231,6 +231,11 @@ constexpr ThemeMetrics values = {.batteryWidth = StatusBarMetrics::batteryWidth,
                                  .textFieldLineEndOffset = 0};
 }
 
+enum class ButtonHintLayout {
+  Default,
+  CompactPrimary,
+};
+
 class BaseTheme {
  public:
   virtual ~BaseTheme() = default;
@@ -247,7 +252,8 @@ class BaseTheme {
   // an empty string clears an inactive slot, and nullptr preserves the existing
   // background without drawing or registering a target.
   virtual void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                               const char* btn4, bool allowInvertedText = false) const;
+                               const char* btn4, bool allowInvertedText = false,
+                               ButtonHintLayout layout = ButtonHintLayout::Default) const;
   virtual void drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const;
   virtual int getMenuRowHeight(const GfxRenderer& renderer) const;
   virtual int getListRowStep(bool hasSubtitle, int rowHeightScale = 1) const;

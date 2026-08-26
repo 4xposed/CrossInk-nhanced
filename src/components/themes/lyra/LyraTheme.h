@@ -109,7 +109,8 @@ class LyraTheme : public BaseTheme {
                 const std::function<bool(int index)>& isHeader = nullptr, int rowHeightScale = 1,
                 bool showSelection = true) const override;
   void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3, const char* btn4,
-                       bool allowInvertedText = false) const override;
+                       bool allowInvertedText = false,
+                       ButtonHintLayout layout = ButtonHintLayout::Default) const override;
   void drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const override;
   void drawButtonMenu(GfxRenderer& renderer, Rect rect, int buttonCount, int selectedIndex,
                       const std::function<const char*(int index)>& buttonLabel,

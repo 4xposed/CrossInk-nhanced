@@ -65,8 +65,9 @@ NearbyBookTransferActivity::NearbyBookTransferActivity(GfxRenderer& renderer, Ma
 NearbyBookTransferActivity::~NearbyBookTransferActivity() { stopRadio(); }
 
 bool NearbyBookTransferActivity::supportedFile(const std::string& path) {
-  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasTxtExtension(path) || FsHelpers::hasXtcExtension(path) ||
-         FsHelpers::hasPngExtension(path) || FsHelpers::hasBmpExtension(path);
+  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasAnkiDeckExtension(path) ||
+         FsHelpers::hasTxtExtension(path) || FsHelpers::hasXtcExtension(path) || FsHelpers::hasPngExtension(path) ||
+         FsHelpers::hasBmpExtension(path);
 }
 
 bool NearbyBookTransferActivity::safeFileName(const std::string& name) {

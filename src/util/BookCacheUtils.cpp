@@ -1,5 +1,7 @@
 #include "BookCacheUtils.h"
 
+#include <AnkiDeck.h>
+
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <Logging.h>
@@ -53,6 +55,10 @@ constexpr char STATS_SUFFIX[] = ".bin";
 std::string getBookCachePath(const std::string& path) {
   if (FsHelpers::hasEpubExtension(path)) {
     return Epub(path, "/.crosspoint").getCachePath();
+  }
+  if (FsHelpers::hasAnkiDeckExtension(path)) {
+    AnkiDeck deck;
+    return deck.load(path) ? deck.getCachePath() : "";
   }
   if (FsHelpers::hasXtcExtension(path)) {
     return Xtc(path, "/.crosspoint").getCachePath();
@@ -250,6 +256,10 @@ bool clearBookCacheForPath(const std::string& path) {
   if (FsHelpers::hasEpubExtension(path)) {
     return Epub(path, "/.crosspoint").clearCache();
   }
+  if (FsHelpers::hasAnkiDeckExtension(path)) {
+    AnkiDeck deck;
+    return deck.load(path) && Storage.removeDir(deck.getCachePath().c_str());
+  }
   if (FsHelpers::hasXtcExtension(path)) {
     return Xtc(path, "/.crosspoint").clearCache();
   }
@@ -302,10 +312,12 @@ bool isBookCacheDirectoryName(const char* name) {
   }
 
   constexpr char EPUB_PREFIX[] = "epub_";
+  constexpr char ANKI_PREFIX[] = "anki_";
   constexpr char TXT_PREFIX[] = "txt_";
   constexpr char XTC_PREFIX[] = "xtc_";
 
   return strncmp(name, EPUB_PREFIX, std::size(EPUB_PREFIX) - 1) == 0 ||
+         strncmp(name, ANKI_PREFIX, std::size(ANKI_PREFIX) - 1) == 0 ||
          strncmp(name, TXT_PREFIX, std::size(TXT_PREFIX) - 1) == 0 ||
          strncmp(name, XTC_PREFIX, std::size(XTC_PREFIX) - 1) == 0;
 }

@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <HalTiltSensor.h>
 #include <I18n.h>
+#include <Utf8.h>
 
 #include <algorithm>
 #include <cctype>
@@ -402,7 +403,8 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
 }
 
 void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
-                                       const char* btn4, const bool allowInvertedText) const {
+                                       const char* btn4, const bool allowInvertedText,
+                                       const ButtonHintLayout layout) const {
   if (gpio.hasTouch()) return;
 
   const GfxRenderer::Orientation origOrientation = renderer.getOrientation();
@@ -423,22 +425,51 @@ void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, 
   const char* rightInnerLabel = invertText ? btn2 : btn3;
   const char* rightOuterLabel = invertText ? btn1 : btn4;
 
-  const bool backDisabled = (leftOuterLabel == nullptr || leftOuterLabel[0] == '\0');
+  const bool backDisabled = leftOuterLabel == nullptr || leftOuterLabel[0] == '\0';
   const int leftGroupX = sidePadding;
   const int rightGroupX = leftGroupX + groupWidth + groupGap;
-  if (!backDisabled) {
-    TouchRegistry::getInstance().add(Rect{leftGroupX, outlineY, groupWidth / 2, hintHeight}, HalGPIO::BTN_BACK,
-                                     TouchRegistry::Button);
-  }
-  const std::string backLabel = backDisabled ? "" : std::string(leftOuterLabel);
+  std::string backLabel = backDisabled ? "" : std::string(leftOuterLabel);
   // Callers should provide the button labels. If a label is not specified, it should render empty.
-  const std::string selectText = (leftInnerLabel && leftInnerLabel[0] != '\0') ? std::string(leftInnerLabel) : "";
+  std::string selectText = (leftInnerLabel && leftInnerLabel[0] != '\0') ? std::string(leftInnerLabel) : "";
   const std::string upText = (rightInnerLabel && rightInnerLabel[0] != '\0') ? std::string(rightInnerLabel) : "";
   const std::string downText = (rightOuterLabel && rightOuterLabel[0] != '\0') ? std::string(rightOuterLabel) : "";
+  constexpr int innerEdgePadding = 16;
+  constexpr int compactControlGap = 8;
+  constexpr int compactBackMinWidth = 48;
+  const bool compactPrimary = layout == ButtonHintLayout::CompactPrimary && !invertText && btn1 != nullptr &&
+                              btn1[0] != '\0' && btn2 != nullptr && btn2[0] != '\0' &&
+                              (btn3 == nullptr || btn3[0] == '\0') && (btn4 == nullptr || btn4[0] == '\0');
+  const int compactBackTextWidth =
+      compactPrimary ? renderer.getTextWidth(kGuideFontId, btn1, EpdFontFamily::REGULAR) : 0;
+  const int compactConfirmTextWidth =
+      compactPrimary ? renderer.getTextWidth(kGuideFontId, btn2, EpdFontFamily::REGULAR) : 0;
+  const int compactBackMaxWidth =
+      std::max(compactBackMinWidth, groupWidth - compactControlGap - compactConfirmTextWidth - 2 * innerEdgePadding);
+  const int compactBackWidth =
+      compactPrimary ? std::min(compactBackTextWidth + 2 * innerEdgePadding, compactBackMaxWidth) : groupWidth / 2;
+  const int compactConfirmX = leftGroupX + compactBackWidth + compactControlGap;
+  const int compactConfirmWidth = groupWidth - compactBackWidth - compactControlGap;
+
+  const auto fitCompactLabel = [&renderer](std::string& label, const int maxWidth) {
+    while (!label.empty() && renderer.getTextWidth(kGuideFontId, label.c_str(), EpdFontFamily::REGULAR) > maxWidth) {
+      utf8RemoveLastChar(label);
+    }
+  };
+  if (compactPrimary) {
+    fitCompactLabel(backLabel, compactBackWidth - 2 * innerEdgePadding);
+    fitCompactLabel(selectText, compactConfirmWidth - 2 * innerEdgePadding);
+  }
+
+  if (!backDisabled) {
+    TouchRegistry::getInstance().add(
+        Rect{leftGroupX, outlineY, compactPrimary ? compactBackWidth : groupWidth / 2, hintHeight}, HalGPIO::BTN_BACK,
+        TouchRegistry::Button);
+  }
   if (!selectText.empty()) {
     TouchRegistry::getInstance().add(
-        Rect{leftGroupX + groupWidth / 2, outlineY, groupWidth - groupWidth / 2, hintHeight}, HalGPIO::BTN_CONFIRM,
-        TouchRegistry::Button);
+        Rect{compactPrimary ? compactConfirmX : leftGroupX + groupWidth / 2, outlineY,
+             compactPrimary ? compactConfirmWidth : groupWidth - groupWidth / 2, hintHeight},
+        HalGPIO::BTN_CONFIRM, TouchRegistry::Button);
   }
   if (!upText.empty()) {
     TouchRegistry::getInstance().add(Rect{rightGroupX, outlineY, groupWidth / 2, hintHeight}, HalGPIO::BTN_LEFT,
@@ -470,21 +501,29 @@ void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, 
 
   // A nullptr means the caller intentionally wants the reader pixels retained.
   // Empty strings still render an empty group so old hint pixels are cleared.
-  drawGroupedHints(leftGroupX, leftOuterLabel, leftInnerLabel);
-  drawGroupedHints(rightGroupX, rightInnerLabel, rightOuterLabel);
+  if (compactPrimary) {
+    renderer.fillRect(leftGroupX, outlineY, groupWidth, hintHeight, false);
+    renderer.drawRoundedRect(leftGroupX, outlineY, compactBackWidth, hintHeight, 2, kBottomRadius, true);
+    renderer.drawRoundedRect(compactConfirmX, outlineY, compactConfirmWidth, hintHeight, 2, kBottomRadius, true);
+  } else {
+    drawGroupedHints(leftGroupX, leftOuterLabel, leftInnerLabel);
+    drawGroupedHints(rightGroupX, rightInnerLabel, rightOuterLabel);
+  }
 
+  const int backWidth = renderer.getTextWidth(kGuideFontId, backLabel.c_str(), EpdFontFamily::REGULAR);
   const int selectWidth = renderer.getTextWidth(kGuideFontId, selectText.c_str(), EpdFontFamily::REGULAR);
   const int upWidth = renderer.getTextWidth(kGuideFontId, upText.c_str(), EpdFontFamily::REGULAR);
   const int downWidth = renderer.getTextWidth(kGuideFontId, downText.c_str(), EpdFontFamily::REGULAR);
-  constexpr int innerEdgePadding = 16;
-
-  const int backX = leftGroupX + innerEdgePadding;
-  const int selectX = leftOuterLabel == nullptr ? leftGroupX + outerButtonWidth + (innerButtonWidth - selectWidth) / 2
-                                                : leftGroupX + groupWidth - innerEdgePadding - selectWidth;
-  const int upX =
-      rightOuterLabel == nullptr ? rightGroupX + (outerButtonWidth - upWidth) / 2 : rightGroupX + innerEdgePadding;
-  const int downX = rightInnerLabel == nullptr ? rightGroupX + outerButtonWidth + (innerButtonWidth - downWidth) / 2
-                                               : rightGroupX + groupWidth - innerEdgePadding - downWidth;
+  const int backX = compactPrimary ? leftGroupX + (compactBackWidth - backWidth) / 2 : leftGroupX + innerEdgePadding;
+  const int selectX = compactPrimary
+                          ? compactConfirmX + (compactConfirmWidth - selectWidth) / 2
+                          : (leftOuterLabel == nullptr ? leftGroupX + outerButtonWidth + (innerButtonWidth - selectWidth) / 2
+                                                       : leftGroupX + groupWidth - innerEdgePadding - selectWidth);
+  const int upX = rightOuterLabel == nullptr ? rightGroupX + (outerButtonWidth - upWidth) / 2
+                                             : rightGroupX + innerEdgePadding;
+  const int downX = rightInnerLabel == nullptr
+                        ? rightGroupX + outerButtonWidth + (innerButtonWidth - downWidth) / 2
+                        : rightGroupX + groupWidth - innerEdgePadding - downWidth;
 
   renderer.setOrientation(invertText ? GfxRenderer::Orientation::PortraitInverted : GfxRenderer::Orientation::Portrait);
   const int textY = (invertText ? bottomMargin : outlineY) + (hintHeight - renderer.getLineHeight(kGuideFontId)) / 2;

@@ -28,6 +28,7 @@ JS_OUT = os.path.join(OUT, "js")
 PAGES = {
     "home":     ("HomePageHtml",     "CrossInk",                   "home",     ""),
     "files":    ("FilesPageHtml",    "Files - CrossInk",           "files",    '  <script src="/js/jszip.min.js"></script>'),
+    "anki":     ("AnkiPageHtml",     "Anki - CrossInk",            "anki",     '  <script src="/js/jszip.min.js"></script>\n  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.14.2/sql-wasm.js"></script>'),
     "settings": ("SettingsPageHtml", "Settings - CrossInk Reader", "settings", ""),
     "fonts":    ("FontsPageHtml",    "Fonts - CrossInk",           "fonts",    ""),
 }
@@ -94,12 +95,13 @@ base = read(WEB, "templates", "base.html")
 for slug, (ident, title, active, head_extra) in PAGES.items():
     page_css = read(WEB, "pages", f"{slug}.css")
     page_html = read(WEB, "pages", f"{slug}.html")
-    page_js = read(WEB, "pages", f"{slug}.js").strip()
+    page_js_files = ("anki-converter.js", "anki.js") if slug == "anki" else (f"{slug}.js",)
+    page_js = "\n".join(read(WEB, "pages", filename).strip() for filename in page_js_files)
     script = f"<script>\n{page_js}\n</script>" if page_js else ""
     values = {
         "title": title, "v": v, "head_extra": head_extra,
         "styles": page_css, "body": page_html, "script": script,
-        "cls_home": "", "cls_files": "", "cls_settings": "", "cls_fonts": "",
+        "cls_home": "", "cls_files": "", "cls_anki": "", "cls_settings": "", "cls_fonts": "",
     }
     values[f"cls_{active}"] = ' class="active"'
     html = minify_html(render(base, values))

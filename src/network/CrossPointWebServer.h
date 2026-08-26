@@ -91,6 +91,7 @@ class CrossPointWebServer {
 
   // Request handlers
   void handleRoot() const;
+  void handleAnkiPage() const;
   void handleJszip() const;
   void handleStyleCss() const;
   void handleLogo() const;

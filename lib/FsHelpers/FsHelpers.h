@@ -72,6 +72,8 @@ bool hasEpubExtension(std::string_view fileName);
 inline bool hasEpubExtension(const String& fileName) {
   return hasEpubExtension(std::string_view{fileName.c_str(), fileName.length()});
 }
+// Check for .cdeck extension (case-insensitive)
+bool hasAnkiDeckExtension(std::string_view fileName);
 
 // Check for either .xtc or .xtch extension (case-insensitive)
 bool hasXtcExtension(std::string_view fileName);

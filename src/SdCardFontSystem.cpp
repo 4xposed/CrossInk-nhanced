@@ -317,6 +317,48 @@ int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*pointSize*
   return manager_.getFontId(familyName);
 }
 
+size_t SdCardFontSystem::listActiveFamilyCandidateSizes(uint8_t* const pointSizes, const size_t capacity) {
+  if (pointSizes == nullptr || capacity == 0 || SETTINGS.sdFontFamilyName[0] == '\0') return 0;
+
+  ensureRegistry();
+  const SdCardFontFamilyInfo* const family = registry_.findFamily(SETTINGS.sdFontFamilyName);
+  if (family == nullptr) return 0;
+
+  const SdCardFontFileInfo* const selected = family->findClosestFile(SETTINGS.getSdFontTargetPointSize());
+  if (selected == nullptr) return 0;
+
+  size_t count = 0;
+  bool havePrevious = false;
+  uint8_t previousPointSize = 0;
+  while (count < capacity) {
+    uint8_t nextPointSize = 0;
+    for (const SdCardFontFileInfo& file : family->files) {
+      if (file.style != 0 || file.pointSize < selected->pointSize ||
+          (havePrevious && file.pointSize >= previousPointSize)) {
+        continue;
+      }
+      if (file.pointSize > nextPointSize) nextPointSize = file.pointSize;
+    }
+    if (nextPointSize == 0) break;
+    pointSizes[count++] = nextPointSize;
+    previousPointSize = nextPointSize;
+    havePrevious = true;
+  }
+  return count;
+}
+
+int SdCardFontSystem::activateActiveFamilySize(GfxRenderer& renderer, const uint8_t pointSize) {
+  if (pointSize == 0 || SETTINGS.sdFontFamilyName[0] == '\0') return 0;
+
+  ensureRegistry();
+  const SdCardFontFamilyInfo* const family = registry_.findFamily(SETTINGS.sdFontFamilyName);
+  if (family == nullptr || family->findFile(pointSize) == nullptr) return 0;
+
+  if (!manager_.loadFamilyClosest(*family, renderer, pointSize)) return 0;
+  loadedFontPointSize_ = pointSize;
+  return manager_.getFontId(family->name);
+}
+
 bool SdCardFontSystem::changeReaderFontSize(const bool larger, const FontSizeStepMode mode) {
   if (SETTINGS.sdFontFamilyName[0] != '\0') {
     refreshIfDirty();

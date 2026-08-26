@@ -1,0 +1,53 @@
+<section class="card anki-intro">
+  <h2>Anki package converter</h2>
+  <p>Convert a local Anki package into a CrossInk deck. The package stays in this browser; only the converted deck is uploaded to the reader.</p>
+  <p class="anki-network-note">This converter downloads SQL.js from cdnjs, so this browser needs Internet access while converting.</p>
+</section>
+
+<section class="card anki-source">
+  <h2>Choose an Anki package</h2>
+  <label for="apkgFile">Anki package (.apkg)</label>
+  <input id="apkgFile" type="file" accept=".apkg,application/zip">
+  <p id="sourceSummary" class="anki-summary" hidden></p>
+  <ul id="skipReasons" class="anki-skips" hidden></ul>
+</section>
+
+<section id="noteTypeMappingSection" class="card anki-mappings" hidden>
+  <h2>Map note type fields</h2>
+  <p>Assign each field to Front or Back. Rows keep Anki field order; Primary fields are preferred for larger text when the reader can fit every field.</p>
+  <div id="noteTypeMappings"></div>
+  <template id="mappingTemplate">
+    <article class="anki-note-type">
+      <label class="anki-note-type-toggle"><input class="anki-note-type-enabled" type="checkbox"> <span class="anki-note-type-name"></span></label>
+      <div class="anki-field-rows"></div>
+      <label>Deck filename <input class="anki-deck-name" type="text" maxlength="96" autocomplete="off"></label>
+      <p class="anki-type-status" aria-live="polite"></p>
+    </article>
+  </template>
+  <template id="fieldMappingRowTemplate">
+    <div class="anki-field-row">
+      <span class="anki-field-name"></span>
+      <label>Side
+        <select class="anki-field-role">
+          <option value="">Do not include</option>
+          <option value="front">Front</option>
+          <option value="back">Back</option>
+        </select>
+      </label>
+      <label class="anki-field-primary-label"><input class="anki-field-primary" type="checkbox"> Primary</label>
+    </div>
+  </template>
+</section>
+
+<section class="card anki-outputs">
+  <h2>Converted decks</h2>
+  <ul id="deckOutputs" class="anki-outputs-list" hidden></ul>
+</section>
+
+<section class="card anki-upload">
+  <h2>Upload converted decks</h2>
+  <p>Each destination must not already contain its filename.</p>
+  <button id="uploadDeck" class="primary" type="button" disabled>Upload .cdeck files</button>
+</section>
+
+<p id="conversionStatus" class="status" role="status" aria-live="polite" hidden></p>
