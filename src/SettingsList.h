@@ -798,10 +798,6 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
                             "moveFinishedToReadFolder", StrId::STR_CAT_SYSTEM));
     add(SettingInfo::Toggle(StrId::STR_AUTO_BACKUP_STATS, &CrossPointSettings::autoBackupStats, "autoBackupStats",
                             StrId::STR_CAT_SYSTEM));
-    // Persisted and available to the web settings API, but category-less because
-    // the on-device editor lives under System > OPDS Servers.
-    add(SettingInfo::String(StrId::STR_OPDS_DOWNLOAD_FOLDER, SETTINGS.opdsDownloadFolder,
-                            sizeof(SETTINGS.opdsDownloadFolder), "opdsDownloadFolder"));
     // Persisted here, but edited from the nearby receive screen's folder picker.
     add(SettingInfo::String(StrId::STR_NEARBY_RECEIVE_FOLDER, SETTINGS.nearbyReceiveFolder,
                             sizeof(SETTINGS.nearbyReceiveFolder), "nearbyReceiveFolder"));

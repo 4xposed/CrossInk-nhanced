@@ -4,10 +4,9 @@
 #include <I18n.h>
 #include <Logging.h>
 
-#include <cstring>
-
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
+#include "activities/browser/OpdsDownloadPath.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -18,9 +17,9 @@
 namespace fui = freeink::ui;
 
 namespace {
-// Editable fields: Name, URL, Username, Password, Filename.
+// Editable fields: Name, URL, Username, Password, Filename, Download Folder.
 // Existing servers also show a Delete option (BASE_ITEMS + 1).
-constexpr int BASE_ITEMS = 5;
+constexpr int BASE_ITEMS = 6;
 constexpr fui::ActionId ACTION_ROW = 1;
 }  // namespace
 
@@ -206,7 +205,19 @@ void OpdsSettingsActivity::handleSelection() {
                                     : OpdsFilenameFormat::AUTHOR_TITLE;
     saveServer();
     requestUpdate();
-  } else if (selectedIndex == 5 && !isNewServer) {
+  } else if (selectedIndex == 5) {
+    auto handler = [this](const ActivityResult& result) {
+      if (!result.isCancelled) {
+        const auto& kb = std::get<KeyboardResult>(result.data);
+        editServer.downloadFolder = OpdsDownloadPath::normalizeConfiguredRoot(kb.text);
+        saveServer();
+        requestUpdate();
+      }
+    };
+    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_OPDS_DOWNLOAD_FOLDER),
+                                                                   editServer.downloadFolder, 63, InputType::Text),
+                           handler);
+  } else if (selectedIndex == 6 && !isNewServer) {
     // Delete flow is only available for existing servers.
     if (!OPDS_STORE.removeServer(static_cast<size_t>(serverIndex))) {
       LOG_ERR("OPS", "Failed to remove OPDS server at index %d", serverIndex);
@@ -236,7 +247,7 @@ void OpdsSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   const StrId fieldNames[] = {StrId::STR_SERVER_NAME, StrId::STR_OPDS_SERVER_URL, StrId::STR_USERNAME,
-                              StrId::STR_PASSWORD, StrId::STR_FILENAME};
+                              StrId::STR_PASSWORD,    StrId::STR_FILENAME,        StrId::STR_OPDS_DOWNLOAD_FOLDER};
   const int menuItems = getMenuItemCount();
   const char* values[BASE_ITEMS] = {
       editServer.name.empty() ? tr(STR_NOT_SET) : editServer.name.c_str(),
@@ -244,6 +255,7 @@ void OpdsSettingsActivity::buildListScreen(UiApp::ScreenType& screen) {
       editServer.username.empty() ? tr(STR_NOT_SET) : editServer.username.c_str(),
       editServer.password.empty() ? tr(STR_NOT_SET) : "******",
       editServer.filenameFormat == OpdsFilenameFormat::TITLE_AUTHOR ? tr(STR_TITLE_AUTHOR) : tr(STR_AUTHOR_TITLE),
+      editServer.downloadFolder.empty() ? tr(STR_OPDS_SD_ROOT) : editServer.downloadFolder.c_str(),
   };
 
   std::vector<fui::ListItem> items;

@@ -18,7 +18,8 @@ struct OpdsServer {
   std::string name;
   std::string url;
   std::string username;
-  std::string password;  // Plaintext in memory; obfuscated with hardware key on disk
+  std::string password;        // Plaintext in memory; obfuscated with hardware key on disk
+  std::string downloadFolder;  // Per-server SD-card root; empty means SD root
   OpdsFilenameFormat filenameFormat = OpdsFilenameFormat::AUTHOR_TITLE;
 };
 
@@ -31,6 +32,7 @@ class OpdsServerStore : public PersistableStore<OpdsServerStore> {
  private:
   std::vector<OpdsServer> servers;
   bool loaded_ = false;
+  bool clearLegacyDownloadFolderAfterLoad_ = false;
 
   static constexpr size_t MAX_SERVERS = 8;
 

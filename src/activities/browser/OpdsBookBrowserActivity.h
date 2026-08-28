@@ -39,9 +39,15 @@ class OpdsBookBrowserActivity final : public Activity {
   ButtonNavigator buttonNavigator;
   BrowserState state = BrowserState::LOADING;
   ScreenTransitionRefresh screenTransitionRefresh;
+  struct NavigationHistoryEntry {
+    std::string feedPath;
+    bool addsCatalogSegment = false;
+  };
+
   std::unique_ptr<OpdsEntry[]> entries;
   size_t entryCount = 0;
-  std::vector<std::string> navigationHistory;
+  std::vector<NavigationHistoryEntry> navigationHistory;
+  std::vector<std::string> catalogHierarchy;
   std::string currentPath;
   std::string searchTemplate;
   int selectorIndex = 0;

@@ -179,18 +179,27 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
       }
 
       if (self->inEntry) {
-        if (rel && type && strstr(rel, "opds-spec.org/acquisition") != nullptr &&
-            strcmp(type, "application/epub+zip") == 0) {
-          // Prefer plain EPUB links over derived formats when multiple
-          // acquisition links are present for one entry.
+        const bool isAcquisition = rel && type && strstr(rel, "opds-spec.org/acquisition") != nullptr;
+        if (isAcquisition && strcmp(type, "application/epub+zip") == 0) {
+          // Prefer plain EPUB links over derived formats and any XTC
+          // acquisition when multiple acquisition links are present.
           const bool isPlainEpub = strstr(href, ".epub") != nullptr || strstr(href, "/epub/") != nullptr;
           const bool alreadyHasPlainEpub = self->currentEntry.type == OpdsEntryType::BOOK &&
+                                           self->currentEntry.format == OpdsAcquisitionFormat::EPUB &&
                                            (self->currentEntry.href.find(".epub") != std::string::npos ||
                                             self->currentEntry.href.find("/epub/") != std::string::npos);
-          if (self->currentEntry.type != OpdsEntryType::BOOK || (isPlainEpub && !alreadyHasPlainEpub)) {
+          if (self->currentEntry.type != OpdsEntryType::BOOK ||
+              self->currentEntry.format == OpdsAcquisitionFormat::XTC ||
+              (isPlainEpub && !alreadyHasPlainEpub)) {
             self->currentEntry.type = OpdsEntryType::BOOK;
+            self->currentEntry.format = OpdsAcquisitionFormat::EPUB;
             assignBounded(self->currentEntry.href, href, MAX_HREF_CHARS);
           }
+        } else if (isAcquisition && strcmp(type, "application/vnd.xteink.xtc") == 0 &&
+                   self->currentEntry.type != OpdsEntryType::BOOK) {
+          self->currentEntry.type = OpdsEntryType::BOOK;
+          self->currentEntry.format = OpdsAcquisitionFormat::XTC;
+          assignBounded(self->currentEntry.href, href, MAX_HREF_CHARS);
         } else if (type && strstr(type, "application/atom+xml") != nullptr) {
           if (self->currentEntry.type != OpdsEntryType::BOOK) {
             self->currentEntry.type = OpdsEntryType::NAVIGATION;

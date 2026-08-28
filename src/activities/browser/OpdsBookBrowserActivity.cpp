@@ -12,8 +12,8 @@
 
 #include <utility>
 
-#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "OpdsDownloadPath.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -27,13 +27,13 @@
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
 #include "util/BookCacheUtils.h"
-#include "util/StringUtils.h"
 #include "util/UrlUtils.h"
 
 namespace fui = freeink::ui;
 
 namespace {
 constexpr size_t OPDS_BROWSER_ENTRY_CAPACITY = MAX_OPDS_FEED_ENTRIES + 2;
+constexpr size_t OPDS_NAVIGATION_HISTORY_CAPACITY = 8;
 constexpr size_t OPDS_DOWNLOAD_BUFFER_SIZE = 2048;
 constexpr fui::ActionId ACTION_ROW = 1;
 constexpr fui::ActionId ACTION_SEARCH = 2;
@@ -65,7 +65,12 @@ void OpdsBookBrowserActivity::onEnter() {
 
   state = BrowserState::CHECK_WIFI;
   entryCount = 0;
+  // Cold-path navigation state: reserve the usual hierarchy depth once rather
+  // than growing heap-backed vectors as the user browses.
   navigationHistory.clear();
+  navigationHistory.reserve(OPDS_NAVIGATION_HISTORY_CAPACITY);
+  catalogHierarchy.clear();
+  catalogHierarchy.reserve(OPDS_NAVIGATION_HISTORY_CAPACITY);
   searchTemplate = "";
   currentPath = "";
   selectorIndex = 0;
@@ -101,6 +106,7 @@ void OpdsBookBrowserActivity::onExit() {
   clearEntries();
   entries.reset();
   navigationHistory.clear();
+  catalogHierarchy.clear();
 
 #ifndef SIMULATOR
   if (WiFi.getMode() != WIFI_MODE_NULL) {
@@ -479,17 +485,21 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
   searchTemplate = "simulator://search?query={searchTerms}";
 
   if (path.empty()) {
-    appendEntry(OpdsEntry{OpdsEntryType::NAVIGATION, "Browse fiction", "", "/fiction", ""});
-    appendEntry(OpdsEntry{OpdsEntryType::BOOK, "The Left Hand of Darkness", "Ursula K. Le Guin",
-                          "/books/the-left-hand-of-darkness.epub", ""});
     appendEntry(
-        OpdsEntry{OpdsEntryType::BOOK, "A Room of One's Own", "Virginia Woolf", "/books/a-room-of-ones-own.epub", ""});
-    appendEntry(OpdsEntry{OpdsEntryType::BOOK, "Frankenstein", "Mary Shelley", "/books/frankenstein.epub", ""});
+        OpdsEntry{OpdsEntryType::NAVIGATION, OpdsAcquisitionFormat::EPUB, "Browse fiction", "", "/fiction", ""});
+    appendEntry(OpdsEntry{OpdsEntryType::BOOK, OpdsAcquisitionFormat::EPUB, "The Left Hand of Darkness",
+                          "Ursula K. Le Guin", "/books/the-left-hand-of-darkness.epub", ""});
+    appendEntry(OpdsEntry{OpdsEntryType::BOOK, OpdsAcquisitionFormat::EPUB, "A Room of One's Own", "Virginia Woolf",
+                          "/books/a-room-of-ones-own.epub", ""});
+    appendEntry(OpdsEntry{OpdsEntryType::BOOK, OpdsAcquisitionFormat::EPUB, "Frankenstein", "Mary Shelley",
+                          "/books/frankenstein.epub", ""});
   } else {
-    appendEntry(
-        OpdsEntry{OpdsEntryType::BOOK, "The Dispossessed", "Ursula K. Le Guin", "/books/the-dispossessed.epub", ""});
-    appendEntry(OpdsEntry{OpdsEntryType::BOOK, "Kindred", "Octavia E. Butler", "/books/kindred.epub", ""});
-    appendEntry(OpdsEntry{OpdsEntryType::BOOK, "The Time Machine", "H. G. Wells", "/books/the-time-machine.epub", ""});
+    appendEntry(OpdsEntry{OpdsEntryType::BOOK, OpdsAcquisitionFormat::EPUB, "The Dispossessed", "Ursula K. Le Guin",
+                          "/books/the-dispossessed.epub", ""});
+    appendEntry(OpdsEntry{OpdsEntryType::BOOK, OpdsAcquisitionFormat::EPUB, "Kindred", "Octavia E. Butler",
+                          "/books/kindred.epub", ""});
+    appendEntry(OpdsEntry{OpdsEntryType::BOOK, OpdsAcquisitionFormat::EPUB, "The Time Machine", "H. G. Wells",
+                          "/books/the-time-machine.epub", ""});
   }
 
   selectorIndex = 0;
@@ -549,15 +559,15 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     for (size_t i = entryCount; i > 0; --i) {
       entries[i] = std::move(entries[i - 1]);
     }
-    entries[0] = OpdsEntry{OpdsEntryType::NAVIGATION,
+    entries[0] = OpdsEntry{OpdsEntryType::NAVIGATION, OpdsAcquisitionFormat::EPUB,
                            std::string(mappedInput.resolveLabel(mappedInput.withPreviousPageArrow(tr(STR_PREV_PAGE)))),
-                           "", prevUrl, ""};
+                           "", prevUrl, "", true};
     entryCount++;
   }
   if (!nextUrl.empty() &&
-      !appendEntry(OpdsEntry{OpdsEntryType::NAVIGATION,
+      !appendEntry(OpdsEntry{OpdsEntryType::NAVIGATION, OpdsAcquisitionFormat::EPUB,
                              std::string(mappedInput.resolveLabel(mappedInput.withNextPageArrow(tr(STR_NEXT_PAGE)))),
-                             "", nextUrl, ""})) {
+                             "", nextUrl, "", true})) {
     LOG_DBG("OPDS", "No room for next-page entry");
   }
 
@@ -591,11 +601,15 @@ bool OpdsBookBrowserActivity::appendEntry(OpdsEntry&& entry) {
 }
 
 void OpdsBookBrowserActivity::navigateToEntry(const OpdsEntry& entry) {
-  navigationHistory.push_back(currentPath);
+  const bool addsCatalogSegment = !entry.isPagination;
+  navigationHistory.push_back({currentPath, addsCatalogSegment});
+  if (addsCatalogSegment) {
+    catalogHierarchy.push_back(entry.title);
+  }
+
   // Resolve to a full URL so sub-sub-navigation retains parent path context
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
   currentPath = UrlUtils::buildUrl(feedUrl, entry.href);
-
   clearEntries();
   selectorIndex = 0;
   showLoadingBeforeFetch();
@@ -606,8 +620,12 @@ void OpdsBookBrowserActivity::navigateBack() {
   if (navigationHistory.empty()) {
     onGoHome();
   } else {
-    currentPath = navigationHistory.back();
+    NavigationHistoryEntry previous = std::move(navigationHistory.back());
     navigationHistory.pop_back();
+    if (previous.addsCatalogSegment && !catalogHierarchy.empty()) {
+      catalogHierarchy.pop_back();
+    }
+    currentPath = std::move(previous.feedPath);
     clearEntries();
     selectorIndex = 0;
     showLoadingBeforeFetch();
@@ -630,28 +648,39 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   return;
 #endif
 
-  // Build full download URL relative to the current feed, not the root server URL
+  // Build full download URL relative to the current feed, not the root server URL.
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
-  std::string downloadUrl = UrlUtils::buildUrl(feedUrl, book.href);
+  const std::string downloadUrl = UrlUtils::buildUrl(feedUrl, book.href);
   // This temporary is intentionally retained until downloadToFile returns;
   // DownloadOptions borrows it to avoid copying the server URL per transfer.
   const std::string authorizationOrigin = UrlUtils::ensureProtocol(server.url);
-  const char* downloadFolder = SETTINGS.opdsDownloadFolder;
-  bool useDownloadFolder = downloadFolder[0] != '\0';
-  if (useDownloadFolder && !Storage.exists(downloadFolder) && !Storage.mkdir(downloadFolder)) {
-    LOG_ERR("OPDS", "Could not create download folder %s", downloadFolder);
-    state = BrowserState::ERROR;
-    errorMessage = tr(STR_DOWNLOAD_FAILED);
-    requestUpdate();
-    return;
-  }
 
-  std::string filename;
-  filename.reserve(96);
-  if (useDownloadFolder) filename += downloadFolder;
-  filename += '/';
-  filename += StringUtils::sanitizeFilename(buildBookFilenameBase(book, server.filenameFormat));
-  filename += ".epub";
+  std::string bookFilename = buildBookFilenameBase(book, server.filenameFormat);
+  switch (book.format) {
+    case OpdsAcquisitionFormat::EPUB:
+      bookFilename += ".epub";
+      break;
+    case OpdsAcquisitionFormat::XTC:
+      bookFilename += ".xtc";
+      break;
+  }
+  std::string filename = OpdsDownloadPath::buildDestinationPath(server.downloadFolder, catalogHierarchy, bookFilename);
+
+  // Temporarily terminate the final filename to create its parent hierarchy
+  // without allocating a second, path-sized string on the C3's constrained heap.
+  const size_t parentEnd = filename.find_last_of('/');
+  if (parentEnd > 0) {
+    filename[parentEnd] = '\0';
+    const bool parentReady = Storage.exists(filename.c_str()) || Storage.mkdir(filename.c_str(), true);
+    filename[parentEnd] = '/';
+    if (!parentReady) {
+      LOG_ERR("OPDS", "Could not create destination folder for %s", filename.c_str());
+      state = BrowserState::ERROR;
+      errorMessage = tr(STR_DOWNLOAD_FAILED);
+      requestUpdate();
+      return;
+    }
+  }
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
   bool cancelRequested = false;
@@ -770,7 +799,7 @@ void OpdsBookBrowserActivity::performSearch(const std::string& query) {
   const size_t pos = url.find(placeholder);
   if (pos != std::string::npos) url.replace(pos, placeholder.length(), urlEncode(query));
 
-  navigationHistory.push_back(currentPath);
+  navigationHistory.push_back({currentPath, false});
   currentPath = url;
 
   clearEntries();

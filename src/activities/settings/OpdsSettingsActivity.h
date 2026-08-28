@@ -11,8 +11,8 @@
 
 /**
  * Edit screen for a single OPDS server.
- * Shows Name, URL, Username, Password, Filename fields and a Delete option.
- * Used for both adding new servers and editing existing ones.
+ * Shows server credentials, filename format, download folder, and a Delete
+ * option. Used for both adding new servers and editing existing ones.
  */
 class OpdsSettingsActivity final : public Activity {
  public:

@@ -40,6 +40,7 @@ void OpdsServerStore::toJson(JsonDocument& doc) const {
     obj["url"] = server.url;
     obj["username"] = server.username;
     obj["password_obf"] = obfuscation::obfuscateToBase64(server.password);
+    obj["downloadFolder"] = server.downloadFolder;
     obj["filenameFormat"] = opdsFilenameFormatToJson(server.filenameFormat);
   }
 }
@@ -48,6 +49,7 @@ bool OpdsServerStore::fromJson(JsonVariantConst doc) {
   // Tolerate a missing/invalid 'servers' key (treat as empty list); only a
   // JSON parse error is fatal. A null JsonArray iterates zero times.
   servers.clear();
+  clearLegacyDownloadFolderAfterLoad_ = false;
   JsonArrayConst arr = doc["servers"].as<JsonArrayConst>();
   servers.reserve(std::min(arr.size(), MAX_SERVERS));
   bool needsResave = false;
@@ -58,6 +60,14 @@ bool OpdsServerStore::fromJson(JsonVariantConst doc) {
     server.name = obj["name"] | "";
     server.url = obj["url"] | "";
     server.username = obj["username"] | "";
+    const char* downloadFolder = obj["downloadFolder"].as<const char*>();
+    if (downloadFolder) {
+      server.downloadFolder = downloadFolder;
+    } else {
+      server.downloadFolder = SETTINGS.opdsDownloadFolder;
+      clearLegacyDownloadFolderAfterLoad_ = SETTINGS.opdsDownloadFolder[0] != '\0';
+      needsResave = true;
+    }
     server.filenameFormat = opdsFilenameFormatFromJson(obj["filenameFormat"] | "");
     obfuscation::DecodeStatus status = obfuscation::DecodeStatus::INVALID;
     server.password = obfuscation::deobfuscateFromBase64(obj["password_obf"] | "", &status);
@@ -76,7 +86,7 @@ bool OpdsServerStore::fromJson(JsonVariantConst doc) {
   }
 
   if (needsResave) {
-    LOG_DBG("OPS", "Resaving JSON with obfuscated passwords");
+    LOG_DBG("OPS", "Resaving migrated OPDS server configuration");
     requestResave();
   }
 
@@ -85,9 +95,20 @@ bool OpdsServerStore::fromJson(JsonVariantConst doc) {
 
 bool OpdsServerStore::loadFromFile() {
   servers.clear();
+  clearLegacyDownloadFolderAfterLoad_ = false;
   loaded_ = true;
   const bool hasStoreFile = Storage.exists(getFilePath());
   if (PersistableStore<OpdsServerStore>::loadFromFile()) {
+    if (clearLegacyDownloadFolderAfterLoad_) {
+      if (saveToFile()) {
+        SETTINGS.opdsDownloadFolder[0] = '\0';
+        if (!SETTINGS.saveToFile()) {
+          LOG_ERR("OPS", "Could not clear legacy OPDS download folder setting");
+        }
+      } else {
+        LOG_ERR("OPS", "Could not persist migrated OPDS download folders");
+      }
+    }
     return true;
   }
   if (hasStoreFile) {
@@ -122,6 +143,7 @@ bool OpdsServerStore::migrateFromSettings() {
   server.url = SETTINGS.opdsServerUrl;
   server.username = SETTINGS.opdsUsername;
   server.password = SETTINGS.opdsPassword;
+  server.downloadFolder = SETTINGS.opdsDownloadFolder;
   servers.push_back(std::move(server));
 
   if (saveToFile()) {
@@ -129,6 +151,7 @@ bool OpdsServerStore::migrateFromSettings() {
     SETTINGS.opdsServerUrl[0] = '\0';
     SETTINGS.opdsUsername[0] = '\0';
     SETTINGS.opdsPassword[0] = '\0';
+    SETTINGS.opdsDownloadFolder[0] = '\0';
     SETTINGS.saveToFile();
     LOG_DBG("OPS", "Migrated single-server OPDS config to opds.json");
     return true;

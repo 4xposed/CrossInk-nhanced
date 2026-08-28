@@ -15,6 +15,8 @@ enum class OpdsEntryType {
   BOOK         // Downloadable book
 };
 
+enum class OpdsAcquisitionFormat { EPUB, XTC };
+
 enum class OpdsParserError { NONE, NO_ENTRY_BUFFER, INVALID_INPUT, PARSER_MEMORY, BUFFER_MEMORY, XML_PARSE };
 
 /**
@@ -22,10 +24,12 @@ enum class OpdsParserError { NONE, NO_ENTRY_BUFFER, INVALID_INPUT, PARSER_MEMORY
  */
 struct OpdsEntry {
   OpdsEntryType type = OpdsEntryType::NAVIGATION;
+  OpdsAcquisitionFormat format = OpdsAcquisitionFormat::EPUB;
   std::string title;
   std::string author;  // Only for books
-  std::string href;    // Navigation URL or epub download URL
+  std::string href;    // Navigation URL or book download URL
   std::string id;
+  bool isPagination = false;  // Browser-injected page links do not form a local directory level
 };
 
 // Legacy alias for backward compatibility
