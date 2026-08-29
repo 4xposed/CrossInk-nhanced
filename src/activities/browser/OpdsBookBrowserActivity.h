@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "OpdsDownloadedBook.h"
 #include "OpdsServerStore.h"
 #include "activities/Activity.h"
 #include "activities/ScreenTransitionRefresh.h"
@@ -50,6 +51,9 @@ class OpdsBookBrowserActivity final : public Activity {
   std::vector<std::string> catalogHierarchy;
   std::string currentPath;
   std::string searchTemplate;
+  OpdsDownloadedBook downloadedBook;
+  bool consumeConfirm = false;
+  bool consumeBack = false;
   int selectorIndex = 0;
   std::string errorMessage;
   std::string statusMessage;
@@ -68,9 +72,9 @@ class OpdsBookBrowserActivity final : public Activity {
   // Read by HttpDownloader between chunks; set by the Cancel button handler or
   // a Back press, both pumped from the download's progress callback.
   bool cancelDownload = false;
-  // A blocking downloader consumes the one-shot Home event itself. Defer the
-  // activity exit until HttpDownloader has unwound and closed the partial file.
-  bool goHomeAfterCancel = false;
+  // A blocking HTTP request consumes the Exit input itself. Defer activity exit
+  // until it has unwound and closed its connection or partial file.
+  bool exitAfterCancellation = false;
 
   // Single screen fn dispatching on `state`: every state shares the themed
   // header and gets built through FreeInkUI.
@@ -95,6 +99,8 @@ class OpdsBookBrowserActivity final : public Activity {
   void navigateToEntry(const OpdsEntry& entry);
   void navigateBack();
   void downloadBook(const OpdsEntry& book);
+  void openDownloadedBook(const OpdsEntry& book);
+  std::string buildDownloadDestination(const OpdsEntry& book) const;
   void launchSearch();
   void performSearch(const std::string& query);
   bool preventAutoSleep() override;

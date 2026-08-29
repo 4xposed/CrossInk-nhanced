@@ -36,6 +36,7 @@ THEMES = {
     "carousel": 4,
     "dashboard": 6,
 }
+OPDS_SIMULATOR_BOOK = "Ursula K. Le Guin - The Left Hand of Darkness.epub"
 
 
 def program_path(env_name: str) -> Path:
@@ -55,6 +56,7 @@ def prepare_fs(temp_root: Path, book: Path) -> str:
 
     target = books_dir / book.name
     shutil.copy2(book, target)
+    shutil.copy2(book, temp_root / "fs_" / OPDS_SIMULATOR_BOOK)
     return f"/books/{book.name}"
 
 

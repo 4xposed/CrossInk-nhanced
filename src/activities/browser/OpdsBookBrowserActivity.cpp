@@ -12,6 +12,7 @@
 
 #include <utility>
 
+#include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "OpdsDownloadPath.h"
 #include "SdCardFontSystem.h"
@@ -74,7 +75,11 @@ void OpdsBookBrowserActivity::onEnter() {
   searchTemplate = "";
   currentPath = "";
   selectorIndex = 0;
+  downloadedBook.clear();
+  consumeConfirm = false;
+  consumeBack = false;
   errorMessage.clear();
+  exitAfterCancellation = false;
   statusMessage = tr(STR_CHECKING_WIFI);
 
   uiReady = false;
@@ -122,7 +127,15 @@ void OpdsBookBrowserActivity::onExit() {
 void OpdsBookBrowserActivity::activateSelected() {
   if (!entries || entryCount == 0 || selectorIndex < 0 || selectorIndex >= static_cast<int>(entryCount)) return;
   const auto& entry = entries[selectorIndex];
-  entry.type == OpdsEntryType::BOOK ? downloadBook(entry) : navigateToEntry(entry);
+  if (entry.type == OpdsEntryType::BOOK) {
+    if (downloadedBook.matches(static_cast<size_t>(selectorIndex))) {
+      openDownloadedBook(entry);
+    } else {
+      downloadBook(entry);
+    }
+    return;
+  }
+  navigateToEntry(entry);
 }
 
 void OpdsBookBrowserActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
@@ -158,7 +171,9 @@ void OpdsBookBrowserActivity::loop() {
   if (state == BrowserState::ERROR) {
     int tx = 0;
     int ty = 0;
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(tx, ty)) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      onGoHome();
+    } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) || mappedInput.wasScreenTapped(tx, ty)) {
       if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
         showLoadingBeforeFetch();
         fetchFeed(currentPath);
@@ -172,7 +187,9 @@ void OpdsBookBrowserActivity::loop() {
   }
 
   if (state == BrowserState::CHECK_WIFI || state == BrowserState::LOADING) {
-    if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      onGoHome();
+    } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       state == BrowserState::CHECK_WIFI ? onGoHome() : navigateBack();
     }
     return;
@@ -183,6 +200,10 @@ void OpdsBookBrowserActivity::loop() {
     if (uiReady) {
       const fui::InputSnapshot snap = touchSnapshotFrom(mappedInput);
       if (snap.touchPressed || snap.touchReleased) app.route(snap);
+    }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      onGoHome();
+      return;
     }
     if (cancelDownload || mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       cancelDownload = false;
@@ -198,6 +219,13 @@ void OpdsBookBrowserActivity::loop() {
       navigateBack();
       return;
     }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      onGoHome();
+      return;
+    }
+    // Right used to be a duplicate of side-button Down. Suppress its old
+    // ButtonNavigator path while held so it is exclusively the Exit action.
+    if (mappedInput.isPressed(MappedInputManager::Button::Right)) return;
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       activateSelected();
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -438,21 +466,22 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
   MappedInputManager::Labels labels;
   switch (state) {
     case BrowserState::BROWSING: {
+      const bool selectedBook = entryCount > 0 && entries[selectorIndex].type == OpdsEntryType::BOOK;
       const char* confirmLabel =
-          (entryCount > 0 && entries[selectorIndex].type == OpdsEntryType::BOOK) ? tr(STR_DOWNLOAD) : tr(STR_OPEN);
+          selectedBook ? (downloadedBook.matches(static_cast<size_t>(selectorIndex)) ? tr(STR_OPEN) : tr(STR_DOWNLOAD))
+                       : tr(STR_OPEN);
       const char* searchLabel = (!searchTemplate.empty() && selectorIndex == 0) ? tr(STR_SEARCH) : tr(STR_DIR_UP);
-      labels =
-          mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), confirmLabel, searchLabel, tr(STR_DIR_DOWN));
+      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), confirmLabel, searchLabel, tr(STR_EXIT));
       break;
     }
     case BrowserState::DOWNLOADING:
-      labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", "");
+      labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", tr(STR_EXIT));
       break;
     case BrowserState::ERROR:
-      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_RETRY), "", "");
+      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_RETRY), "", tr(STR_EXIT));
       break;
     default:
-      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
+      labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", tr(STR_EXIT));
       break;
   }
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -479,6 +508,7 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     requestUpdate();
     return;
   }
+  downloadedBook.clear();
 
 #ifdef SIMULATOR
   clearEntries();
@@ -528,9 +558,20 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     HttpDownloader::DownloadOptions downloadOptions;
     downloadOptions.transport = HttpDownloader::Transport::WOLFSSL;
     downloadOptions.authorizationOrigin = authorizationOrigin;
+    downloadOptions.shouldCancel = [this] {
+      mappedInput.update();
+      if (mappedInput.wasHomeGesture() || mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+        exitAfterCancellation = true;
+      }
+      return exitAfterCancellation;
+    };
     const auto result = HttpDownloader::streamUrl(
         url, [&stream](const uint8_t* data, const size_t len) { return stream.write(data, len) == len; }, nullptr,
         server.username, server.password, std::move(downloadOptions));
+    if (result == HttpDownloader::ABORTED && exitAfterCancellation) {
+      onGoHome();
+      return;
+    }
     if (result != HttpDownloader::OK) {
       state = BrowserState::ERROR;
       errorMessage = tr(STR_FETCH_FEED_FAILED);
@@ -633,17 +674,56 @@ void OpdsBookBrowserActivity::navigateBack() {
   }
 }
 
+std::string OpdsBookBrowserActivity::buildDownloadDestination(const OpdsEntry& book) const {
+  std::string filename = buildBookFilenameBase(book, server.filenameFormat);
+  switch (book.format) {
+    case OpdsAcquisitionFormat::EPUB:
+      filename += ".epub";
+      break;
+    case OpdsAcquisitionFormat::XTC:
+      filename += ".xtc";
+      break;
+  }
+  return OpdsDownloadPath::buildDestinationPath(server.downloadFolder, catalogHierarchy, filename);
+}
+
+void OpdsBookBrowserActivity::openDownloadedBook(const OpdsEntry& book) {
+  std::string filename = buildDownloadDestination(book);
+  if (!Storage.exists(filename.c_str())) {
+    LOG_ERR("OPDS", "Downloaded book is missing: %s", filename.c_str());
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_DOWNLOAD_FAILED);
+    requestUpdate();
+    return;
+  }
+
+  APP_STATE.openEpubPath = std::move(filename);
+  if (!APP_STATE.saveToFile()) {
+    LOG_ERR("OPDS", "Failed to save downloaded book path");
+    state = BrowserState::ERROR;
+    errorMessage = tr(STR_DOWNLOAD_FAILED);
+    requestUpdate();
+    return;
+  }
+
+#ifdef SIMULATOR
+  activityManager.goToReader(APP_STATE.openEpubPath);
+#else
+  silentRestartToReader();
+#endif
+}
+
 void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   state = BrowserState::DOWNLOADING;
   statusMessage = book.title;
   downloadProgress = downloadTotal = 0;
   cancelDownload = false;
-  goHomeAfterCancel = false;
+  exitAfterCancellation = false;
   requestUpdate(true);
 
 #ifdef SIMULATOR
-  downloadProgress = 1;
-  downloadTotal = 2;
+  downloadedBook.record(static_cast<size_t>(selectorIndex));
+  state = BrowserState::BROWSING;
   requestUpdate(true);
   return;
 #endif
@@ -655,16 +735,7 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // DownloadOptions borrows it to avoid copying the server URL per transfer.
   const std::string authorizationOrigin = UrlUtils::ensureProtocol(server.url);
 
-  std::string bookFilename = buildBookFilenameBase(book, server.filenameFormat);
-  switch (book.format) {
-    case OpdsAcquisitionFormat::EPUB:
-      bookFilename += ".epub";
-      break;
-    case OpdsAcquisitionFormat::XTC:
-      bookFilename += ".xtc";
-      break;
-  }
-  std::string filename = OpdsDownloadPath::buildDestinationPath(server.downloadFolder, catalogHierarchy, bookFilename);
+  std::string filename = buildDownloadDestination(book);
 
   // Temporarily terminate the final filename to create its parent hierarchy
   // without allocating a second, path-sized string on the C3's constrained heap.
@@ -690,8 +761,8 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
       return true;
     }
     mappedInput.update();
-    if (mappedInput.wasHomeGesture()) {
-      goHomeAfterCancel = true;
+    if (mappedInput.wasHomeGesture() || mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+      exitAfterCancellation = true;
       cancelRequested = true;
     }
     if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
@@ -718,8 +789,8 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
         // The activity loop is blocked for the whole download; pump input here
         // so the Cancel button or a Back press can abort mid-transfer.
         mappedInput.update();
-        if (mappedInput.wasHomeGesture()) {
-          goHomeAfterCancel = true;
+        if (mappedInput.wasHomeGesture() || mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+          exitAfterCancellation = true;
           cancelRequested = true;
         }
         if (mappedInput.wasReleased(MappedInputManager::Button::Back)) cancelRequested = true;
@@ -741,10 +812,11 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
 
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);
+    downloadedBook.record(static_cast<size_t>(selectorIndex));
     state = BrowserState::BROWSING;
   } else if (result == HttpDownloader::ABORTED) {
     LOG_INF("OPDS", "Download cancelled");
-    if (goHomeAfterCancel) {
+    if (exitAfterCancellation) {
       onGoHome();
       return;
     }

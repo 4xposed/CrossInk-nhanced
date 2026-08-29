@@ -3,14 +3,10 @@
 #include "SimulatorSmokeTest.h"
 
 #include <AnkiDeck.h>
-
-#include <HalStorage.h>
 #include <FsHelpers.h>
-#include <ReviewStateStore.h>
-
-#include "components/TouchRegistry.h"
-
+#include <HalStorage.h>
 #include <Logging.h>
+#include <ReviewStateStore.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -23,12 +19,16 @@
 #include "MappedInputManager.h"
 #include "SettingsList.h"
 #include "activities/ActivityManager.h"
+#include "activities/browser/OpdsBookBrowserActivity.h"
 #include "activities/reader/EpubReaderMenuActivity.h"
 #include "activities/reader/ReaderOptionsActivity.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/settings/QuickActionsActivity.h"
 #include "components/TouchHeaderBackButton.h"
+#include "components/TouchRegistry.h"
 #include "components/UITheme.h"
+#include "components/UIThemeTokens.h"
+#include "components/UiAppHelpers.h"
 #include "simulator/SimulatorHomeKeyInput.h"
 
 extern ActivityManager activityManager;
@@ -40,6 +40,16 @@ namespace {
 enum class SmokeStep : uint8_t {
   Start,
   Home,
+  OpdsBrowser,
+  OpdsSelectBook,
+  OpdsDownloadRelease,
+  OpdsOpen,
+  OpdsOpenRelease,
+  OpdsExit,
+  OpdsExitBrowser,
+  OpdsExitRelease,
+  OpdsExitCheck,
+  OpdsExitHome,
   FileBrowser,
   FileBrowserSettings,
   RecentBooks,
@@ -399,6 +409,63 @@ class SimulatorSmokeTest {
         break;
 
       case SmokeStep::Home:
+        activityManager.replaceActivity(std::make_unique<OpdsBookBrowserActivity>(
+            renderer, mappedInputManager, OpdsServer{"Simulator", "simulator://"}));
+        queueStep("OPDS Browser", SmokeStep::OpdsBrowser);
+        break;
+
+      case SmokeStep::OpdsBrowser:
+        if (!activityManager.isCurrentActivityNamed("OpdsBookBrowser")) fail("OPDS browser did not open");
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Down);
+        step = SmokeStep::OpdsSelectBook;
+        break;
+
+      case SmokeStep::OpdsSelectBook:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Down);
+        queueStep("OPDS book selected", SmokeStep::OpdsDownloadRelease);
+        break;
+
+      case SmokeStep::OpdsDownloadRelease:
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        step = SmokeStep::OpdsOpen;
+        break;
+
+      case SmokeStep::OpdsOpen:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+        queueStep("OPDS book downloaded", SmokeStep::OpdsOpenRelease);
+        break;
+
+      case SmokeStep::OpdsOpenRelease:
+        if (!activityManager.isCurrentActivityNamed("OpdsBookBrowser"))
+          fail("OPDS download did not return to the browser");
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        step = SmokeStep::OpdsExit;
+        break;
+
+      case SmokeStep::OpdsExit:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+        queueStep("Reader opened from OPDS", SmokeStep::OpdsExitBrowser, 8);
+        break;
+
+      case SmokeStep::OpdsExitBrowser:
+        if (!activityManager.isCurrentActivityNamed("EpubReader")) fail("OPDS Open did not start the reader");
+        activityManager.replaceActivity(std::make_unique<OpdsBookBrowserActivity>(
+            renderer, mappedInputManager, OpdsServer{"Simulator", "simulator://"}));
+        queueStep("OPDS Browser before Exit", SmokeStep::OpdsExitRelease);
+        break;
+
+      case SmokeStep::OpdsExitRelease:
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Right);
+        step = SmokeStep::OpdsExitCheck;
+        break;
+
+      case SmokeStep::OpdsExitCheck:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Right);
+        queueStep("Home after OPDS Exit", SmokeStep::OpdsExitHome);
+        break;
+
+      case SmokeStep::OpdsExitHome:
+        if (!activityManager.isCurrentActivityNamed("Home")) fail("OPDS Exit did not return home");
         activityManager.goToFileBrowser("/books");
         queueStep("File Browser", SmokeStep::FileBrowser);
         break;
@@ -1092,8 +1159,8 @@ class SimulatorSmokeTest {
         ReviewState first{};
         ReviewState second{};
         if (!state.read(0, first) || !state.read(1, second)) fail("Could not read Anki review state");
-        if (state.reviewCount() != 1 || first.kind != ReviewKind::Review ||
-            first.dueDay != state.reviewCount() + 1 || second.kind != ReviewKind::New) {
+        if (state.reviewCount() != 1 || first.kind != ReviewKind::Review || first.dueDay != state.reviewCount() + 1 ||
+            second.kind != ReviewKind::New) {
           fail("Good grade did not persist the review count and next Anki candidate");
         }
         LOG_INF("SMOKE", "Verified Anki review counter and next candidate after Good");
