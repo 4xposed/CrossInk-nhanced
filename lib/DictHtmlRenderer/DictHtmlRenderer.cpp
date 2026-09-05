@@ -2,7 +2,9 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -45,6 +47,33 @@ bool isDictionaryBullet(uint32_t cp) {
       return false;
   }
 }
+
+bool isHtmlClassSpace(const char value) {
+  return value == ' ' || value == '\t' || value == '\n' || value == '\f' || value == '\r';
+}
+
+bool hasIpaClassToken(const char* value) {
+  if (!value) return false;
+  while (*value) {
+    while (isHtmlClassSpace(*value)) ++value;
+    const char* token = value;
+    while (*value && !isHtmlClassSpace(*value)) ++value;
+    if (value - token == 3 && asciiLower(token[0]) == 'i' && asciiLower(token[1]) == 'p' && asciiLower(token[2]) == 'a')
+      return true;
+  }
+  return false;
+}
+
+struct LegacySpanBridge {
+  DictHtmlRenderer::SpanSink sink;
+
+  static bool emit(void* context, const StyledSpan& span) {
+    auto& self = *static_cast<LegacySpanBridge*>(context);
+    if (!self.sink.fn) return false;
+    self.sink(span);
+    return true;
+  }
+};
 
 int encodeUtf8(uint32_t cp, char out[4]) {
   if (cp <= 0x7F) {
@@ -111,8 +140,8 @@ DictHtmlRenderer::TagAction DictHtmlRenderer::classify(const XML_Char* name) {
   if (strcmp(name, "em") == 0) return TagAction::FORMAT_ITALIC;
   if (strcmp(name, "u") == 0) return TagAction::FORMAT_UNDERLINE;
   if (strcmp(name, "s") == 0) return TagAction::FORMAT_STRIKE;
-  if (strcmp(name, "sup") == 0) return TagAction::FORMAT_SMALL;
-  if (strcmp(name, "sub") == 0) return TagAction::FORMAT_SMALL;
+  if (strcmp(name, "sup") == 0) return TagAction::FORMAT_SUPERSCRIPT;
+  if (strcmp(name, "sub") == 0) return TagAction::FORMAT_SUBSCRIPT;
   if (strcmp(name, "code") == 0) return TagAction::FORMAT_CODE;
   if (strcmp(name, "tt") == 0) return TagAction::FORMAT_CODE;
   if (strcmp(name, "small") == 0) return TagAction::FORMAT_SMALL;
@@ -182,6 +211,14 @@ DictHtmlRenderer::~DictHtmlRenderer() {
   }
 }
 
+bool DictHtmlRenderer::ensureLegacyStreamBuffer() {
+  if (legacyStreamBuffer_) return true;
+  legacyStreamBuffer_ = makeUniqueNoThrow<char[]>(kStreamBufferBytes);
+  if (legacyStreamBuffer_) return true;
+  LOG_ERR("DHTML", "OOM: %u byte legacy stream buffer", static_cast<unsigned>(kStreamBufferBytes));
+  return false;
+}
+
 void DictHtmlRenderer::reset() {
   spans.clear();
   textBuf.clear();
@@ -196,13 +233,19 @@ void DictHtmlRenderer::reset() {
   newlinePending = false;
   listItemPending = false;
   spanSink_ = SpanSink{};  // batch mode by default; streaming sets it after reset()
+  controlledSpanSink_ = ControlledSpanSink{};
+  streamStatus_ = DictHtmlStreamStatus::Success;
+  parserActive_ = false;
 
   // Reuse the existing parser (cheap reset) rather than free+create on every
   // render. Only the first call (null parser) allocates. XML_ParserReset clears
   // handlers + user data; callers re-apply them after reset (parseOpenFile,
   // render). Pays off because the renderer is now a reused activity member.
   if (parser) {
-    XML_ParserReset(parser, nullptr);
+    if (XML_ParserReset(parser, nullptr) == XML_FALSE) {
+      XML_ParserFree(parser);
+      parser = nullptr;
+    }
   } else {
     parser = XML_ParserCreate(nullptr);
   }
@@ -224,11 +267,30 @@ void DictHtmlRenderer::pushSpan() {
   span.italic = fmt.italic;
   span.underline = fmt.underline;
   span.strikethrough = fmt.strikethrough;
+  span.superscript = fmt.superscript;
+  span.subscript = fmt.subscript;
+  span.ipa = fmt.ipa;
   span.indentLevel = fmt.indentLevel;
   span.newlineBefore = newlinePending;
   span.isListItem = listItemPending;
 
-  if (spanSink_.fn) {
+  if (controlledSpanSink_.onSpan) {
+    span.text = pendingText.c_str();
+    span.textOffset = 0;
+    if (controlledSpanSink_.shouldCancel && controlledSpanSink_.shouldCancel(controlledSpanSink_.ctx)) {
+      streamStatus_ = DictHtmlStreamStatus::Cancelled;
+      parseError = true;
+      if (parserActive_) XML_StopParser(parser, XML_FALSE);
+    } else if (!controlledSpanSink_.onSpan(controlledSpanSink_.ctx, span)) {
+      streamStatus_ = DictHtmlStreamStatus::SinkRejected;
+      parseError = true;
+      if (parserActive_) XML_StopParser(parser, XML_FALSE);
+    } else if (controlledSpanSink_.shouldCancel && controlledSpanSink_.shouldCancel(controlledSpanSink_.ctx)) {
+      streamStatus_ = DictHtmlStreamStatus::Cancelled;
+      parseError = true;
+      if (parserActive_) XML_StopParser(parser, XML_FALSE);
+    }
+  } else if (spanSink_.fn) {
     // Streaming: deliver the span immediately. text points into pendingText and
     // is valid only for the duration of the call — the sink copies it. textBuf
     // and the spans vector are never grown.
@@ -254,7 +316,7 @@ void DictHtmlRenderer::pushSpan() {
 
 void DictHtmlRenderer::emitText(const char* s, int len) {
   if (len <= 0) return;
-  for (int i = 0; i < len; i++) {
+  for (int i = 0; i < len && !parseError; i++) {
     if (i + 2 < len && static_cast<unsigned char>(s[i]) >= 0xE0 && static_cast<unsigned char>(s[i]) <= 0xEF &&
         (static_cast<unsigned char>(s[i + 1]) & 0xC0) == 0x80 &&
         (static_cast<unsigned char>(s[i + 2]) & 0xC0) == 0x80) {
@@ -331,8 +393,25 @@ void XMLCALL DictHtmlRenderer::onStart(void* ud, const XML_Char* name, const XML
         self->fmt.strikethrough = true;
         break;
 
+      case TagAction::FORMAT_SUPERSCRIPT:
+        self->flushPending();
+        self->fmt.superscript = true;
+        break;
+
+      case TagAction::FORMAT_SUBSCRIPT:
+        self->flushPending();
+        self->fmt.subscript = true;
+        break;
+
       case TagAction::FORMAT_SMALL:
         self->flushPending();
+        break;
+
+      case TagAction::SPAN:
+        if (hasIpaClassToken(findAttr(atts, "class"))) {
+          self->flushPending();
+          self->fmt.ipa = true;
+        }
         break;
 
       case TagAction::FORMAT_CODE:
@@ -399,7 +478,7 @@ void XMLCALL DictHtmlRenderer::onStart(void* ud, const XML_Char* name, const XML
     }
   }
 
-  self->tagStack.push_back(entry);
+  if (!self->parseError) self->tagStack.push_back(entry);
 }
 
 void XMLCALL DictHtmlRenderer::onEnd(void* ud, const XML_Char* name) {
@@ -417,6 +496,8 @@ void XMLCALL DictHtmlRenderer::onEnd(void* ud, const XML_Char* name) {
       case TagAction::FORMAT_ITALIC:
       case TagAction::FORMAT_UNDERLINE:
       case TagAction::FORMAT_STRIKE:
+      case TagAction::FORMAT_SUPERSCRIPT:
+      case TagAction::FORMAT_SUBSCRIPT:
       case TagAction::FORMAT_SMALL:
       case TagAction::FORMAT_CODE:
       case TagAction::VAR:
@@ -962,13 +1043,17 @@ void DictHtmlRenderer::parseOpenFile(HalFile& file, uint32_t size) {
   }
 
   if (!parseError) {
-    char chunk[512];
+    if (!ensureLegacyStreamBuffer()) {
+      parseError = true;
+      return;
+    }
+    char* const chunk = legacyStreamBuffer_.get();
     char entityCarry[64];
     int entityCarryLen = 0;
     uint32_t remaining = size;
 
     while (remaining > 0 && !parseError) {
-      const uint32_t toRead = remaining < sizeof(chunk) ? remaining : static_cast<uint32_t>(sizeof(chunk));
+      const uint32_t toRead = remaining < kStreamBufferBytes ? remaining : static_cast<uint32_t>(kStreamBufferBytes);
       int n = file.read(reinterpret_cast<uint8_t*>(chunk), static_cast<int>(toRead));
       if (n <= 0) break;
       remaining -= static_cast<uint32_t>(n);
@@ -1000,6 +1085,62 @@ void DictHtmlRenderer::parseOpenFile(HalFile& file, uint32_t size) {
   }
 }
 
+DictHtmlStreamStatus DictHtmlRenderer::parseOpenFileBuffered(HalFile& file, uint32_t size, char* chunk,
+                                                             const size_t chunkSize) {
+  XML_SetUserData(parser, this);
+  XML_SetElementHandler(parser, onStart, onEnd);
+  XML_SetCharacterDataHandler(parser, onText);
+
+  static constexpr const char kOpen[] = "<_root>";
+  static constexpr const char kClose[] = "</_root>";
+
+  parserActive_ = true;
+  if (XML_Parse(parser, kOpen, static_cast<int>(sizeof(kOpen) - 1), 0) != XML_STATUS_OK) {
+    parseError = true;
+  }
+  parserActive_ = false;
+
+  char entityCarry[64];
+  int entityCarryLen = 0;
+  uint32_t remaining = size;
+  while (remaining > 0 && !parseError) {
+    if (controlledSpanSink_.shouldCancel && controlledSpanSink_.shouldCancel(controlledSpanSink_.ctx)) {
+      streamStatus_ = DictHtmlStreamStatus::Cancelled;
+      break;
+    }
+    const size_t boundedChunk = std::min<size_t>(chunkSize, 512);
+    const uint32_t wanted = remaining < boundedChunk ? remaining : static_cast<uint32_t>(boundedChunk);
+    const int count = file.read(reinterpret_cast<uint8_t*>(chunk), static_cast<int>(wanted));
+    if (count != static_cast<int>(wanted)) {
+      streamStatus_ = DictHtmlStreamStatus::ReadError;
+      break;
+    }
+    remaining -= wanted;
+    normalizeHtmlChunk(chunk, count, remaining == 0);
+    if (entityCarryLen > 0) normalizedHtml_.insert(0, entityCarry, static_cast<size_t>(entityCarryLen));
+    entityCarryLen = 0;
+    parserActive_ = true;
+    feedEntityResolved(normalizedHtml_.data(), static_cast<int>(normalizedHtml_.size()),
+                       remaining == 0 && htmlCarry_.empty() && !discardTagUntilClose_, entityCarry, &entityCarryLen);
+    parserActive_ = false;
+  }
+
+  if (streamStatus_ == DictHtmlStreamStatus::Success && entityCarryLen > 0 && !parseError) {
+    parserActive_ = true;
+    feedEntityResolved(entityCarry, entityCarryLen, true, nullptr, nullptr);
+    parserActive_ = false;
+  }
+  if (streamStatus_ == DictHtmlStreamStatus::Success && !parseError) {
+    parserActive_ = true;
+    if (XML_Parse(parser, kClose, static_cast<int>(sizeof(kClose) - 1), 1) != XML_STATUS_OK) parseError = true;
+    parserActive_ = false;
+  }
+  if (streamStatus_ == DictHtmlStreamStatus::Success && !parseError) flushPending();
+
+  if (streamStatus_ != DictHtmlStreamStatus::Success) return streamStatus_;
+  return parseError ? DictHtmlStreamStatus::ParseError : DictHtmlStreamStatus::Success;
+}
+
 const std::vector<StyledSpan>& DictHtmlRenderer::renderFromFile(const char* dictPath, uint32_t offset, uint32_t size) {
   reset();
 
@@ -1028,35 +1169,70 @@ const std::vector<StyledSpan>& DictHtmlRenderer::renderFromFile(const char* dict
 
 bool DictHtmlRenderer::renderFromFileStreaming(const char* dictPath, uint32_t offset, uint32_t size,
                                                const SpanSink& sink) {
-  reset();
-  spanSink_ = sink;  // install for this parse; pushSpan() now streams to the sink
+  if (!ensureLegacyStreamBuffer()) return false;
+  LegacySpanBridge bridge{sink};
+  const ControlledSpanSink controlled{&bridge, LegacySpanBridge::emit, nullptr};
+  return renderFromFileStreamingBuffered(dictPath, offset, size, controlled, legacyStreamBuffer_.get(),
+                                         kStreamBufferBytes) == DictHtmlStreamStatus::Success;
+}
 
+DictHtmlStreamStatus DictHtmlRenderer::renderFromFileStreamingBuffered(const char* dictPath, uint32_t offset,
+                                                                       uint32_t size, const ControlledSpanSink& sink,
+                                                                       char* chunk, const size_t chunkSize) {
+  reset();
+  controlledSpanSink_ = sink;
   if (!parser) {
-    parseError = true;
-    spanSink_ = SpanSink{};
-    return false;
+    LOG_ERR("DHTML", "OOM: controlled stream parser");
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::OutOfMemory;
+  }
+  if (!chunk || chunkSize == 0 || !sink.onSpan) {
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::ParseError;
+  }
+  if (sink.shouldCancel && sink.shouldCancel(sink.ctx)) {
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::Cancelled;
   }
 
   HalFile file;
   if (!Storage.openFileForRead("DICT", dictPath, file)) {
-    LOG_ERR("DHTML", "Failed to open: %s", dictPath);
-    parseError = true;
-    spanSink_ = SpanSink{};
-    return false;
+    LOG_ERR("DHTML", "Failed to open controlled stream: %s", dictPath);
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::ReadError;
   }
-  file.seekSet(offset);
-
-  parseOpenFile(file, size);
+  if (!file.seekSet(offset)) {
+    LOG_ERR("DHTML", "Failed to seek controlled stream: %s", dictPath);
+    file.close();
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::ReadError;
+  }
+  const DictHtmlStreamStatus status = parseOpenFileBuffered(file, size, chunk, chunkSize);
   file.close();
-
-  spanSink_ = SpanSink{};  // streaming never materializes spans/textBuf — nothing to fix up
-  return !parseError;
+  controlledSpanSink_ = ControlledSpanSink{};
+  if (status == DictHtmlStreamStatus::ReadError) LOG_ERR("DHTML", "Premature EOF in controlled stream: %s", dictPath);
+  if (status == DictHtmlStreamStatus::ParseError) LOG_ERR("DHTML", "Parse failed in controlled stream: %s", dictPath);
+  return status;
 }
 
 bool DictHtmlRenderer::renderPlainTextFromFileStreaming(const char* dictPath, uint32_t offset, uint32_t size,
                                                         const SpanSink& sink) {
+  if (!ensureLegacyStreamBuffer()) return false;
+  return renderPlainTextFromFileStreamingBuffered(dictPath, offset, size, sink, legacyStreamBuffer_.get(),
+                                                  kStreamBufferBytes);
+}
+
+bool DictHtmlRenderer::renderPlainTextFromFileStreamingBuffered(const char* dictPath, uint32_t offset, uint32_t size,
+                                                                const SpanSink& sink, char* chunk,
+                                                                const size_t chunkSize) {
   reset();
   spanSink_ = sink;
+
+  if (!chunk || chunkSize == 0) {
+    LOG_ERR("DHTML", "Missing plain-text stream scratch");
+    spanSink_ = SpanSink{};
+    return false;
+  }
 
   HalFile file;
   if (!Storage.openFileForRead("DICT", dictPath, file)) {
@@ -1073,13 +1249,13 @@ bool DictHtmlRenderer::renderPlainTextFromFileStreaming(const char* dictPath, ui
 
   // Matches the normal streaming path: one SD read buffer plus a bounded
   // cross-chunk entity carry. No definition-sized fallback allocation.
-  char chunk[512];
   char entityCarry[64];
   int entityCarryLen = 0;
   uint32_t remaining = size;
   bool readOk = true;
   while (remaining > 0) {
-    const uint32_t toRead = remaining < sizeof(chunk) ? remaining : static_cast<uint32_t>(sizeof(chunk));
+    const uint32_t toRead =
+        remaining < chunkSize ? remaining : static_cast<uint32_t>(std::min<size_t>(chunkSize, UINT32_MAX));
     const int n = file.read(reinterpret_cast<uint8_t*>(chunk), static_cast<int>(toRead));
     if (n <= 0) {
       readOk = false;
@@ -1099,6 +1275,68 @@ bool DictHtmlRenderer::renderPlainTextFromFileStreaming(const char* dictPath, ui
 
   if (!readOk) LOG_ERR("DHTML", "Failed reading plain-text fallback: %s", dictPath);
   return readOk;
+}
+
+DictHtmlStreamStatus DictHtmlRenderer::renderPlainTextFromFileStreamingBuffered(const char* dictPath, uint32_t offset,
+                                                                                uint32_t size,
+                                                                                const ControlledSpanSink& sink,
+                                                                                char* chunk, const size_t chunkSize) {
+  reset();
+  controlledSpanSink_ = sink;
+  if (!chunk || chunkSize == 0 || !sink.onSpan) {
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::ParseError;
+  }
+  if (sink.shouldCancel && sink.shouldCancel(sink.ctx)) {
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::Cancelled;
+  }
+
+  HalFile file;
+  if (!Storage.openFileForRead("DICT", dictPath, file)) {
+    LOG_ERR("DHTML", "Failed to open controlled plain stream: %s", dictPath);
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::ReadError;
+  }
+  if (!file.seekSet(offset)) {
+    LOG_ERR("DHTML", "Failed to seek controlled plain stream: %s", dictPath);
+    file.close();
+    controlledSpanSink_ = ControlledSpanSink{};
+    return DictHtmlStreamStatus::ReadError;
+  }
+
+  char entityCarry[64];
+  int entityCarryLen = 0;
+  uint32_t remaining = size;
+  while (remaining > 0 && streamStatus_ == DictHtmlStreamStatus::Success) {
+    if (sink.shouldCancel && sink.shouldCancel(sink.ctx)) {
+      streamStatus_ = DictHtmlStreamStatus::Cancelled;
+      break;
+    }
+    const size_t boundedChunk = std::min<size_t>(chunkSize, 512);
+    const uint32_t wanted = remaining < boundedChunk ? remaining : static_cast<uint32_t>(boundedChunk);
+    const int count = file.read(reinterpret_cast<uint8_t*>(chunk), static_cast<int>(wanted));
+    if (count != static_cast<int>(wanted)) {
+      streamStatus_ = DictHtmlStreamStatus::ReadError;
+      break;
+    }
+    remaining -= wanted;
+    normalizeHtmlChunk(chunk, count, remaining == 0);
+    if (entityCarryLen > 0) normalizedHtml_.insert(0, entityCarry, static_cast<size_t>(entityCarryLen));
+    entityCarryLen = 0;
+    feedPlainText(normalizedHtml_.data(), static_cast<int>(normalizedHtml_.size()),
+                  remaining == 0 && htmlCarry_.empty() && !discardTagUntilClose_, entityCarry, &entityCarryLen);
+  }
+  if (streamStatus_ == DictHtmlStreamStatus::Success && entityCarryLen > 0) {
+    feedPlainText(entityCarry, entityCarryLen, true, nullptr, nullptr);
+  }
+  if (streamStatus_ == DictHtmlStreamStatus::Success) flushPending();
+  file.close();
+  controlledSpanSink_ = ControlledSpanSink{};
+  if (streamStatus_ == DictHtmlStreamStatus::ReadError) {
+    LOG_ERR("DHTML", "Premature EOF in controlled plain stream: %s", dictPath);
+  }
+  return streamStatus_;
 }
 
 // ---------------------------------------------------------------------------

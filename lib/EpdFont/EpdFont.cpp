@@ -232,18 +232,16 @@ const EpdGlyph* EpdFont::findGlyph(const uint32_t cp) const {
     }
   }
 
+  // Codepoint not in interval table — try on-demand loading (SD card fonts).
+  if (data->glyphMissHandler) {
+    return data->glyphMissHandler(data->glyphMissCtx, cp);
+  }
   return nullptr;
 }
 
 const EpdGlyph* EpdFont::getGlyph(const uint32_t cp) const {
   if (const EpdGlyph* glyph = findGlyph(cp)) {
     return glyph;
-  }
-
-  // Codepoint not in interval table — try on-demand loading (SD card fonts).
-  if (data->glyphMissHandler) {
-    const EpdGlyph* loaded = data->glyphMissHandler(data->glyphMissCtx, cp);
-    if (loaded) return loaded;
   }
 
   if (cp != REPLACEMENT_GLYPH) {

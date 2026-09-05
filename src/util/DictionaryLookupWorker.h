@@ -5,22 +5,29 @@
 
 #include <atomic>
 
-class DictionaryLookupController;
+struct DictionaryWorkerJob {
+  using RunCallback = void (*)(void*);
+
+  void* owner = nullptr;
+  RunCallback run = nullptr;
+};
 
 // A single, static dictionary worker avoids allocating a 4 KB task stack for
-// every lookup. Controllers still own all lookup state and must wait for the
-// worker before they are destroyed.
+// every lookup. Job owners still own all lookup state and must cancel and wait
+// for the worker before they are destroyed.
 class DictionaryLookupWorker {
  public:
   static DictionaryLookupWorker& instance();
 
-  // Starts a lookup for owner. Returns false when the static task could not be
-  // created or another controller still owns the worker.
-  bool start(DictionaryLookupController& owner);
+  // Starts a job. Returns false when the job is invalid, the static task could
+  // not be created, or another owner still owns the worker.
+  bool start(DictionaryWorkerJob job);
+  bool isBusy() const;
+  bool owns(const void* owner) const;
 
   // Waits until owner is no longer running on the worker. The owner must set
   // its cancellation flag before calling this method.
-  void waitForOwner(const DictionaryLookupController& owner);
+  void waitForOwner(const void* owner);
 
  private:
   static constexpr size_t kStackBytes = 4096;
@@ -34,5 +41,6 @@ class DictionaryLookupWorker {
   StaticTask_t taskStorage_ = {};
   StackType_t stack_[kStackWords] = {};
   TaskHandle_t taskHandle_ = nullptr;
-  std::atomic<DictionaryLookupController*> owner_{nullptr};
+  std::atomic<void*> owner_{nullptr};
+  std::atomic<DictionaryWorkerJob::RunCallback> run_{nullptr};
 };

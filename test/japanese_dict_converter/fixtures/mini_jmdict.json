@@ -1,0 +1,73 @@
+{
+  "words": [
+    {
+      "kanji": [{"text": "食べる", "common": true}],
+      "kana": [{"text": "たべる", "common": true}],
+      "sense": [{"partOfSpeech": ["v1"], "gloss": [{"text": "to eat"}]}]
+    },
+    {
+      "kanji": [{"text": "書く", "common": true}],
+      "kana": [{"text": "かく", "common": true}],
+      "sense": [{"partOfSpeech": ["v5k"], "gloss": [{"text": "to write"}]}]
+    },
+    {
+      "kanji": [{"text": "勉強する", "common": true}],
+      "kana": [{"text": "べんきょうする", "common": true}],
+      "sense": [{"partOfSpeech": ["vs-i"], "gloss": [{"text": "to study"}]}]
+    },
+    {
+      "kanji": [{"text": "来る", "common": true}],
+      "kana": [{"text": "くる", "common": true}],
+      "sense": [{"partOfSpeech": ["vk"], "gloss": [{"text": "to come"}]}]
+    },
+    {
+      "kanji": [{"text": "高い", "common": true}],
+      "kana": [{"text": "たかい", "common": true}],
+      "sense": [{"partOfSpeech": ["adj-i"], "gloss": [{"text": "high; expensive"}]}]
+    },
+    {
+      "kanji": [{"text": "仮名衝突"}],
+      "kana": [{"text": "かな"}],
+      "sense": [{"partOfSpeech": ["n"], "gloss": [{"text": "reading collision source"}]}]
+    },
+    {
+      "kana": [{"text": "かな", "common": true}],
+      "sense": [{"partOfSpeech": ["n"], "gloss": [{"text": "kana lemma collision"}]}]
+    },
+    {
+      "kanji": [{"text": "重複", "common": false}],
+      "kana": [{"text": "ちょうふく"}],
+      "sense": [{"partOfSpeech": ["n"], "gloss": [{"text": "duplicate, uncommon"}]}]
+    },
+    {
+      "kanji": [{"text": "重複", "common": true}],
+      "kana": [{"text": "じゅうふく", "common": true}],
+      "sense": [{"partOfSpeech": ["n"], "gloss": [{"text": "duplicate, common"}]}]
+    },
+    {
+      "kanji": [{"text": "山田太郎"}],
+      "kana": [{"text": "やまだたろう"}],
+      "sense": [{"partOfSpeech": ["n-pr"], "gloss": [{"text": "Yamada Tarou (proper name)"}]}]
+    },
+    {
+      "kana": [{"text": "サクラ", "common": true}],
+      "sense": [{"partOfSpeech": ["n-pr"], "gloss": [{"text": "Sakura (proper name)"}]}]
+    },
+    {
+      "kana": [{"text": "ている"}],
+      "sense": [{"partOfSpeech": ["exp"], "gloss": [{"text": "grammar expression: continuing state"}]}]
+    },
+    {
+      "kana": [{"text": "に違いない", "common": true}],
+      "sense": [{"partOfSpeech": ["exp"], "gloss": [{"text": "grammar phrase: must be"}]}]
+    },
+    {
+      "kana": [{"text": "冊", "common": true}],
+      "sense": [{"partOfSpeech": ["ctr"], "gloss": [{"text": "counter for bound volumes"}]}]
+    },
+    {
+      "kana": [{"text": "超長語彙項目候補文字x"}],
+      "sense": [{"partOfSpeech": ["n"], "gloss": [{"text": "31-byte accepted headword"}]}]
+    }
+  ]
+}

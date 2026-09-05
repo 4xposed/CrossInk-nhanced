@@ -5,7 +5,7 @@
 
 #include <algorithm>
 
-#include "DictionaryDefinitionActivity.h"
+#include "EpubReaderWordLookupActivity.h"
 #include "MappedInputManager.h"
 #include "Memory.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -14,18 +14,18 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
-#include "util/Dictionary.h"
 #include "util/DictionaryActivityUtils.h"
 #include "util/LookupHistory.h"
 
 namespace fui = freeink::ui;
 
 LookedUpWordsActivity::LookedUpWordsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                             std::string bookCachePath, const char* dictionaryFontFamilyName,
+                                             std::string bookLanguage, std::string bookCachePath,
+                                             const char* dictionaryFontFamilyName,
                                              const uint8_t dictionaryFontPointSize)
     : Activity("LookedUpWords", renderer, mappedInput),
+      bookLanguage(std::move(bookLanguage)),
       cachePath(std::move(bookCachePath)),
-      controller(renderer, mappedInput, *this, cachePath),
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {
   this->dictionaryFontPointSize = dictionaryFontPointSize;
@@ -90,7 +90,7 @@ void LookedUpWordsActivity::onRowEvent(const fui::ActionEvent& event, void* user
     return;
   }
   self->app.clearTapFlash();
-  self->controller.startLookup(self->entries[self->selectedIndex].word);
+  self->openSelectedLookup();
 }
 
 void LookedUpWordsActivity::historyScreen(UiApp::ScreenType& screen, void* user) {
@@ -120,11 +120,6 @@ void LookedUpWordsActivity::buildHistoryScreen(UiApp::ScreenType& screen) {
   screen.list(props);
 }
 
-void LookedUpWordsActivity::onExit() {
-  controller.onExit();
-  Activity::onExit();
-}
-
 void LookedUpWordsActivity::showDeleteConfirmation(const bool ignoreInitialConfirmRelease) {
   if (entries.empty() || selectedIndex < 0 || selectedIndex >= static_cast<int>(entries.size())) return;
 
@@ -147,49 +142,33 @@ void LookedUpWordsActivity::showDeleteConfirmation(const bool ignoreInitialConfi
   });
 }
 
-void LookedUpWordsActivity::loop() {
-  if (controller.isActive()) {
-    switch (controller.handleInput()) {
-      case DictionaryLookupController::LookupEvent::FoundDefinition: {
-        auto definition = makeUniqueNoThrow<DictionaryDefinitionActivity>(
-            renderer, mappedInput, controller.getFoundWord(), controller.getFoundLocation(), true, cachePath,
-            controller.getRecordHistory(), controller.getLookupWord(),
-            DictionaryLookupController::toHistStatus(controller.getFoundStatus()), nullptr, nullptr,
-            dictionaryFontFamilyName, dictionaryFontPointSize);
-        if (!definition) {
-          LOG_ERR("LOOKUP", "OOM allocating DictionaryDefinitionActivity (%u bytes)",
-                  static_cast<unsigned>(sizeof(DictionaryDefinitionActivity)));
-          requestUpdate();
-          break;
-        }
-        startActivityForResult(std::move(definition), [this](const ActivityResult& result) {
-          reloadEntries();
-          if (!result.isCancelled) {
-            setResult(ActivityResult{});
-            finish();
-          } else {
-            requestUpdate();
-          }
-        });
-        break;
-      }
-      case DictionaryLookupController::LookupEvent::NotFoundDismissedBack:
-        reloadEntries();
-        requestUpdate();
-        break;
-      case DictionaryLookupController::LookupEvent::NotFoundDismissedDone:
-        setResult(ActivityResult{});
-        finish();
-        break;
-      case DictionaryLookupController::LookupEvent::Cancelled:
-        requestUpdate();
-        break;
-      default:
-        break;
-    }
+void LookedUpWordsActivity::openSelectedLookup() {
+  if (entries.empty() || selectedIndex < 0 || selectedIndex >= static_cast<int>(entries.size())) return;
+
+  EpubLookupPageRequest request =
+      makeEpubLookupDirectRequest(bookLanguage, cachePath, dictionaryFontFamilyName, dictionaryFontPointSize);
+  auto lookup = makeUniqueNoThrow<EpubReaderWordLookupActivity>(renderer, mappedInput, entries[selectedIndex].word,
+                                                                std::move(request));
+  if (!lookup) {
+    LOG_ERR("LOOKUP", "OOM allocating EpubReaderWordLookupActivity (%u bytes)",
+            static_cast<unsigned>(sizeof(EpubReaderWordLookupActivity)));
+    requestUpdate();
     return;
   }
+  uiReady = false;
+  startActivityForResult(std::move(lookup), [this](const ActivityResult& result) {
+    uiReady = false;
+    reloadEntries();
+    if (!result.isCancelled) {
+      setResult(ActivityResult{});
+      finish();
+      return;
+    }
+    requestUpdate();
+  });
+}
 
+void LookedUpWordsActivity::loop() {
   if (TouchHeaderBackButton::wasTapped(mappedInput, renderer)) {
     DictUtils::cancelAndFinish(*this);
     return;
@@ -203,8 +182,7 @@ void LookedUpWordsActivity::loop() {
   }
 
   // Long press Confirm: open the delete confirmation at the hold threshold.
-  if (mappedInput.isPressed(MappedInputManager::Button::Confirm) &&
-      mappedInput.getHeldTime() >= Dictionary::LONG_PRESS_MS) {
+  if (mappedInput.isPressed(MappedInputManager::Button::Confirm) && mappedInput.getHeldTime() >= kLongPressMs) {
     showDeleteConfirmation(true);
     return;
   }
@@ -254,7 +232,7 @@ void LookedUpWordsActivity::loop() {
   });
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    controller.startLookup(entries[selectedIndex].word);
+    openSelectedLookup();
     return;
   }
 
@@ -266,7 +244,6 @@ void LookedUpWordsActivity::loop() {
 
 void LookedUpWordsActivity::render(RenderLock&&) {
   renderer.clearScreen();
-  if (controller.render()) return;
 
   const int pageWidth = renderer.getScreenWidth();
   const int pageHeight = renderer.getScreenHeight();

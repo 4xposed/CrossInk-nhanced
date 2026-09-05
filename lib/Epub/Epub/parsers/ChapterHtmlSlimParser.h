@@ -17,6 +17,7 @@
 #include "Epub/FootnoteEntry.h"
 #include "Epub/Page.h"
 #include "Epub/ParsedText.h"
+#include "Epub/RubyGlossary.h"
 #include "Epub/blocks/ImageBlock.h"
 #include "Epub/blocks/TextBlock.h"
 #include "Epub/css/CssParser.h"
@@ -30,6 +31,9 @@ class Epub;
 class ChapterHtmlSlimParser {
  public:
   enum class ParseStatus { More, Done, Error };
+  // Section owns the parser through final cache promotion, then merges this
+  // bounded harvest before destroying the parser.
+  std::vector<RubyGlossary::Pair> rubyHarvest;
 
  private:
   static constexpr uint8_t MAX_SIMPLE_TABLE_COLUMNS = 8;
@@ -72,6 +76,9 @@ class ChapterHtmlSlimParser {
   int rubyStartWordIndex = -1;
   bool collectingRubyText = false;
   std::string rubyTextBuffer;
+  std::string rubyElemBase;
+  std::string rubyElemRuby;
+  int rubyElemRunCount = 0;
   std::unique_ptr<Page> currentPage = nullptr;
   int16_t currentPageNextY = 0;
   uint32_t currentPageVisibleOffset = 0;
@@ -296,6 +303,7 @@ class ChapterHtmlSlimParser {
   void flushMalformedPartialContent();
   bool appendMalformedMarkupWarningPage();
   void prewarmSectionAdvanceTable(FsFile& file) const;
+  void resetRubyParserState();
   // XML callbacks
   static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char** atts);
   static void XMLCALL characterData(void* userData, const XML_Char* s, int len);
@@ -355,6 +363,9 @@ class ChapterHtmlSlimParser {
   const std::vector<std::pair<std::string, uint16_t>>& getAnchors() const { return anchorData; }
   bool wasLowMemoryFallbackTriggered() const { return lowMemoryImageFallback; }
   bool wasLowMemoryAbortTriggered() const { return lowMemoryAbort; }
+  bool hasCompleteRubyHarvest() const {
+    return RubyGlossary::HarvestCompletion{isPreviewBuild(), previewStopRequested, malformedMarkupTruncated}.canMerge();
+  }
 
   // Byte progress of the in-flight parse, used to estimate a still-building section's total page
   // count (a giant single-spine book never fully lays out, so its real count is unknown). Valid

@@ -986,11 +986,19 @@ std::string Dictionary::lookup(const std::string& word, const DictLookupCallback
 
 // Resolve the word at 0-based ordinal in .idx using .idx.oft for fast page seek.
 std::string Dictionary::wordAtOrdinal(const std::string& folderPath, uint32_t ordinal) {
+  return wordAtOrdinal(folderPath, ordinal, nullptr);
+}
+
+std::string Dictionary::wordAtOrdinal(const std::string& folderPath, uint32_t ordinal, DictOperationStatus* status) {
+  if (status) *status = DictOperationStatus::NotFound;
   DictPaths dp(folderPath);
   const DictInfo info = readInfo(folderPath.c_str());
   const uint8_t suffixBytes = idxEntrySuffixBytes(info);
   HalFile idx;
-  if (!Storage.openFileForRead("DICT", dp.idx().c_str(), idx)) return "";
+  if (!Storage.openFileForRead("DICT", dp.idx().c_str(), idx)) {
+    if (status) *status = DictOperationStatus::ReadError;
+    return "";
+  }
 
   const uint32_t pageNum = ordinal / OFT_STRIDE;
   const uint32_t withinPage = ordinal % OFT_STRIDE;
@@ -1008,29 +1016,44 @@ std::string Dictionary::wordAtOrdinal(const std::string& folderPath, uint32_t or
     }
   }
 
-  idx.seekSet(pageStartByte);
+  if (!idx.seekSet(pageStartByte)) {
+    idx.close();
+    if (status) *status = DictOperationStatus::ReadError;
+    return "";
+  }
 
   // Skip entries to reach the target. With a usable .idx.oft this is at most
   // 31 entries; otherwise fall back to a full ordinal scan.
   for (uint32_t i = 0; i < entriesToSkip; i++) {
     if (readWordInto(idx, wordBuf, sizeof(wordBuf)) < 0) {
       idx.close();
+      if (status) *status = DictOperationStatus::ReadError;
       return "";
     }
     uint8_t skip[12];
     if (idx.read(skip, suffixBytes) != suffixBytes) {
       idx.close();
+      if (status) *status = DictOperationStatus::ReadError;
       return "";
     }
   }
 
   int len = readWordInto(idx, wordBuf, sizeof(wordBuf));
   idx.close();
-  if (len < 0) return "";
+  if (len < 0) {
+    if (status) *status = DictOperationStatus::ReadError;
+    return "";
+  }
+  if (status) *status = DictOperationStatus::Found;
   return std::string(wordBuf, static_cast<size_t>(len));
 }
 
 std::string Dictionary::resolveAltForm(const std::string& word, const char* cachePath) {
+  return resolveAltForm(word, cachePath, nullptr);
+}
+
+std::string Dictionary::resolveAltForm(const std::string& word, const char* cachePath, DictOperationStatus* status) {
+  if (status) *status = DictOperationStatus::NotFound;
   std::string folderPath = readDictPath(cachePath);
   if (folderPath.empty()) return "";
 
@@ -1038,7 +1061,10 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
   if (!Storage.exists(dp.syn().c_str())) return "";
 
   HalFile syn;
-  if (!Storage.openFileForRead("DICT", dp.syn().c_str(), syn)) return "";
+  if (!Storage.openFileForRead("DICT", dp.syn().c_str(), syn)) {
+    if (status) *status = DictOperationStatus::ReadError;
+    return "";
+  }
 
   const uint32_t synFileSize = static_cast<uint32_t>(syn.fileSize());
   uint32_t startByte = 0;
@@ -1047,7 +1073,11 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
   resolveScanBounds(dp.synOftCspt().c_str(), dp.synOft().c_str(), syn, synFileSize, word.c_str(), &startByte, &endByte,
                     true);
 
-  syn.seekSet(startByte);
+  if (!syn.seekSet(startByte)) {
+    syn.close();
+    if (status) *status = DictOperationStatus::ReadError;
+    return "";
+  }
 
   bool fallbackFound = false;
   uint32_t fallbackIdx = 0;
@@ -1055,10 +1085,16 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
   // on the next accelerator boundary.
   while (static_cast<uint32_t>(syn.position()) < synFileSize) {
     int len = readWordInto(syn, wordBuf, sizeof(wordBuf));
-    if (len < 0) break;
+    if (len < 0) {
+      if (status) *status = DictOperationStatus::ReadError;
+      break;
+    }
 
     uint8_t idxBuf[4];
-    if (syn.read(idxBuf, 4) != 4) break;
+    if (syn.read(idxBuf, 4) != 4) {
+      if (status) *status = DictOperationStatus::ReadError;
+      break;
+    }
 
     int cmp = cistrcmp(wordBuf, word.c_str());
     if (cmp == 0) {
@@ -1067,7 +1103,7 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
                              (static_cast<uint32_t>(idxBuf[2]) << 8) | static_cast<uint32_t>(idxBuf[3]);
       if (strcmp(wordBuf, word.c_str()) == 0) {
         syn.close();
-        return wordAtOrdinal(folderPath, originalIdx);
+        return wordAtOrdinal(folderPath, originalIdx, status);
       }
       if (!fallbackFound) {
         fallbackFound = true;
@@ -1080,7 +1116,8 @@ std::string Dictionary::resolveAltForm(const std::string& word, const char* cach
   }
 
   syn.close();
-  return fallbackFound ? wordAtOrdinal(folderPath, fallbackIdx) : "";
+  if (status && *status == DictOperationStatus::ReadError) return "";
+  return fallbackFound ? wordAtOrdinal(folderPath, fallbackIdx, status) : "";
 }
 
 // ---------------------------------------------------------------------------
@@ -1305,6 +1342,12 @@ int Dictionary::editDistance(const std::string& a, const std::string& b, int max
 }
 
 std::vector<std::string> Dictionary::findSimilar(const std::string& word, int maxResults, const char* cachePath) {
+  return findSimilar(word, maxResults, cachePath, nullptr);
+}
+
+std::vector<std::string> Dictionary::findSimilar(const std::string& word, int maxResults, const char* cachePath,
+                                                 DictOperationStatus* status) {
+  if (status) *status = DictOperationStatus::NotFound;
   std::string folderPath = readDictPath(cachePath);
   if (folderPath.empty()) return {};
 
@@ -1312,7 +1355,10 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
   const uint8_t suffixBytes = idxEntrySuffixBytes(info);
   DictPaths dp(folderPath);
   HalFile idx;
-  if (!Storage.openFileForRead("DICT", dp.idx().c_str(), idx)) return {};
+  if (!Storage.openFileForRead("DICT", dp.idx().c_str(), idx)) {
+    if (status) *status = DictOperationStatus::ReadError;
+    return {};
+  }
 
   const uint32_t idxFileSize = static_cast<uint32_t>(idx.fileSize());
   uint32_t centerStart = 0;
@@ -1410,6 +1456,7 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
   if (!editDistanceScratch) {
     LOG_ERR("DICT", "OOM: edit-distance scratch");
     idx.close();
+    if (status) *status = DictOperationStatus::OutOfMemory;
     return {};
   }
 
@@ -1426,10 +1473,16 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
 
   while (static_cast<uint32_t>(idx.position()) < scanEnd) {
     int len = readWordInto(idx, wordBuf, sizeof(wordBuf));
-    if (len < 0) break;
+    if (len < 0) {
+      if (status) *status = DictOperationStatus::ReadError;
+      break;
+    }
 
     uint8_t skip[12];
-    if (idx.read(skip, suffixBytes) != suffixBytes) break;
+    if (idx.read(skip, suffixBytes) != suffixBytes) {
+      if (status) *status = DictOperationStatus::ReadError;
+      break;
+    }
 
     if (len == 0) continue;
     if (cistrcmp(wordBuf, word.c_str()) == 0) continue;
@@ -1444,6 +1497,8 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
 
   idx.close();
 
+  if (status && *status == DictOperationStatus::ReadError) return {};
+
   std::sort(candidates.begin(), candidates.end(),
             [](const Candidate& a, const Candidate& b) { return a.distance < b.distance; });
 
@@ -1452,5 +1507,6 @@ std::vector<std::string> Dictionary::findSimilar(const std::string& word, int ma
   for (size_t i = 0; i < candidates.size() && static_cast<int>(results.size()) < maxResults; i++) {
     results.emplace_back(pool.data() + candidates[i].offset);
   }
+  if (status) *status = results.empty() ? DictOperationStatus::NotFound : DictOperationStatus::Found;
   return results;
 }

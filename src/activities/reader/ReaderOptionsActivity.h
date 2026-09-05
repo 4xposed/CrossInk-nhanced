@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "../Activity.h"
@@ -13,6 +14,7 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "util/ButtonNavigator.h"
+#include "util/DictionaryRegistry.h"
 
 class ReaderOptionsActivity final : public Activity {
  public:
@@ -48,6 +50,11 @@ class ReaderOptionsActivity final : public Activity {
   void* dictionaryFontChangedContext = nullptr;
   bool settingsDirty = false;
   bool stablePageNumbersAvailable = false;
+  DictionaryRegistry dictionarySettingsRegistry;
+  // Borrowed from the live Epub owned by the stacked EpubReaderActivity. The
+  // reader outlives both its menu and this child activity.
+  const std::string* bookLanguage = nullptr;
+  const std::string* bookCachePath = nullptr;
 
   using UiApp = freeink::ui::FreeInkApp<20, 4>;
   static constexpr freeink::ui::ActionId ACTION_ROW = 1;
@@ -89,7 +96,8 @@ class ReaderOptionsActivity final : public Activity {
       bool stablePageNumbersAvailable = false, const char* dictionaryFontFamilyName = nullptr,
       uint8_t dictionaryFontPointSize = 0, bool hasDictionaryFontOverride = false,
       DictionaryFontChangedCallback dictionaryFontChangedCallback = nullptr,
-      void* dictionaryFontChangedContext = nullptr)
+      void* dictionaryFontChangedContext = nullptr, const std::string* bookLanguage = nullptr,
+      const std::string* bookCachePath = nullptr)
       : Activity("ReaderOptions", renderer, mappedInput),
         saveSettingsCallback(saveSettingsCallback),
         saveSettingsContext(saveSettingsContext),
@@ -104,6 +112,8 @@ class ReaderOptionsActivity final : public Activity {
         dictionaryFontPointSize(dictionaryFontPointSize),
         hasDictionaryFontOverride(hasDictionaryFontOverride),
         stablePageNumbersAvailable(stablePageNumbersAvailable),
+        bookLanguage(bookLanguage),
+        bookCachePath(bookCachePath),
         uiTarget(makeUiTarget(renderer)),
         app(uiTarget, uiTarget.deviceContext()) {
     if (dictionaryFontFamilyName) {

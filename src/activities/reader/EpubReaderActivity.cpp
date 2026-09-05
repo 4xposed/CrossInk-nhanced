@@ -32,7 +32,6 @@
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
-#include "DictionaryWordSelectActivity.h"
 #include "EpubGrayscale.h"
 #include "EpubReaderBookmarkListActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
@@ -43,6 +42,7 @@
 #endif
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
+#include "EpubReaderWordLookupActivity.h"
 #include "FocusReadingText.h"
 #include "GlobalActions.h"
 #include "KOReaderCredentialStore.h"
@@ -73,7 +73,7 @@
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookMoveUtils.h"
-#include "util/Dictionary.h"
+#include "util/DictionaryRegistry.h"
 #include "util/ScreenshotUtil.h"
 
 namespace {
@@ -2129,6 +2129,7 @@ void EpubReaderActivity::endGlobalSettingsEditForBookReader(void* ctx) {
 
 void EpubReaderActivity::onEnter() {
   Activity::onEnter();
+  dictionaryLookupAvailability.reset();
   pageLoadRetryCount = 0;
 
   MemoryBudget::logEpubHeapPools("reader enter");
@@ -2401,7 +2402,7 @@ void EpubReaderActivity::openReaderMenu() {
     menuActivity = makeUniqueNoThrow<EpubReaderTouchMenuActivity>(
         renderer, mappedInput, epub, touchReaderPreviewModel.get(), bookProgress,
         !previewActive && !currentPageFootnotes.empty(),
-        !previewActive && epub && Dictionary::exists(epub->getCachePath().c_str()), !BOOKMARKS.getBookmarks().empty(),
+        !previewActive && isDictionaryLookupAvailable(), !BOOKMARKS.getBookmarks().empty(),
         CLIPPINGS.hasClippings(),
         !previewActive && BOOKMARKS.hasBookmarkForPage(bmSpine, bmProgress, bookmarkPageCount), isBookCompleted,
         SETTINGS.statusBarTimeLeft != CrossPointSettings::STATUS_BAR_TIME_LEFT::TIME_LEFT_HIDE, stableCurrentPage,
@@ -2422,7 +2423,7 @@ void EpubReaderActivity::openReaderMenu() {
     menuActivity = makeUniqueNoThrow<EpubReaderMenuActivity>(
         renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent, SETTINGS.orientation,
         !previewActive && !currentPageFootnotes.empty(),
-        !previewActive && epub && Dictionary::exists(epub->getCachePath().c_str()), !BOOKMARKS.getBookmarks().empty(),
+        !previewActive && isDictionaryLookupAvailable(), !BOOKMARKS.getBookmarks().empty(),
         CLIPPINGS.hasClippings(),
         !previewActive && BOOKMARKS.hasBookmarkForPage(bmSpine, bmProgress, bookmarkPageCount), isBookCompleted,
         automaticPageTurnActive, getAutoPageTurnIntervalSeconds(),
@@ -2430,7 +2431,8 @@ void EpubReaderActivity::openReaderMenu() {
         saveReaderOptionsForBook, this, saveGlobalSettingsForBookReader, this, beginGlobalSettingsEditForBookReader,
         this, stableCurrentPage, stablePageCount, endGlobalSettingsEditForBookReader, this,
         bookSettings.dictionarySdFontFamilyName, bookSettings.dictionaryFontPointSize,
-        bookSettings.hasDictionaryFontOverride, saveDictionaryFontForBookReader, this);
+        bookSettings.hasDictionaryFontOverride, saveDictionaryFontForBookReader, this, &epub->getLanguage(),
+        &epub->getCachePath());
     if (!menuActivity) {
       LOG_ERR("ERS", "Could not allocate reader menu");
       resumeReadingPaceTimer("reader_menu_oom");
@@ -3465,12 +3467,28 @@ bool EpubReaderActivity::handleTouchDictionaryLookup() {
   }
 
   touchDictionaryLookupHandled = true;
-  if (!Dictionary::exists(epub->getCachePath().c_str())) {
+  if (!isDictionaryLookupAvailable()) {
     return false;
   }
 
   openWordSelect(/*framebufferContainsPage=*/true, touchX, touchY, /*autoLookupInitialWord=*/true);
   return true;
+}
+
+bool EpubReaderActivity::isDictionaryLookupAvailable() {
+  if (dictionaryLookupAvailability.known()) return dictionaryLookupAvailability.value();
+  if (!epub) {
+    dictionaryLookupAvailability.store(false);
+    return false;
+  }
+
+  // Availability uses a short-lived catalog so the reader neither retains a
+  // second dictionary catalog nor clears the shared Settings registry.
+  std::string starDictPath;
+  const bool available =
+      resolveTransientDictionaryLookupRoute(epub->getLanguage(), epub->getCachePath().c_str(), starDictPath);
+  dictionaryLookupAvailability.store(available);
+  return available;
 }
 
 std::unique_ptr<Page> EpubReaderActivity::reloadDictionaryLookupPage(const int pageOffset) {
@@ -3489,13 +3507,40 @@ std::unique_ptr<Page> EpubReaderActivity::reloadDictionaryLookupPageCallback(voi
   return static_cast<EpubReaderActivity*>(context)->reloadDictionaryLookupPage(pageOffset);
 }
 
+void EpubReaderActivity::renderDictionaryLookupBackground() {
+  auto backgroundPage = reloadDictionaryLookupPage();
+  if (!backgroundPage) {
+    LOG_ERR("DICT", "Failed to reload reader page for dictionary modal background");
+    renderer.clearScreen(ReaderUtils::readerBackgroundColor());
+    return;
+  }
+
+  const ReaderViewportLayout layout = computeReaderViewportLayout(renderer, automaticPageTurnActive);
+  renderer.clearScreen(ReaderUtils::readerBackgroundColor());
+  const bool foregroundBlack = ReaderUtils::readerForegroundBlack();
+  auto* fcm = renderer.getFontCacheManager();
+  if (!fcm) {
+    backgroundPage->render(renderer, SETTINGS.getReaderFontId(), layout.marginLeft, layout.marginTop, foregroundBlack);
+    return;
+  }
+  auto scope = fcm->createPrewarmScope();
+  backgroundPage->render(renderer, SETTINGS.getReaderFontId(), layout.marginLeft, layout.marginTop, foregroundBlack);
+  scope.endScanAndPrewarm();
+  backgroundPage->render(renderer, SETTINGS.getReaderFontId(), layout.marginLeft, layout.marginTop, foregroundBlack);
+}
+
+void EpubReaderActivity::renderDictionaryLookupBackgroundCallback(void* context) {
+  static_cast<EpubReaderActivity*>(context)->renderDictionaryLookupBackground();
+}
+
 void EpubReaderActivity::openWordSelect(bool framebufferContainsPage, int initialTouchX, int initialTouchY,
                                         bool autoLookupInitialWord) {
   std::unique_ptr<Page> pageForLookup;
   ReaderViewportLayout layout{};
+  std::string bookLanguage;
   std::string bookCachePath;
-  std::string nextPageFirstWord;
-  bool hasNextPageForLookup = false;
+  uint16_t lookupSpineIndex = 0;
+  uint16_t lookupPageIndex = 0;
 
   {
     RenderLock lock(*this);
@@ -3511,46 +3556,46 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage, int initia
     }
 
     layout = computeReaderViewportLayout(renderer, automaticPageTurnActive);
+    bookLanguage = epub->getLanguage();
     bookCachePath = epub->getCachePath();
-
-    if (section->currentPage < section->pageCount - 1) {
-      const int savedPage = section->currentPage;
-      section->currentPage = savedPage + 1;
-      auto nextPage = section->loadPageFromSectionFile();
-      section->currentPage = savedPage;
-      if (nextPage) {
-        hasNextPageForLookup = true;
-        const auto it = std::find_if(nextPage->elements.begin(), nextPage->elements.end(),
-                                     [](const auto& element) { return element->getTag() == TAG_PageLine; });
-        if (it != nextPage->elements.end()) {
-          const auto* firstLine = static_cast<const PageLine*>(it->get());
-          if (firstLine->getBlock() && !firstLine->getBlock()->isEmpty()) {
-            nextPageFirstWord = firstLine->getBlock()->wordText(0);
-          }
-        }
-      }
-    }
+    lookupSpineIndex = static_cast<uint16_t>(currentSpineIndex);
+    lookupPageIndex = static_cast<uint16_t>(section->currentPage);
   }
 
   pauseReadingPaceTimer("dictionary_lookup");
   const BookReaderSettingsData bookSettings = loadBookReaderSettingsFile(bookCachePath);
-  // The activity outlives this call, so it must be heap-owned; make the fixed-size
-  // object allocation fallible instead of aborting the firmware when memory is tight.
-  auto wordSelect = makeUniqueNoThrow<DictionaryWordSelectActivity>(
-      renderer, mappedInput, std::move(pageForLookup), layout.marginLeft, layout.marginTop, std::move(bookCachePath),
-      std::move(nextPageFirstWord), hasNextPageForLookup, framebufferContainsPage, layout.marginBottom, initialTouchX,
-      initialTouchY, autoLookupInitialWord, bookSettings.dictionarySdFontFamilyName,
-      bookSettings.dictionaryFontPointSize, this, &EpubReaderActivity::reloadDictionaryLookupPageCallback);
-  if (!wordSelect) {
-    LOG_ERR("DICT", "OOM allocating DictionaryWordSelectActivity (%u bytes)",
-            static_cast<unsigned>(sizeof(DictionaryWordSelectActivity)));
+  EpubLookupPageSnapshot snapshot;
+  snapshot.bookLanguage = std::move(bookLanguage);
+  snapshot.bookCachePath = std::move(bookCachePath);
+  snapshot.spineIndex = lookupSpineIndex;
+  snapshot.pageIndex = lookupPageIndex;
+  snapshot.marginLeft = layout.marginLeft;
+  snapshot.marginTop = layout.marginTop;
+  snapshot.reservedBottomHeight = layout.marginBottom;
+  snapshot.initialTouchX = initialTouchX;
+  snapshot.initialTouchY = initialTouchY;
+  snapshot.autoLookupInitialWord = autoLookupInitialWord;
+  snapshot.framebufferContainsPage = framebufferContainsPage;
+  snapshot.dictionaryFontFamilyName = bookSettings.dictionarySdFontFamilyName;
+  snapshot.dictionaryFontPointSize = bookSettings.dictionaryFontPointSize;
+  snapshot.readerContext = this;
+  snapshot.renderReaderBackground = &EpubReaderActivity::renderDictionaryLookupBackgroundCallback;
+  snapshot.reloadReaderPage = [](void* context) {
+    return EpubReaderActivity::reloadDictionaryLookupPageCallback(context, 0);
+  };
+  auto wordLookup = makeUniqueNoThrow<EpubReaderWordLookupActivity>(renderer, mappedInput, std::move(pageForLookup),
+                                                                    makeEpubLookupPageRequest(std::move(snapshot)));
+  if (!wordLookup) {
+    LOG_ERR("DICT", "OOM allocating EpubReaderWordLookupActivity (%u bytes)",
+            static_cast<unsigned>(sizeof(EpubReaderWordLookupActivity)));
     resumeReadingPaceTimer("dictionary_lookup_alloc_failed");
     drawToast(renderer, tr(STR_MEMORY_ERROR));
     delay(1000);
     requestUpdate();
     return;
   }
-  startActivityForResult(std::move(wordSelect), [this](const ActivityResult& result) {
+  startActivityForResult(std::move(wordLookup), [this](const ActivityResult& result) {
+    dictionaryLookupAvailability.invalidateAfterUnifiedChildReturn();
     if (const auto* request = std::get_if<DictionaryClippingRequest>(&result.data)) {
       resumeReadingPaceTimer("dictionary_lookup_to_clip");
       startClipSelection(request);
@@ -3700,22 +3745,33 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     case EpubReaderMenuActivity::MenuAction::LOOKUP_HISTORY: {
       pauseReadingPaceTimer("lookup_history");
       const BookReaderSettingsData bookSettings = loadBookReaderSettingsFile(epub->getCachePath());
-      startActivityForResult(std::make_unique<LookedUpWordsActivity>(renderer, mappedInput, epub->getCachePath(),
-                                                                     bookSettings.dictionarySdFontFamilyName,
-                                                                     bookSettings.dictionaryFontPointSize),
-                             [this, returnToReaderMenu](const ActivityResult&) {
-                               resumeReadingPaceTimer("lookup_history_return");
-                               if (returnToReaderMenu && mappedInput.hasTouchHardware())
-                                 openReaderMenu();
-                               else
-                                 requestUpdate();
-                             });
+      auto history = makeUniqueNoThrow<LookedUpWordsActivity>(
+          renderer, mappedInput, epub->getLanguage(), epub->getCachePath(), bookSettings.dictionarySdFontFamilyName,
+          bookSettings.dictionaryFontPointSize);
+      if (!history) {
+        LOG_ERR("DICT", "OOM allocating LookedUpWordsActivity (%u bytes)",
+                static_cast<unsigned>(sizeof(LookedUpWordsActivity)));
+        resumeReadingPaceTimer("lookup_history_alloc_failed");
+        drawToast(renderer, tr(STR_MEMORY_ERROR));
+        delay(1000);
+        requestUpdate();
+        break;
+      }
+      startActivityForResult(std::move(history), [this, returnToReaderMenu](const ActivityResult&) {
+        dictionaryLookupAvailability.invalidateAfterUnifiedChildReturn();
+        resumeReadingPaceTimer("lookup_history_return");
+        if (returnToReaderMenu && mappedInput.hasTouchHardware())
+          openReaderMenu();
+        else
+          requestUpdate();
+      });
       break;
     }
     case EpubReaderMenuActivity::MenuAction::SET_BOOK_DICTIONARY: {
       pauseReadingPaceTimer("dictionary_select");
       startActivityForResult(std::make_unique<DictionarySelectActivity>(renderer, mappedInput, epub->getCachePath()),
                              [this, returnToReaderMenu](const ActivityResult&) {
+                               dictionaryLookupAvailability.invalidateAfterUnifiedChildReturn();
                                resumeReadingPaceTimer("dictionary_select_return");
                                if (returnToReaderMenu && mappedInput.hasTouchHardware())
                                  openReaderMenu();
@@ -4727,7 +4783,7 @@ void EpubReaderActivity::executeReaderQuickAction(CrossPointSettings::LONG_PRESS
       startClipSelection();
       break;
     case CrossPointSettings::LONG_MENU_LOOKUP_WORD:
-      if (epub && Dictionary::exists(epub->getCachePath().c_str())) {
+      if (epub && isDictionaryLookupAvailable()) {
         openWordSelect(dictionaryLookupFramebufferContainsPage);
       } else {
         drawToast(renderer, tr(STR_DICT_NO_DICT_SET));

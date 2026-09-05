@@ -31,6 +31,8 @@ struct DictLookupCallbacks {
   bool (*shouldCancel)(void* ctx) = nullptr;
 };
 
+enum class DictOperationStatus : uint8_t { Found, NotFound, ReadError, OutOfMemory };
+
 // Metadata parsed from a StarDict .ifo file.
 struct DictInfo {
   char bookname[128] = "";
@@ -137,6 +139,7 @@ class Dictionary {
   // Look up word in .syn (via .syn.oft if present).
   // Returns the canonical headword from .idx, or empty string if not found.
   static std::string resolveAltForm(const std::string& word, const char* cachePath = nullptr);
+  static std::string resolveAltForm(const std::string& word, const char* cachePath, DictOperationStatus* status);
 
   static std::string cleanWord(const std::string& word);
   static std::vector<std::string> getStemVariants(const std::string& word);
@@ -144,6 +147,8 @@ class Dictionary {
   // Returns up to maxResults words from .idx that are close in edit distance to word.
   // Requires .idx to be accessible; uses .idx.oft if present for neighbourhood search.
   static std::vector<std::string> findSimilar(const std::string& word, int maxResults, const char* cachePath = nullptr);
+  static std::vector<std::string> findSimilar(const std::string& word, int maxResults, const char* cachePath,
+                                              DictOperationStatus* status);
 
   // Reads .idx.oft.cspt header and returns entryCount.
   // Returns 0 if the file is missing, too small, or has invalid magic/version.
@@ -178,6 +183,7 @@ class Dictionary {
   // Read the word at ordinal `ordinal` in .idx.
   // folderPath is the dictionary base path (e.g. /dictionary/dict-en-en/dict-data).
   static std::string wordAtOrdinal(const std::string& folderPath, uint32_t ordinal);
+  static std::string wordAtOrdinal(const std::string& folderPath, uint32_t ordinal, DictOperationStatus* status);
 
   static std::string readDefinition(const std::string& folderPath, uint32_t offset, uint32_t size);
 

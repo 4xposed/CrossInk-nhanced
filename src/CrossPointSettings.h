@@ -497,6 +497,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Button layouts (front layout retained for migration only)
   uint8_t frontButtonLayout = BACK_CONFIRM_LEFT_RIGHT;
   uint8_t sideButtonLayout = PREV_NEXT;
+  // Swap Word Lookup entry navigation to the side buttons and definition
+  // scrolling to the front buttons. Kept separate from the global side layout
+  // so the default lookup controls remain unchanged.
+  uint8_t wordLookupSideButtons = 0;
   uint8_t frontButtonOrientationAware = FRONT_ORIENTATION_AWARE_OFF;
   uint8_t sideButtonOrientationAware = 0;
   // Action performed when side buttons are long-pressed in reader
@@ -750,6 +754,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 #ifdef SIMULATOR
   static bool verifySleepTimeoutMigrationContract();
   static bool verifySleepScreenMigrationContract();
+  static bool verifyWordLookupSideButtonsPersistenceContract();
 #endif
 
  private:

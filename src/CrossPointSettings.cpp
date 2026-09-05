@@ -468,6 +468,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   doc["readerFrontButtonConfirm"] = readerFrontButtonConfirm;
   doc["readerFrontButtonLeft"] = readerFrontButtonLeft;
   doc["readerFrontButtonRight"] = readerFrontButtonRight;
+  doc["wordLookupSideButtons"] = wordLookupSideButtons;
   doc["fontFamily"] = fontFamily;
   if (sdFontFamilyName[0] != '\0') doc["sdFontFamilyName"] = sdFontFamilyName;
   if (dictionarySdFontFamilyName[0] != '\0') doc["dictionaryFont"] = dictionarySdFontFamilyName;
@@ -715,6 +716,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
   readerFrontButtonRight = clamp(doc["readerFrontButtonRight"] | static_cast<uint8_t>(FRONT_HW_RIGHT),
                                  FRONT_BUTTON_HARDWARE_COUNT, FRONT_HW_RIGHT);
   validateReaderFrontButtonMapping(*this);
+  wordLookupSideButtons = clamp(doc["wordLookupSideButtons"] | static_cast<uint8_t>(0), 2, 0);
 
   const uint8_t storedFontFamily = doc["fontFamily"] | static_cast<uint8_t>(0);
   fontFamily = clamp(storedFontFamily, BUILTIN_FONT_COUNT, 0);
@@ -1064,6 +1066,24 @@ bool CrossPointSettings::verifySleepScreenMigrationContract() {
          sleepScreenStorageToMode(dashboardSleepStorageValue) == DASHBOARD_SLEEP &&
          sleepScreenModeToStorage(DASHBOARD_SLEEP) == dashboardSleepStorageValue &&
          sleepScreenStorageToMode(UINT8_MAX) == DARK;
+}
+
+bool CrossPointSettings::verifyWordLookupSideButtonsPersistenceContract() {
+  CrossPointSettings& settings = getInstance();
+  const uint8_t original = settings.wordLookupSideButtons;
+
+  settings.wordLookupSideButtons = 1;
+  JsonDocument persisted;
+  settings.toJson(persisted);
+  const bool written = (persisted["wordLookupSideButtons"] | static_cast<uint8_t>(0)) == 1;
+
+  settings.wordLookupSideButtons = 0;
+  const bool restored = settings.fromJson(persisted.as<JsonVariantConst>()) && settings.wordLookupSideButtons == 1;
+
+  persisted["wordLookupSideButtons"] = 9;
+  const bool clamped = settings.fromJson(persisted.as<JsonVariantConst>()) && settings.wordLookupSideButtons == 0;
+  settings.wordLookupSideButtons = original;
+  return written && restored && clamped;
 }
 #endif
 

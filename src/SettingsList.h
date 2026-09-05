@@ -287,12 +287,41 @@ inline SettingInfo buildDictionaryFontSizeSetting(const SdCardFontRegistry* regi
   return s;
 }
 
-inline SettingInfo buildDictionarySetting(const DictionaryRegistry* dictRegistry) {
+inline SettingInfo buildDictionarySetting(const DictionaryRegistry* dictRegistry, const std::string_view bookLanguage,
+                                          const char* bookCachePath, const bool showAppliedDictionary) {
   SettingInfo s;
-  s.nameId = StrId::STR_DICTIONARY;
+  s.nameId = showAppliedDictionary ? StrId::STR_DICTIONARY : StrId::STR_DICT_FALLBACK;
   s.type = SettingType::ENUM;
-  s.key = "dictionary";
   s.category = StrId::STR_CAT_READER;
+
+  if (showAppliedDictionary) {
+    // This row is informational. In particular, automatic Japanese routing
+    // must never become another persisted backend selection.
+    std::string effectivePath;
+    if (dictRegistry && dictRegistry->resolveLookupRoute(bookLanguage, bookCachePath, effectivePath) &&
+        effectivePath.empty()) {
+      s.enumStringValues.push_back(I18N.get(StrId::STR_DICT_EFFECTIVE_JAPANESE));
+    } else if (!effectivePath.empty()) {
+      const int entryIndex = dictRegistry->indexOfExactOrEquivalent(effectivePath);
+      if (entryIndex >= 0) {
+        s.enumStringValues.push_back(dictRegistry->getEntries()[static_cast<size_t>(entryIndex)].name);
+      } else {
+        const size_t stemSeparator = effectivePath.find_last_of('/');
+        const size_t folderSeparator =
+            stemSeparator == std::string::npos ? std::string::npos : effectivePath.find_last_of('/', stemSeparator - 1);
+        s.enumStringValues.push_back(
+            folderSeparator == std::string::npos
+                ? effectivePath
+                : effectivePath.substr(folderSeparator + 1, stemSeparator - folderSeparator - 1));
+      }
+    } else {
+      s.enumStringValues.push_back(I18N.get(StrId::STR_DICT_NONE));
+    }
+    s.valueGetter = []() -> uint8_t { return 0; };
+    return s;
+  }
+
+  s.key = "dictionary";
   s.enumStringValues.push_back(I18N.get(StrId::STR_DICT_NONE));
 
   std::vector<DictionaryEntry> entries;
@@ -304,26 +333,24 @@ inline SettingInfo buildDictionarySetting(const DictionaryRegistry* dictRegistry
     }
   }
 
-  s.valueGetter = [entries]() -> uint8_t {
-    const std::string activePath = Dictionary::readDictPath();
-    if (activePath.empty()) {
-      return 0;
-    }
-    for (size_t i = 0; i < entries.size(); i++) {
-      if (entries[i].basePath == activePath) {
-        return static_cast<uint8_t>(i + 1);
-      }
-    }
-    return 0;
+  s.valueGetter = [dictRegistry]() -> uint8_t {
+    const std::string activePath = Dictionary::readConfiguredDictPath();
+    if (!dictRegistry || activePath.empty()) return 0;
+    const int entryIndex = dictRegistry->indexOfExactOrEquivalent(activePath);
+    return entryIndex < 0 ? 0 : static_cast<uint8_t>(entryIndex + 1);
   };
 
-  s.valueSetter = [entries](uint8_t v) {
+  s.valueSetter = [entries, dictRegistry](uint8_t v) {
     if (v == 0) {
       Dictionary::saveGlobalDictPath("");
       return;
     }
     const size_t entryIndex = static_cast<size_t>(v - 1);
     if (entryIndex < entries.size()) {
+      if (dictRegistry && dictRegistry->indexOfExactOrEquivalent(Dictionary::readConfiguredDictPath()) ==
+                              static_cast<int>(entryIndex)) {
+        return;
+      }
       Dictionary::saveGlobalDictPath(entries[entryIndex].basePath.c_str());
     }
   };
@@ -723,6 +750,8 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
                           "sideButtonLayout", StrId::STR_CAT_CONTROLS)
             .withEnumRawValues({CrossPointSettings::SIDE_BUTTONS_DISABLED, CrossPointSettings::PREV_NEXT,
                                 CrossPointSettings::NEXT_PREV, CrossPointSettings::NEXT_NEXT}));
+    add(SettingInfo::Enum(StrId::STR_WORD_LOOKUP_SIDE_BUTTONS, &CrossPointSettings::wordLookupSideButtons,
+                          {StrId::STR_NO, StrId::STR_YES}, "wordLookupSideButtons", StrId::STR_CAT_CONTROLS));
     add(SettingInfo::Enum(StrId::STR_ORIENTATION_AWARE, &CrossPointSettings::sideButtonOrientationAware,
                           {StrId::STR_NO, StrId::STR_YES}, "sideButtonOrientationAware", StrId::STR_CAT_CONTROLS));
     add(SettingInfo::Enum(StrId::STR_LONG_PRESS_ACTION, &CrossPointSettings::sideButtonLongPress,
@@ -966,7 +995,10 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
 }
 
 inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr,
-                                                const DictionaryRegistry* dictRegistry = nullptr) {
+                                                const DictionaryRegistry* dictRegistry = nullptr,
+                                                const std::string_view bookLanguage = {},
+                                                const char* bookCachePath = nullptr,
+                                                const bool showAppliedDictionary = false) {
   std::vector<SettingInfo> v = getBaseSettingsList();
   const bool hasTouch = gpio.hasTouch();
   if (!hasTouch) {
@@ -1090,9 +1122,57 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     auto guideIt =
         std::find_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_GUIDE_READING; });
     const auto insertPos = guideIt == v.end() ? v.end() : guideIt + 1;
-    v.insert(insertPos, buildDictionarySetting(dictRegistry));
+    v.insert(insertPos, buildDictionarySetting(dictRegistry, bookLanguage, bookCachePath, showAppliedDictionary));
   }
   return v;
+}
+
+inline std::vector<SettingInfo> buildGroupedReaderSettingsList(const std::vector<SettingInfo>& allSettings) {
+  std::vector<SettingInfo> readerSettings;
+  readerSettings.reserve(23);
+
+  auto addReaderSetting = [&](StrId nameId) {
+    const auto it = std::find_if(allSettings.begin(), allSettings.end(),
+                                 [nameId](const auto& setting) { return setting.nameId == nameId; });
+    if (it != allSettings.end()) {
+      readerSettings.push_back(*it);
+    }
+  };
+
+  readerSettings.push_back(SettingInfo::SectionHeader(StrId::STR_READER_FONT_OPTIONS));
+  addReaderSetting(StrId::STR_FONT_FAMILY);
+  addReaderSetting(StrId::STR_FONT_SIZE);
+  addReaderSetting(StrId::STR_DICTIONARY_FONT);
+  addReaderSetting(StrId::STR_DICTIONARY_FONT_SIZE);
+  readerSettings.push_back(SettingInfo::Action(StrId::STR_DOWNLOAD_FONTS, SettingAction::DownloadFonts));
+  addReaderSetting(StrId::STR_SD_FONT_SIZE_RANGE);
+
+  readerSettings.push_back(SettingInfo::SectionHeader(StrId::STR_READER_PAGE_LAYOUT));
+  addReaderSetting(StrId::STR_LINE_SPACING);
+  addReaderSetting(StrId::STR_WORD_SPACING);
+  addReaderSetting(StrId::STR_SCREEN_MARGIN);
+  addReaderSetting(StrId::STR_PARA_ALIGNMENT);
+  addReaderSetting(StrId::STR_EXTRA_SPACING);
+  addReaderSetting(StrId::STR_FORCE_PARAGRAPH_INDENTS);
+
+  readerSettings.push_back(SettingInfo::SectionHeader(StrId::STR_READER_BOOK_STYLING));
+  addReaderSetting(StrId::STR_EMBEDDED_STYLE);
+  addReaderSetting(StrId::STR_HYPHENATION);
+  addReaderSetting(StrId::STR_TEXT_AA);
+  addReaderSetting(StrId::STR_IMAGES);
+
+  readerSettings.push_back(SettingInfo::SectionHeader(StrId::STR_READER_READING_AIDS));
+  addReaderSetting(StrId::STR_FOCUS_READING);
+  addReaderSetting(StrId::STR_GUIDE_READING);
+  addReaderSetting(StrId::STR_DICT_FALLBACK);
+
+  readerSettings.push_back(SettingInfo::SectionHeader(StrId::STR_READER_UI));
+  addReaderSetting(StrId::STR_ORIENTATION);
+  addReaderSetting(StrId::STR_PUBLISHER_PAGE_NUMBERS);
+  addReaderSetting(StrId::STR_DISABLE_TOUCHSCREEN);
+  readerSettings.push_back(SettingInfo::Action(StrId::STR_CUSTOMISE_STATUS_BAR, SettingAction::CustomiseStatusBar));
+
+  return readerSettings;
 }
 
 inline void addSettingByName(std::vector<SettingInfo>& target, const std::vector<SettingInfo>& allSettings,
@@ -1117,6 +1197,7 @@ inline std::vector<SettingInfo> buildReaderSettingsParentList(const std::vector<
   addSettingByName(readerSettings, allSettings, StrId::STR_FOCUS_READING);
   addSettingByName(readerSettings, allSettings, StrId::STR_GUIDE_READING);
   addSettingByName(readerSettings, allSettings, StrId::STR_DICTIONARY);
+  addSettingByName(readerSettings, allSettings, StrId::STR_DICT_FALLBACK);
   addSettingByName(readerSettings, allSettings, StrId::STR_INDEXING_METHOD);
   return readerSettings;
 }
@@ -1278,8 +1359,9 @@ inline std::vector<SettingInfo> buildControlsFrontButtonSettingsList(const std::
 inline std::vector<SettingInfo> buildControlsSideButtonSettingsList(const std::vector<SettingInfo>& allSettings) {
   std::vector<SettingInfo> settings;
   const bool hasChord = hasSideButtonChordSetting(allSettings);
-  settings.reserve(3 + (hasChord ? 1u : 0u));
+  settings.reserve(4 + (hasChord ? 1u : 0u));
   addSettingByName(settings, allSettings, StrId::STR_SIDE_BTN_LAYOUT);
+  addSettingByKey(settings, allSettings, "wordLookupSideButtons");
   addSettingByKey(settings, allSettings, "sideButtonOrientationAware");
   addSettingByKey(settings, allSettings, "sideButtonLongPress");
   if (hasChord) {

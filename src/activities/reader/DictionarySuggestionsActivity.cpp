@@ -3,6 +3,9 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
+#include <algorithm>
+#include <utility>
+
 #include "MappedInputManager.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -19,6 +22,22 @@ DictionarySuggestionsActivity::DictionarySuggestionsActivity(GfxRenderer& render
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {}
 
+DictionarySuggestionsActivity::DictionarySuggestionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                                             DictionarySuggestions suggestions)
+    : Activity("DictionarySuggestions", renderer, mappedInput),
+      boundedSuggestions_(std::move(suggestions)),
+      uiTarget(makeUiTarget(renderer)),
+      app(uiTarget, uiTarget.deviceContext()) {}
+
+size_t DictionarySuggestionsActivity::suggestionCount() const {
+  return suggestions.empty() ? boundedSuggestions_.count : suggestions.size();
+}
+
+const char* DictionarySuggestionsActivity::suggestionAt(const size_t index) const {
+  if (index >= suggestionCount()) return "";
+  return suggestions.empty() ? boundedSuggestions_.items[index].c_str() : suggestions[index].c_str();
+}
+
 void DictionarySuggestionsActivity::onEnter() {
   Activity::onEnter();
   selectedIndex = 0;
@@ -28,23 +47,20 @@ void DictionarySuggestionsActivity::onEnter() {
   applySharedUiTheme(app, uiTarget);
   app.on(ACTION_ROW, &DictionarySuggestionsActivity::onRowEvent, this);
   app.setScreen(&DictionarySuggestionsActivity::suggestionsScreen, this);
-  uiItems.clear();
-  uiItems.reserve(suggestions.size());
-  for (size_t i = 0; i < suggestions.size(); ++i) {
-    fui::ListItem item;
-    item.label = suggestions[i].c_str();
-    item.actionValue = static_cast<int16_t>(i);
-    uiItems.push_back(item);
+  uiItemCount_ = static_cast<uint8_t>(std::min<size_t>(suggestionCount(), uiItems_.size()));
+  for (uint8_t i = 0; i < uiItemCount_; ++i) {
+    uiItems_[i].label = suggestionAt(i);
+    uiItems_[i].actionValue = static_cast<int16_t>(i);
   }
   requestUpdate();
 }
 
 void DictionarySuggestionsActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<DictionarySuggestionsActivity*>(user);
-  if (event.value < 0 || event.value >= static_cast<int16_t>(self->suggestions.size())) return;
+  if (event.value < 0 || event.value >= static_cast<int16_t>(self->suggestionCount())) return;
   self->selectedIndex = event.value;
   self->app.clearTapFlash();
-  self->setResult(WordResult{self->suggestions[self->selectedIndex]});
+  self->setResult(WordResult{self->suggestionAt(self->selectedIndex)});
   self->finish();
 }
 
@@ -60,8 +76,8 @@ void DictionarySuggestionsActivity::buildSuggestionsScreen(UiApp::ScreenType& sc
                   0, static_cast<int16_t>(metrics.buttonHintsHeight + metrics.verticalSpacing), 0});
 
   fui::ListProps props;
-  props.items = uiItems.data();
-  props.count = static_cast<uint16_t>(uiItems.size());
+  props.items = uiItems_.data();
+  props.count = uiItemCount_;
   props.selectedIndex = static_cast<int16_t>(selectedIndex);
   props.topIndex = static_cast<uint16_t>(topIndex);
   props.action = ACTION_ROW;
@@ -70,7 +86,7 @@ void DictionarySuggestionsActivity::buildSuggestionsScreen(UiApp::ScreenType& sc
   props.labelText.maxLines = 2;
   const auto rows = configureUiList(props, screen.theme(), screen.body());
   visibleRows = rows > 0 ? rows : 1;
-  topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(suggestions.size()));
+  topIndex = scrollListBy(topIndex, 0, visibleRows, static_cast<int>(suggestionCount()));
   props.topIndex = static_cast<uint16_t>(topIndex);
   screen.list(props);
 }
@@ -93,7 +109,7 @@ void DictionarySuggestionsActivity::loop() {
   const auto swipe = mappedInput.wasSwipe();
   if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
     const int delta = swipe == MappedInputManager::SwipeDir::Up ? visibleRows : -visibleRows;
-    const int next = scrollListBy(topIndex, delta, visibleRows, static_cast<int>(suggestions.size()));
+    const int next = scrollListBy(topIndex, delta, visibleRows, static_cast<int>(suggestionCount()));
     if (next != topIndex) {
       topIndex = next;
       requestUpdate();
@@ -102,7 +118,7 @@ void DictionarySuggestionsActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    setResult(WordResult{suggestions[selectedIndex]});
+    setResult(WordResult{suggestionAt(selectedIndex)});
     finish();
     return;
   }
@@ -116,12 +132,12 @@ void DictionarySuggestionsActivity::loop() {
                         mappedInput.wasReleased(MappedInputManager::Button::Right);
   if (prevItem && selectedIndex > 0) {
     selectedIndex--;
-    topIndex = followListSelection(selectedIndex, topIndex, visibleRows, static_cast<int>(suggestions.size()));
+    topIndex = followListSelection(selectedIndex, topIndex, visibleRows, static_cast<int>(suggestionCount()));
     requestUpdate();
   }
-  if (nextItem && selectedIndex < static_cast<int>(suggestions.size()) - 1) {
+  if (nextItem && selectedIndex < static_cast<int>(suggestionCount()) - 1) {
     selectedIndex++;
-    topIndex = followListSelection(selectedIndex, topIndex, visibleRows, static_cast<int>(suggestions.size()));
+    topIndex = followListSelection(selectedIndex, topIndex, visibleRows, static_cast<int>(suggestionCount()));
     requestUpdate();
   }
 }

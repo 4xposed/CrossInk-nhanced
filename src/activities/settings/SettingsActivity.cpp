@@ -69,7 +69,7 @@ constexpr size_t controlsHomeButtonCount = 4;
 constexpr size_t controlsPowerMinCount = 2;
 constexpr size_t controlsPowerMaxCount = 3;
 constexpr size_t controlsFrontButtonCount = 6;
-constexpr size_t controlsSideButtonBaseCount = 3;
+constexpr size_t controlsSideButtonBaseCount = 4;
 
 void formatFrontlightScheduleTime(const uint16_t timeOfDay, char* const buf, const size_t len) {
   const FrontlightSchedule::TimeOfDay time = FrontlightSchedule::timeOfDayFromMinutes(timeOfDay);

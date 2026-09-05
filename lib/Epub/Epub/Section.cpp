@@ -11,6 +11,7 @@
 #include <Serialization.h>
 
 #include "Epub/ReferencePageNavigation.h"
+#include "Epub/RubyGlossary.h"
 #include "Epub/css/CssParser.h"
 #include "Page.h"
 #include "SectionPageIndexSerialization.h"
@@ -27,11 +28,12 @@ constexpr uint32_t SECTION_CACHE_MAGIC = 0x535843FF;  // bytes: 0xFF, "CXS"
 // v75: HTML hidden attributes suppress content in all reading modes.
 // v76: Paragraphs without source CSS indentation no longer receive a synthetic indent.
 // v77: Ordered lists, marker suppression, and list-container insets affect page layout.
-constexpr uint8_t SECTION_FILE_VERSION = 77;
+// v78: Upstream v77 layout combined with fork ruby glossary semantics.
+constexpr uint8_t SECTION_FILE_VERSION = 78;
 // Suspended incremental build: valid pages plus LUTs and a parse-watermark trailer.
 // Change this with layout or payload changes so stale partial pages cannot resume
 // under a different layout contract.
-constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xF3;
+constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xF2;
 constexpr uint32_t HEADER_SIZE =
     sizeof(SECTION_CACHE_MAGIC) + sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(bool) +
     sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) + sizeof(bool) + sizeof(uint8_t) +
@@ -663,6 +665,10 @@ bool Section::createSectionFile(const ReaderRenderSpec& spec, const std::functio
   if (layoutAbortedForLowMemory) {
     *layoutAbortedForLowMemory = *layoutAbortedForLowMemory || visitor.wasLowMemoryAbortTriggered();
   }
+  // A cancellation can arrive after the parser's final callback but before
+  // any LUT/header writes. Observe it once more so that generation is never
+  // promoted (and therefore never contributes a glossary harvest).
+  if (!cancelled && cancelBuild()) cancelled = true;
 
   if (!htmlCached) {
     if (success || pageCompletionFailed) {
@@ -744,6 +750,13 @@ bool Section::createSectionFile(const ReaderRenderSpec& spec, const std::functio
       cssParser->clear();
     }
     return false;
+  }
+  // Only a complete, fully promoted, uncancelled section contributes readings.
+  // Check cancellation once more at the side-effect boundary because it may
+  // arrive while LUTs are written or the section temp is promoted.
+  if (!cancelBuild() && visitor.hasCompleteRubyHarvest()) {
+    // A glossary failure is cosmetic and must not roll back the valid cache.
+    RubyGlossary::merge(epub->getCachePath(), visitor.rubyHarvest);
   }
   if (cssParser) {
     cssParser->clear();
@@ -1187,6 +1200,11 @@ bool Section::finalizeBuild() {
   }
 
   const bool committed = commitBuildFile(SECTION_FILE_VERSION, 0, 0);
+  if (committed && build_->parser->hasCompleteRubyHarvest()) {
+    // commitBuildFile has closed and promoted the full section. Merge before
+    // destroying the parser that owns the bounded transient harvest.
+    RubyGlossary::merge(epub->getCachePath(), build_->parser->rubyHarvest);
+  }
   if (build_->cssParser) build_->cssParser->clear();
   if (!build_->reusedHtml && Storage.exists(build_->tmpHtmlPath.c_str())) {
     Storage.remove(build_->tmpHtmlPath.c_str());
@@ -1329,7 +1347,7 @@ std::unique_ptr<Page> Section::loadPageAt(const int page) const {
   }
 
   return Page::deserialize(f);
-  // No f.close() needed -- DESTRUCTOR_CLOSES_FILE=1 handles it at scope exit
+  // No f.close() needed as DESTRUCTOR_CLOSES_FILE=1 handles it at scope exit
 }
 
 std::unique_ptr<Page> Section::loadPage(const int page) {
@@ -1339,8 +1357,6 @@ std::unique_ptr<Page> Section::loadPage(const int page) {
   if (build_ && static_cast<size_t>(page) < build_->pageIndex.size()) {
     return loadPageDuringBuild(page);
   }
-  // Not (yet) in the active build: serve from the file on disk -- a finalized section,
-  // or a partial from a previous session whose pages the rebuild hasn't reached again.
   const int onDisk = partial_ ? partialPageCount_ : (build_ ? 0 : pageCount);
   if (page >= onDisk) {
     return nullptr;
@@ -1361,9 +1377,6 @@ std::optional<uint16_t> Section::getCachedPageCount() const {
     return std::nullopt;
   }
 
-  // Only a finalized section's count is the chapter total; a partial's count is just the
-  // suspended build's watermark, which would skew progress mapping. Callers fall back to
-  // their own estimates.
   uint32_t magic;
   if (!serialization::tryReadPod(f, magic) || magic != SECTION_CACHE_MAGIC) {
     return std::nullopt;
@@ -1694,9 +1707,6 @@ std::optional<uint16_t> Section::getPageForVisibleTextOffset(const uint32_t offs
     }
     const uint32_t last = build_->pageIndex[build_->pageIndex.size() - 1].visibleTextOffset;
     if (offset <= last) return result;
-    // An extension build starts from page zero while its previously committed
-    // partial remains readable.  Its shorter live prefix must not hide a page
-    // that the committed cache already knows how to resolve.
   }
 
   // A from-scratch build (no partial ever committed for this cache key) has nothing on

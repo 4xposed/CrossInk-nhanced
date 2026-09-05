@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "IpaUtils.h"  // IpaTextSpan (Wrapper scratch member)
@@ -39,6 +40,29 @@ struct LayoutSegmentRef {
   EpdFontFamily::Style style = EpdFontFamily::REGULAR;
   bool isIpa = false;
 };
+
+// Length-aware input used by worker-side dictionary layout. Unlike StyledSpan,
+// text is not required to be NUL-terminated and may end in the middle of a
+// UTF-8 sequence; BoundedWrapper carries that sequence into the next span.
+struct LengthSpan {
+  std::string_view text;
+  EpdFontFamily::Style style = EpdFontFamily::REGULAR;
+  bool ipa = false;
+  bool isListItem = false;
+  bool newlineBefore = false;
+  uint8_t indentLevel = 0;
+};
+
+// Length-safe width callback for borrowed streaming spans. The callback must
+// not retain text. Function-pointer + context keeps the worker path allocation
+// free and avoids std::function on the 4-KiB task stack.
+struct LengthMeasurer {
+  void* ctx = nullptr;
+  int (*fn)(void* ctx, std::string_view text, EpdFontFamily::Style style, bool isIpa) = nullptr;
+  int operator()(std::string_view text, EpdFontFamily::Style style, bool isIpa) const {
+    return fn ? fn(ctx, text, style, isIpa) : -1;
+  }
+};
 struct LayoutLineView {
   const char* textPool = nullptr;
   const LayoutSegmentRef* segments = nullptr;
@@ -72,6 +96,84 @@ struct LineSink {
   void* ctx = nullptr;
   void (*fn)(void* ctx, const LayoutLineView& line) = nullptr;
   void operator()(const LayoutLineView& line) const { fn(ctx, line); }
+};
+
+// A cancellable sink for the bounded worker wrapper. Returning false stops
+// before any later line is emitted.
+struct ControlledLineSink {
+  void* ctx = nullptr;
+  bool (*fn)(void* ctx, const LayoutLineView& line) = nullptr;
+  bool operator()(const LayoutLineView& line) const { return fn && fn(ctx, line); }
+};
+
+enum class BoundedWrapStatus : uint8_t { Ok, InvalidUtf8, Overflow, SinkRejected };
+
+// Fixed scratch owned by the caller. Firmware allocates this once on the heap;
+// keeping it out of BoundedWrapper prevents a roughly 2-KiB worker stack frame.
+// The byte cap also prevents an adversarial unbroken/combining-mark token from
+// turning cross-chunk carry into unbounded heap growth.
+struct BoundedWrapScratch {
+  static constexpr uint16_t kTextCapacity = 512;
+  static constexpr uint16_t kSegmentCapacity = 64;
+  char lineText[kTextCapacity]{};
+  LayoutSegmentRef lineSegments[kSegmentCapacity]{};
+  char tokenText[kTextCapacity]{};
+  LayoutSegmentRef tokenSegments[kSegmentCapacity]{};
+};
+
+// Allocation-free, length-aware streaming wrapper for dictionary worker jobs.
+// Span and UTF-8 boundaries are independent: words and up-to-four-byte UTF-8
+// sequences may cross any number of source chunks. finish() rejects a trailing
+// partial sequence. Scratch is reusable only after finish()/failure returns.
+class BoundedWrapper {
+ public:
+  BoundedWrapper(const WrapMetrics& metrics, const LengthMeasurer& measure, const ControlledLineSink& sink,
+                 BoundedWrapScratch& scratch);
+
+  bool onSpan(const LengthSpan& span);
+  bool finish();
+  BoundedWrapStatus status() const { return status_; }
+
+ private:
+  struct SpanStyle {
+    EpdFontFamily::Style style = EpdFontFamily::REGULAR;
+    bool ipa = false;
+    uint8_t indentLevel = 0;
+  };
+
+  bool acceptCodepoint(const char* bytes, uint8_t length, uint32_t codepoint, const SpanStyle& spanStyle);
+  bool appendToken(const char* bytes, uint8_t length, EpdFontFamily::Style style, bool isIpa, int width,
+                   uint8_t indent);
+  bool flushToken(bool forcedContinuation = false);
+  bool appendTokenRange(uint16_t offset, uint16_t length, EpdFontFamily::Style style, bool isIpa);
+  bool appendLineBytes(const char* bytes, uint16_t length, EpdFontFamily::Style style, bool isIpa, int width);
+  bool flushLine();
+  bool startLine(uint8_t indent, bool listItem);
+  int measureCodepoint(std::string_view bytes, EpdFontFamily::Style style, bool isIpa) const;
+  bool fail(BoundedWrapStatus status);
+
+  int maxWidth_ = 0;
+  int indentStep_ = 0;
+  int bulletWidth_ = 0;
+  LengthMeasurer measure_{};
+  ControlledLineSink sink_{};
+  BoundedWrapScratch& scratch_;
+  BoundedWrapStatus status_ = BoundedWrapStatus::Ok;
+  uint16_t lineBytes_ = 0;
+  uint16_t lineSegmentCount_ = 0;
+  uint16_t tokenBytes_ = 0;
+  uint16_t tokenSegmentCount_ = 0;
+  int currentX_ = 0;
+  int tokenWidth_ = 0;
+  uint8_t lineIndent_ = 0;
+  uint8_t tokenIndent_ = 0;
+  bool lineIsListItem_ = false;
+  bool pendingSpace_ = false;
+  bool continuingToken_ = false;
+  char utf8Pending_[4]{};
+  uint8_t utf8PendingLength_ = 0;
+  uint8_t utf8ExpectedLength_ = 0;
+  SpanStyle utf8PendingStyle_{};
 };
 
 // Stateful word-wrapper. Spans are fed one at a time via onSpan() (so the source

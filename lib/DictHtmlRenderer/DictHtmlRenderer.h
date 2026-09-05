@@ -2,7 +2,9 @@
 
 #include <expat.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -16,12 +18,17 @@ struct StyledSpan {
   uint32_t textOffset = 0;     // Internal: byte offset into textBuf; converted to text after render()
   bool bold = false;
   bool italic = false;
+  bool superscript = false;
+  bool subscript = false;
+  bool ipa = false;
   bool underline = false;
   bool strikethrough = false;
   bool isListItem = false;
   bool newlineBefore = false;
   uint8_t indentLevel = 0;
 };
+
+enum class DictHtmlStreamStatus : uint8_t { Success, ReadError, ParseError, Cancelled, SinkRejected, OutOfMemory };
 
 /**
  * Renders StarDict HTML definitions (sametypesequence=h) into a flat vector
@@ -59,16 +66,36 @@ class DictHtmlRenderer {
     void operator()(const StyledSpan& span) const { fn(ctx, span); }
   };
 
+  struct ControlledSpanSink {
+    void* ctx = nullptr;
+    bool (*onSpan)(void* ctx, const StyledSpan& span) = nullptr;
+    bool (*shouldCancel)(void* ctx) = nullptr;
+  };
+
   // Stream-render from a .dict file, delivering each span to `sink` as it is
   // produced. Unlike renderFromFile(), the whole-definition textBuf and spans
   // vector are NEVER materialized — peak RAM is one span's scratch. Returns true
   // on success. Used by the definition view so only one page is ever resident.
   bool renderFromFileStreaming(const char* dictPath, uint32_t offset, uint32_t size, const SpanSink& sink);
 
+  // Error-aware streaming overload for constrained worker tasks.
+	// `chunk` is a caller-owned reusable scratch.
+	// cancellation and sink rejection terminate parsing immediately and remain distinct from file/parse failures.
+  DictHtmlStreamStatus renderFromFileStreamingBuffered(const char* dictPath, uint32_t offset, uint32_t size,
+                                                       const ControlledSpanSink& sink, char* chunk, size_t chunkSize);
+
   // Recovery path for browser-tolerated HTML that Expat cannot parse (for
   // example, repeated <li> tags without matching </li> tags). Streams the
   // visible text while discarding tags and preserving basic block breaks.
   bool renderPlainTextFromFileStreaming(const char* dictPath, uint32_t offset, uint32_t size, const SpanSink& sink);
+
+  // Equivalent recovery path using caller-owned read scratch.
+	// This lets the dictionary worker reuse activity-owned heap instead of placing dedicated read buffer on its small task stack.
+  bool renderPlainTextFromFileStreamingBuffered(const char* dictPath, uint32_t offset, uint32_t size,
+                                                const SpanSink& sink, char* chunk, size_t chunkSize);
+  DictHtmlStreamStatus renderPlainTextFromFileStreamingBuffered(const char* dictPath, uint32_t offset, uint32_t size,
+                                                                const ControlledSpanSink& sink, char* chunk,
+                                                                size_t chunkSize);
 
 #ifdef DICT_HTML_RENDERER_TRACK_UNKNOWN
   bool hasUnknownTags() const { return unknownTagCount > 0; }
@@ -100,6 +127,8 @@ class DictHtmlRenderer {
     FORMAT_ITALIC,
     FORMAT_UNDERLINE,
     FORMAT_STRIKE,
+    FORMAT_SUPERSCRIPT,
+    FORMAT_SUBSCRIPT,
     FORMAT_SMALL,
     FORMAT_CODE,
     BLOCK_BREAK,
@@ -124,6 +153,9 @@ class DictHtmlRenderer {
     bool italic = false;
     bool underline = false;
     bool strikethrough = false;
+    bool superscript = false;
+    bool subscript = false;
+    bool ipa = false;
     uint8_t indentLevel = 0;
   };
 
@@ -142,6 +174,7 @@ class DictHtmlRenderer {
   };
 
   void reset();
+  bool ensureLegacyStreamBuffer();
   void pushSpan();
   void emitText(const char* s, int len);
   void flushPending();
@@ -150,6 +183,7 @@ class DictHtmlRenderer {
   // (synthetic root + 512-byte chunk loop + entity resolution). Used by both the
   // batch renderFromFile() and the streaming renderFromFileStreaming().
   void parseOpenFile(HalFile& file, uint32_t size);
+  DictHtmlStreamStatus parseOpenFileBuffered(HalFile& file, uint32_t size, char* chunk, size_t chunkSize);
 
   // Feed a buffer through the entity resolver into expat. If the buffer ends mid-entity,
   // the partial entity is written to carry/carryLen for prepending to the next chunk.
@@ -189,10 +223,17 @@ class DictHtmlRenderer {
 
   XML_Parser parser = nullptr;
   bool parseError = false;
+  bool parserActive_ = false;
 
   // When set (streaming mode), pushSpan() delivers spans here instead of
   // accumulating into textBuf/spans. Null in batch mode. Cleared by reset().
   SpanSink spanSink_;
+  ControlledSpanSink controlledSpanSink_;
+  DictHtmlStreamStatus streamStatus_ = DictHtmlStreamStatus::Success;
+  // Legacy streaming entry points remain source-compatible while keeping their 512-byte read scratch
+	// off constrained worker stacks.
+  static constexpr size_t kStreamBufferBytes = 512;
+  std::unique_ptr<char[]> legacyStreamBuffer_;
 
 #ifdef DICT_HTML_RENDERER_TRACK_UNKNOWN
   void recordUnknownTag(const char* tagName, const char* wordBefore, const char* tagContents, const char* wordAfter);

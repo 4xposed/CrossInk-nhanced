@@ -2,15 +2,19 @@
 #include <FreeInkApp.h>
 #include <FreeInkUIGfxRenderer.h>
 
+#include <array>
 #include <string>
 #include <vector>
 
 #include "../Activity.h"
+#include "util/DictionaryEngineTypes.h"
 
 class DictionarySuggestionsActivity final : public Activity {
  public:
   explicit DictionarySuggestionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                          std::vector<std::string> suggestions);
+  DictionarySuggestionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                DictionarySuggestions suggestions);
 
   void onEnter() override;
   void loop() override;
@@ -23,9 +27,13 @@ class DictionarySuggestionsActivity final : public Activity {
   static void suggestionsScreen(UiApp::ScreenType& screen, void* user);
   static void onRowEvent(const freeink::ui::ActionEvent& event, void* user);
   void buildSuggestionsScreen(UiApp::ScreenType& screen);
+  size_t suggestionCount() const;
+  const char* suggestionAt(size_t index) const;
 
   std::vector<std::string> suggestions;
-  std::vector<freeink::ui::ListItem> uiItems;
+  DictionarySuggestions boundedSuggestions_;
+  std::array<freeink::ui::ListItem, DictionarySuggestions::kCapacity> uiItems_{};
+  uint8_t uiItemCount_ = 0;
   int selectedIndex = 0;
   freeink::ui::GfxRendererTarget uiTarget;
   UiApp app;

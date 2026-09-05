@@ -34,7 +34,8 @@ static int testsFailed = 0;
 // ============================================================================
 // Synthetic test font
 //
-// Glyphs: space (0x20), 'T' (0x54), 'a' (0x61), 'o' (0x6F), 'x' (0x78)
+// Glyphs: space (0x20), 'T' (0x54), 'a' (0x61), 'o' (0x6F), 'x' (0x78),
+// and Japanese U+65E5.
 //   - 'x' advance is 136 FP (8.5px) -- frac = 8, exactly at the rounding
 //     boundary where absolute vs differential snapping diverges for "oo".
 //   - No U+FFFD replacement glyph, so unknown codepoints trigger the
@@ -53,6 +54,7 @@ static const EpdGlyph kGlyphs[] = {
   /* 2 'a' */ { 7,  8, 130, 0,  8, 0, 0 },
   /* 3 'o' */ { 8,  8, 145, 0,  8, 0, 0 },
   /* 4 'x' */ { 7,  8, 136, 0,  8, 0, 0 },
+  /* 5 U+65E5 */ { 12, 12, 192, 0, 12, 0, 0 },
 };
 
 static const EpdUnicodeInterval kIntervals[] = {
@@ -61,6 +63,7 @@ static const EpdUnicodeInterval kIntervals[] = {
   { 0x61, 0x61, 2 },  // 'a' -> glyph[2]
   { 0x6F, 0x6F, 3 },  // 'o' -> glyph[3]
   { 0x78, 0x78, 4 },  // 'x' -> glyph[4]
+  { 0x65E5, 0x65E5, 5 },  // Japanese 'day/sun' -> glyph[5]
 };
 
 static const EpdKernClassEntry kKernLeft[] = {
@@ -81,7 +84,7 @@ static const EpdFontData kTestFontData = {
   .bitmap            = nullptr,
   .glyph             = kGlyphs,
   .intervals         = kIntervals,
-  .intervalCount     = 5,
+  .intervalCount     = 6,
   .advanceY          = 16,
   .ascender          = 12,
   .descender         = 0,
@@ -103,6 +106,14 @@ static const EpdFontData kTestFontData = {
 
 static EpdFont testFont(&kTestFontData);
 static EpdFontFamily testFontFamily(&testFont);
+
+static const EpdFontData kBoldLatinOnlyFontData = [] {
+  EpdFontData data = kTestFontData;
+  data.intervalCount = 5;
+  return data;
+}();
+static EpdFont boldLatinOnlyFont(&kBoldLatinOnlyFontData);
+static EpdFontFamily regularCjkBoldLatinFamily(&testFont, &boldLatinOnlyFont);
 
 // Helper: return width from getTextDimensions
 static int textWidth(const char* str) {
@@ -472,6 +483,32 @@ void testFamilySpaceGlyphsStayBlank() {
   PASS();
 }
 
+void testFamilyCoverageMatchesBoldToRegularGlyphFallback() {
+  printf("testFamilyCoverageMatchesBoldToRegularGlyphFallback...\n");
+
+  // UI title faces can contain Latin-only bold glyphs while their regular face
+  // owns CJK. Rendering already falls back to regular; coverage checks must
+  // report the same answer so the UI fallback router selects this family.
+  ASSERT_TRUE(regularCjkBoldLatinFamily.getGlyph(0x65E5, EpdFontFamily::BOLD) != nullptr);
+  ASSERT_TRUE(regularCjkBoldLatinFamily.hasCodepoint(0x65E5, EpdFontFamily::BOLD));
+
+  printf("  Styled coverage matches the actual regular-face fallback\n");
+  PASS();
+}
+
+void testUncachedSdGlyphLoadsThroughFamily() {
+  EpdFontData data{};
+  data.glyphMissHandler = [](void*, uint32_t cp) -> const EpdGlyph* {
+    return cp == 0x65E5 ? &kGlyphs[1] : nullptr;
+  };
+  EpdFont font(&data);
+  EpdFontFamily family(&font);
+  ASSERT_TRUE(family.findGlyphData(0x65E5, EpdFontFamily::REGULAR).glyph == &kGlyphs[1]);
+  ASSERT_TRUE(family.getFallbackCodepoint(0x65E5, EpdFontFamily::REGULAR) == 0x65E5);
+  ASSERT_TRUE(family.findGlyphData(0x65E6, EpdFontFamily::REGULAR).glyph == nullptr);
+  PASS();
+}
+
 void testHeightCalculation() {
   printf("testHeightCalculation...\n");
 
@@ -505,7 +542,9 @@ int main() {
   testNullGlyphAdvancePreserved();
   testFamilyMissingGlyphUsesReplacementFallback();
   testFamilySpaceGlyphsStayBlank();
+  testFamilyCoverageMatchesBoldToRegularGlyphFallback();
   testHeightCalculation();
+  testUncachedSdGlyphLoadsThroughFamily();
 
   printf("\n=== Results: %d passed, %d failed ===\n", testsPassed, testsFailed);
   return testsFailed > 0 ? 1 : 0;

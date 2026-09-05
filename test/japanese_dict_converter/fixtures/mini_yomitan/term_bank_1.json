@@ -1,0 +1,65 @@
+[
+  [
+    "構造語",
+    "こうぞうご",
+    "",
+    "n",
+    50,
+    [
+      {
+        "type": "structured-content",
+        "content": [
+          {
+            "tag": "span",
+            "content": "noun",
+            "data": {"class": "tag", "content": "part-of-speech-info"}
+          },
+          {
+            "tag": "ul",
+            "content": [
+              {"tag": "li", "content": "structured definition"},
+              {"tag": "li", "content": "second structured sense"}
+            ],
+            "data": {"content": "glossary"}
+          },
+          {
+            "tag": "div",
+            "content": "example sentence",
+            "data": {"class": "extra-box", "content": "example-sentence"}
+          },
+          {"type": "image", "path": "ignored.png"}
+        ]
+      }
+    ],
+    0,
+    ""
+  ],
+  [
+    "食べる",
+    "たべる",
+    "",
+    "v1",
+    72,
+    ["to eat", ["食べる", ["redirected from 食べる"]]],
+    0,
+    ""
+  ],
+  [
+    "文法句",
+    "ぶんぽうく",
+    "",
+    "",
+    10,
+    [
+      {
+        "tag": "ruby",
+        "content": [
+          {"tag": "span", "content": "grammar phrase"},
+          {"tag": "rt", "content": "ignored reading"}
+        ]
+      }
+    ],
+    0,
+    ""
+  ]
+]

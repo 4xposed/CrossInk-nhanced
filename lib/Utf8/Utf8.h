@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #define REPLACEMENT_GLYPH 0xFFFD
 
 uint32_t utf8NextCodepoint(const unsigned char** string);
@@ -32,6 +33,12 @@ bool utf8ContainsLookupCharacter(const std::string& text);
 // scripts, and trailing combining marks. The result is composed to NFC where
 // the firmware's compact composition table has a matching entry.
 std::string utf8CleanLookupWord(const std::string& text);
+
+// Allocation-free form of utf8CleanLookupWord(). Writes a NUL-terminated
+// result into caller-owned storage and reports false only when the storage is
+// missing or too small. NFC composition never expands the input, so an
+// input.size() + 1 buffer is sufficient.
+bool utf8CleanLookupWordToBuffer(std::string_view text, char* output, size_t capacity, size_t& outputLength);
 
 // Truncate a raw char buffer to the last complete UTF-8 codepoint boundary.
 // Returns the new length (<= len). If the buffer ends mid-sequence, the

@@ -38,7 +38,8 @@ class EpubReaderMenuActivity final : public Activity {
       void* endGlobalSettingsEditContext = nullptr, const char* dictionaryFontFamilyName = nullptr,
       uint8_t dictionaryFontPointSize = 0, bool hasDictionaryFontOverride = false,
       ReaderOptionsActivity::DictionaryFontChangedCallback dictionaryFontChangedCallback = nullptr,
-      void* dictionaryFontChangedContext = nullptr);
+      void* dictionaryFontChangedContext = nullptr, const std::string* bookLanguage = nullptr,
+      const std::string* bookCachePath = nullptr);
 
   void onEnter() override;
   void onExit() override;
@@ -120,6 +121,9 @@ class EpubReaderMenuActivity final : public Activity {
   bool hasDictionaryFontOverride = false;
   ReaderOptionsActivity::DictionaryFontChangedCallback dictionaryFontChangedCallback = nullptr;
   void* dictionaryFontChangedContext = nullptr;
+  // Borrowed from the live Epub owned by the stacked EpubReaderActivity.
+  const std::string* bookLanguage = nullptr;
+  const std::string* bookCachePath = nullptr;
   bool settingsChanged = false;
   ReaderSettingsChangeMask changeMask = ReaderSettingsChangeMask::None;
 

@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "blocks/BlockStyle.h"
@@ -135,6 +136,9 @@ class ParsedText {
   void setBlockStyle(const BlockStyle& blockStyle) { this->blockStyle = blockStyle; }
   BlockStyle& getBlockStyle() { return blockStyle; }
   size_t size() const { return words.size(); }
+  std::string_view wordAt(size_t index) const {
+    return index < words.size() ? std::string_view(words[index]) : std::string_view{};
+  }
   bool isEmpty() const { return words.empty(); }
   bool isContinuation() const { return isContinuation_; }
   bool layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,

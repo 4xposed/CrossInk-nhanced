@@ -13,6 +13,7 @@
 My goal with this fork was to extend CrossInk to add support for:
 - Anki decks for langauge learning.
 - Support OPDS Servers which serve files in .xtc format.
+- Support for Yomitan dictionary.
 
 ---
 

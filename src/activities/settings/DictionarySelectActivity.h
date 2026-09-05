@@ -23,14 +23,10 @@ class DictionarySelectActivity final : public Activity {
   void render(RenderLock&&) override;
 
  private:
-  // Active SD card root directory for dictionaries (resolved in scanDictionaries()).
-  std::string dictRoot;
-
-  // Discovered dictionary folder names and file stems (parallel vectors, excluding "None").
-  // e.g. dictFolders[i] = "dict-en-en", dictStems[i] = "dict-data"
-  // folderForIndex() combines them with dictRoot into the full base path used for file access.
+  // Discovered display names and full base paths (parallel vectors, excluding
+  // "None"). Entries may come from either supported StarDict root.
   std::vector<std::string> dictFolders;
-  std::vector<std::string> dictStems;
+  std::vector<std::string> dictBasePaths;
 
   // Index into the full list including "None" at position 0.
   int selectedIndex = 0;
@@ -70,7 +66,7 @@ class DictionarySelectActivity final : public Activity {
   void finishSelection();
   bool usesPopup() const { return !bookCachePath.empty() && !disableCurrentSelection; }
 
-  // Scans the first available dictionary root directory on the SD card and populates dictFolders.
+  // Scans all supported dictionary roots and populates the parallel vectors.
   void scanDictionaries();
 
   // Returns the folder path for a given list index (0 = None → empty string).

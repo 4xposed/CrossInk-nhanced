@@ -66,6 +66,7 @@ void ReaderOptionsActivity::onEnter() {
 
   activeSubmenu = SettingAction::None;
   settingsDirty = false;
+  dictionarySettingsRegistry.discover(/*autoSelectDefault=*/false);
   rebuildSettingsList();
   uiReady = false;
   visibleRows = 1;
@@ -83,7 +84,11 @@ void ReaderOptionsActivity::rebuildSettingsList() {
   screenMarginSettings.clear();
   const bool needsFonts = activeSubmenu == SettingAction::ReaderFontOptions;
   if (needsFonts) sdFontSystem.refreshIfDirty();
-  const auto allSettings = getSettingsList(needsFonts ? &sdFontSystem.registry() : nullptr);
+  const std::string_view liveBookLanguage = bookLanguage ? std::string_view(*bookLanguage) : std::string_view{};
+  const char* liveBookCachePath = bookCachePath ? bookCachePath->c_str() : nullptr;
+  const auto allSettings =
+      getSettingsList(needsFonts ? &sdFontSystem.registry() : nullptr, &dictionarySettingsRegistry, liveBookLanguage,
+                      liveBookCachePath, /*showAppliedDictionary=*/true);
   settings = buildBookReaderSettingsParentList(allSettings);
   const auto indexingMethod = std::find_if(settings.begin(), settings.end(), [](const SettingInfo& setting) {
     return setting.nameId == StrId::STR_INDEXING_METHOD;
@@ -104,9 +109,8 @@ void ReaderOptionsActivity::rebuildSettingsList() {
                      fontSettings.end());
 
   // Dictionary-specific font controls are useful only when an installed dictionary can use them.
-  DictionaryRegistry installedDictionaryRegistry;
-  const bool hasInstalledDictionaries = installedDictionaryRegistry.discover();
-  installedDictionaryRegistry.clear();
+  const bool hasInstalledDictionaries =
+      dictionarySettingsRegistry.japaneseBundle().vocabulary || dictionarySettingsRegistry.count() > 0;
   if (!hasInstalledDictionaries || !needsFonts) {
     setCurrentSettings();
     selectedIndex = 0;
@@ -250,6 +254,7 @@ void ReaderOptionsActivity::closeSubmenu() {
 }
 
 void ReaderOptionsActivity::onExit() {
+  dictionarySettingsRegistry.clear();
   sdFontSystem.releaseRegistry();
   Activity::onExit();
 }

@@ -68,6 +68,77 @@ bool isLookupBoundary(const uint32_t cp) {
 bool isLookupCoreCharacter(const uint32_t cp) {
   return cp != 0 && cp != REPLACEMENT_GLYPH && !utf8IsCombiningMark(cp) && !isLookupBoundary(cp);
 }
+
+uint32_t nextBoundedCodepoint(const std::string_view text, size_t& offset) {
+  if (offset >= text.size()) return 0;
+  const auto* bytes = reinterpret_cast<const uint8_t*>(text.data());
+  const uint8_t lead = bytes[offset];
+  size_t count = 1;
+  if (lead < 0x80) {
+    ++offset;
+    return lead;
+  } else if ((lead & 0xE0U) == 0xC0U) {
+    count = 2;
+  } else if ((lead & 0xF0U) == 0xE0U) {
+    count = 3;
+  } else if ((lead & 0xF8U) == 0xF0U) {
+    count = 4;
+  } else {
+    ++offset;
+    return REPLACEMENT_GLYPH;
+  }
+  if (count > text.size() - offset) {
+    ++offset;
+    return REPLACEMENT_GLYPH;
+  }
+  for (size_t index = 1; index < count; ++index) {
+    if ((bytes[offset + index] & 0xC0U) != 0x80U) {
+      ++offset;
+      return REPLACEMENT_GLYPH;
+    }
+  }
+
+  uint32_t codepoint = bytes[offset] & ((1U << (7U - count)) - 1U);
+  for (size_t index = 1; index < count; ++index) codepoint = (codepoint << 6U) | (bytes[offset + index] & 0x3FU);
+  const bool overlong =
+      (count == 2 && codepoint < 0x80) || (count == 3 && codepoint < 0x800) || (count == 4 && codepoint < 0x10000);
+  if (overlong || (codepoint >= 0xD800 && codepoint <= 0xDFFF) || codepoint > 0x10FFFF) {
+    ++offset;
+    return REPLACEMENT_GLYPH;
+  }
+  offset += count;
+  return codepoint;
+}
+
+bool appendCodepointToBuffer(const uint32_t codepoint, char* output, const size_t capacity, size_t& used) {
+  size_t count = 0;
+  if (codepoint <= 0x7F) {
+    count = 1;
+  } else if (codepoint <= 0x7FF) {
+    count = 2;
+  } else if (codepoint <= 0xFFFF) {
+    count = 3;
+  } else {
+    count = 4;
+  }
+  if (used >= capacity || count >= capacity - used) return false;
+  if (count == 1) {
+    output[used++] = static_cast<char>(codepoint);
+  } else if (count == 2) {
+    output[used++] = static_cast<char>(0xC0U | (codepoint >> 6U));
+    output[used++] = static_cast<char>(0x80U | (codepoint & 0x3FU));
+  } else if (count == 3) {
+    output[used++] = static_cast<char>(0xE0U | (codepoint >> 12U));
+    output[used++] = static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU));
+    output[used++] = static_cast<char>(0x80U | (codepoint & 0x3FU));
+  } else {
+    output[used++] = static_cast<char>(0xF0U | (codepoint >> 18U));
+    output[used++] = static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3FU));
+    output[used++] = static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU));
+    output[used++] = static_cast<char>(0x80U | (codepoint & 0x3FU));
+  }
+  return true;
+}
 }  // namespace
 
 std::string utf8ComposeNfc(const std::string& in) {
@@ -163,27 +234,63 @@ bool utf8ContainsLookupCharacter(const char* text) {
 bool utf8ContainsLookupCharacter(const std::string& text) { return utf8ContainsLookupCharacter(text.c_str()); }
 
 std::string utf8CleanLookupWord(const std::string& text) {
-  const auto* begin = reinterpret_cast<const unsigned char*>(text.c_str());
-  const auto* cursor = begin;
-  size_t firstCore = std::string::npos;
-  size_t lastKeptEnd = 0;
+  std::string cleaned(text.size(), '\0');
+  size_t cleanedBytes = 0;
+  if (!utf8CleanLookupWordToBuffer(text, cleaned.data(), cleaned.size() + 1, cleanedBytes)) return {};
+  cleaned.resize(cleanedBytes);
+  return cleaned;
+}
 
-  while (*cursor) {
-    const auto* cpStart = cursor;
-    const uint32_t cp = utf8NextCodepoint(&cursor);
-    if (isLookupCoreCharacter(cp)) {
-      if (firstCore == std::string::npos) firstCore = static_cast<size_t>(cpStart - begin);
-      lastKeptEnd = static_cast<size_t>(cursor - begin);
-    } else if (firstCore != std::string::npos && utf8IsCombiningMark(cp) &&
-               static_cast<size_t>(cpStart - begin) == lastKeptEnd) {
-      // A trailing mark belongs to the preceding base character. If another
-      // core character follows, punctuation between them remains internal.
-      lastKeptEnd = static_cast<size_t>(cursor - begin);
+bool utf8CleanLookupWordToBuffer(const std::string_view text, char* const output, const size_t capacity,
+                                 size_t& outputLength) {
+  outputLength = 0;
+  if (!output || capacity == 0) return false;
+  output[0] = '\0';
+
+  size_t firstCore = std::string_view::npos;
+  size_t lastKeptEnd = 0;
+  size_t offset = 0;
+  while (offset < text.size()) {
+    const size_t codepointStart = offset;
+    const uint32_t codepoint = nextBoundedCodepoint(text, offset);
+    if (codepoint == 0) break;
+    if (isLookupCoreCharacter(codepoint)) {
+      if (firstCore == std::string_view::npos) firstCore = codepointStart;
+      lastKeptEnd = offset;
+    } else if (firstCore != std::string_view::npos && utf8IsCombiningMark(codepoint) && codepointStart == lastKeptEnd) {
+      lastKeptEnd = offset;
     }
   }
+  if (firstCore == std::string_view::npos) return true;
 
-  if (firstCore == std::string::npos) return {};
-  return utf8ComposeNfc(text.substr(firstCore, lastKeptEnd - firstCore));
+  uint32_t base = 0;
+  bool haveBase = false;
+  offset = firstCore;
+  while (offset < lastKeptEnd) {
+    const uint32_t codepoint = nextBoundedCodepoint(text.substr(0, lastKeptEnd), offset);
+    if (utf8IsCombiningMark(codepoint)) {
+      const uint32_t composed = haveBase ? utf8ComposePair(base, codepoint) : 0;
+      if (composed != 0) {
+        base = composed;
+        continue;
+      }
+      if (haveBase && !appendCodepointToBuffer(base, output, capacity, outputLength)) goto too_small;
+      haveBase = false;
+      if (!appendCodepointToBuffer(codepoint, output, capacity, outputLength)) goto too_small;
+    } else {
+      if (haveBase && !appendCodepointToBuffer(base, output, capacity, outputLength)) goto too_small;
+      base = codepoint;
+      haveBase = true;
+    }
+  }
+  if (haveBase && !appendCodepointToBuffer(base, output, capacity, outputLength)) goto too_small;
+  output[outputLength] = '\0';
+  return true;
+
+too_small:
+  outputLength = 0;
+  output[0] = '\0';
+  return false;
 }
 
 int utf8CodepointLen(const unsigned char c) {

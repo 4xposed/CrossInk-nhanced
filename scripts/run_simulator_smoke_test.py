@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -57,7 +58,73 @@ def prepare_fs(temp_root: Path, book: Path) -> str:
     target = books_dir / book.name
     shutil.copy2(book, target)
     shutil.copy2(book, temp_root / "fs_" / OPDS_SIMULATOR_BOOK)
+    prepare_dictionary(temp_root)
     return f"/books/{book.name}"
+
+
+def prepare_dictionary(temp_root: Path) -> None:
+    """Install a minimal language-routed StarDict for reader lookup smoke paths."""
+    records = {
+        "Alignment": "the arrangement of text",
+        "Reader": "a person or application that reads",
+        "This": "the present thing",
+        "paragraph": "a section of written text",
+        "text": "written words",
+        "the": "definite article",
+    }
+    dictionary_dir = temp_root / "fs_" / "dictionaries" / "en" / "smoke"
+    dictionary_dir.mkdir(parents=True, exist_ok=True)
+    index = bytearray()
+    definitions = bytearray()
+    for word, definition in sorted(records.items()):
+        encoded_word = word.encode("utf-8")
+        encoded_definition = definition.encode("utf-8")
+        index.extend(encoded_word)
+        index.append(0)
+        index.extend(struct.pack(">II", len(definitions), len(encoded_definition)))
+        definitions.extend(encoded_definition)
+
+    base = dictionary_dir / "dict-data"
+    (base.with_suffix(".idx")).write_bytes(index)
+    (base.with_suffix(".dict")).write_bytes(definitions)
+    (base.with_suffix(".ifo")).write_text(
+        "StarDict's dict ifo file\n"
+        "version=3.0.0\n"
+        "bookname=Simulator Smoke\n"
+        f"wordcount={len(records)}\n"
+        f"idxfilesize={len(index)}\n"
+        "sametypesequence=m\n",
+        encoding="utf-8",
+    )
+
+    fallback_dir = temp_root / "fs_" / "dictionaries" / "fr" / "book"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    fallback_base = fallback_dir / "dict-data"
+    (fallback_base.with_suffix(".idx")).write_bytes(index)
+    (fallback_base.with_suffix(".dict")).write_bytes(definitions)
+    (fallback_base.with_suffix(".ifo")).write_text(
+        "StarDict's dict ifo file\n"
+        "version=3.0.0\n"
+        "bookname=Simulator Book Fallback\n"
+        f"wordcount={len(records)}\n"
+        f"idxfilesize={len(index)}\n"
+        "sametypesequence=m\n",
+        encoding="utf-8",
+    )
+
+    global_config_dir = temp_root / "fs_" / ".crosspoint"
+    global_config_dir.mkdir(parents=True, exist_ok=True)
+    (global_config_dir / "dictionary.bin").write_text("/dictionaries/en/smoke/dict-data", encoding="utf-8")
+    book_cache_dir = temp_root / "fs_" / "smoke-book-cache"
+    book_cache_dir.mkdir(parents=True, exist_ok=True)
+    (book_cache_dir / "dictionary.bin").write_text("/dictionaries/fr/book/dict-data", encoding="utf-8")
+
+    japanese_dir = temp_root / "fs_" / "dictionaries" / "jp"
+    japanese_dir.mkdir(parents=True, exist_ok=True)
+    golden_dir = ROOT / "test" / "japanese_dict_converter" / "golden" / "mini_jmdict"
+    shutil.copy2(golden_dir / "vocab.idx", japanese_dir / "vocab.idx")
+    shutil.copy2(golden_dir / "vocab.dat", japanese_dir / "vocab.dat")
+    shutil.copy2(golden_dir / "vocab.spx", japanese_dir / "vocab.spx")
 
 
 def run_smoke(args: argparse.Namespace) -> int:

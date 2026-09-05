@@ -93,6 +93,8 @@ class SimulatorSmokeTest {
     OpenBooks,
     DisableReaderTouch,
     EnableReaderTouch,
+    SetLookupPowerShortcut,
+    ResetPowerShortcut,
     TouchDown,
     TouchMove,
     TouchRelease,
@@ -351,6 +353,75 @@ class SimulatorSmokeTest {
     }
   }
 
+  static bool verifyWordLookupSideButtonMenuContract() {
+    const auto allSettings = getSettingsList();
+    const auto sideButtonSettings = buildControlsSideButtonSettingsList(allSettings);
+    if (sideButtonSettings.size() != 4 + (gpio.hasTouch() ? 1u : 0u)) return false;
+
+    const SettingInfo& setting = sideButtonSettings[1];
+    return settingKeyIs(setting, "wordLookupSideButtons") && setting.nameId == StrId::STR_WORD_LOOKUP_SIDE_BUTTONS &&
+           setting.type == SettingType::ENUM && setting.valuePtr == &CrossPointSettings::wordLookupSideButtons &&
+           setting.category == StrId::STR_CAT_CONTROLS &&
+           setting.enumValues == std::vector<StrId>{StrId::STR_NO, StrId::STR_YES} && setting.enumRawValues.empty();
+  }
+
+  static void verifyDictionarySettingsMenuContract() {
+    DictionaryRegistry registry;
+    if (!registry.discover(/*autoSelectDefault=*/false)) {
+      fail("Dictionary settings fixture discovery failed");
+    }
+
+    const SettingInfo editable = buildDictionarySetting(&registry, {}, nullptr, false);
+    if (editable.nameId != StrId::STR_DICT_FALLBACK || !settingKeyIs(editable, "dictionary") || !editable.valueGetter ||
+        !editable.valueSetter) {
+      fail("Global dictionary fallback row contract failed");
+    }
+    const int globalIndex = registry.indexOfExactOrEquivalent("/dictionaries/en/smoke/dict-data");
+    if (globalIndex < 0 || static_cast<size_t>(globalIndex + 1) >= editable.enumStringValues.size() ||
+        editable.valueGetter() != static_cast<uint8_t>(globalIndex + 1) ||
+        editable.enumStringValues[static_cast<size_t>(globalIndex + 1)] != "en/smoke") {
+      fail("Global dictionary fallback value contract failed");
+    }
+
+    const SettingInfo automaticJapanese = buildDictionarySetting(&registry, "ja-JP", "/smoke-book-cache", true);
+    if (automaticJapanese.nameId != StrId::STR_DICTIONARY || automaticJapanese.valueSetter ||
+        automaticJapanese.enumStringValues.size() != 1 ||
+        automaticJapanese.enumStringValues.front() != tr(STR_DICT_EFFECTIVE_JAPANESE)) {
+      fail("Automatic Japanese applied dictionary contract failed");
+    }
+
+    const SettingInfo perBookFallback = buildDictionarySetting(&registry, "de-DE", "/smoke-book-cache", true);
+    if (perBookFallback.enumStringValues.size() != 1 || perBookFallback.enumStringValues.front() != "fr/book") {
+      fail("Per-book applied dictionary fallback contract failed");
+    }
+
+    HalFile malformedIndex;
+    if (!Storage.openFileForWrite("SMOKE", "/dictionaries/jp/vocab.idx", malformedIndex)) {
+      fail("Could not create malformed Japanese settings fixture");
+    }
+    const uint8_t truncatedRecord = 1;
+    malformedIndex.write(&truncatedRecord, sizeof(truncatedRecord));
+    malformedIndex.close();
+    HalFile emptyData;
+    if (!Storage.openFileForWrite("SMOKE", "/dictionaries/jp/vocab.dat", emptyData)) {
+      fail("Could not create empty Japanese settings fixture");
+    }
+    emptyData.close();
+
+    DictionaryRegistry malformedRegistry;
+    if (!malformedRegistry.discover(/*autoSelectDefault=*/false)) {
+      fail("Malformed Japanese fallback fixture discovery failed");
+    }
+    const SettingInfo malformedJapaneseFallback =
+        buildDictionarySetting(&malformedRegistry, "ja", "/smoke-book-cache", true);
+    if (malformedJapaneseFallback.enumStringValues.size() != 1 ||
+        malformedJapaneseFallback.enumStringValues.front() != "fr/book") {
+      fail("Malformed Japanese applied dictionary fallback contract failed");
+    }
+    malformedRegistry.clear();
+    registry.clear();
+  }
+
   [[noreturn]] static void fail(const char* message) {
     LOG_ERR("SMOKE", "%s", message);
     std::_Exit(2);
@@ -397,6 +468,13 @@ class SimulatorSmokeTest {
         if (!CrossPointSettings::verifySleepScreenMigrationContract()) {
           fail("Sleep screen migration contract failed");
         }
+        if (!CrossPointSettings::verifyWordLookupSideButtonsPersistenceContract()) {
+          fail("Word Lookup side-button persistence contract failed");
+        }
+        if (!verifyWordLookupSideButtonMenuContract()) {
+          fail("Word Lookup side-button menu contract failed");
+        }
+        verifyDictionarySettingsMenuContract();
         if (!SimulatorHomeKeyInput::verifyTimingContract()) {
           fail("Simulator Home key timing contract failed");
         }
@@ -626,6 +704,14 @@ class SimulatorSmokeTest {
     return {ScriptActionType::EnableReaderTouch, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
   }
 
+  static ScriptAction setLookupPowerShortcut() {
+    return {ScriptActionType::SetLookupPowerShortcut, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
+  }
+
+  static ScriptAction resetPowerShortcut() {
+    return {ScriptActionType::ResetPowerShortcut, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
+  }
+
   static ScriptAction openBooks() {
     return {ScriptActionType::OpenBooks, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
   }
@@ -761,6 +847,14 @@ class SimulatorSmokeTest {
         inputScript.push_back(touchRelease(width * 5 / 6, height / 2));
         inputScript.push_back(render("Reader after touch page forward", 4));
       }
+      inputScript.push_back(setLookupPowerShortcut());
+      addTap(MappedInputManager::Button::Power);
+      inputScript.push_back(render("Word Lookup opened from configured shortcut", 8));
+      inputScript.push_back(assertActivity("EpubReaderWordLookup"));
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Reader restored after shortcut lookup", 4));
+      inputScript.push_back(assertActivity("EpubReader"));
+      inputScript.push_back(resetPowerShortcut());
       if (mappedInputManager.hasHomeKey()) {
         // Reader long-Power actions fire at the hold threshold. Their release
         // must not reach main.cpp's global shortcut route and run the same
@@ -980,22 +1074,55 @@ class SimulatorSmokeTest {
     inputScript.push_back(render("Reader Menu opened from EPUB", 4));
 
     addTap(MappedInputManager::Button::Down);
-    inputScript.push_back(render("Reader Menu Reader Options selection", 3));
+    inputScript.push_back(render("Reader Menu Lookup selection", 3));
 
     addTap(MappedInputManager::Button::Confirm);
-    inputScript.push_back(render("Reader Options opened from Reader Menu", 4));
+    inputScript.push_back(render("Word Lookup opened from Reader Menu", 8));
+    inputScript.push_back(assertActivity("EpubReaderWordLookup"));
+
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Reader restored after menu lookup", 4));
+    inputScript.push_back(assertActivity("EpubReader"));
+
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Reader Menu reopened for Lookup History", 4));
+    inputScript.push_back(assertActivity("EpubReaderMenu"));
 
     addTap(MappedInputManager::Button::Down);
-    inputScript.push_back(render("Reader Options after navigation", 3));
+    addTap(MappedInputManager::Button::Down);
+    inputScript.push_back(render("Reader Menu Lookup History selection", 3));
 
     addTap(MappedInputManager::Button::Confirm);
-    inputScript.push_back(render("Reader Options after toggle", 3));
+    inputScript.push_back(render("Lookup History opened from Reader Menu", 4));
+    inputScript.push_back(assertActivity("LookedUpWords"));
+
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Word Lookup opened directly from history", 8));
+    inputScript.push_back(assertActivity("EpubReaderWordLookup"));
 
     addTap(MappedInputManager::Button::Back);
-    inputScript.push_back(render("Reader Menu after closing Reader Options", 4));
+    inputScript.push_back(render("Lookup History restored after direct lookup", 4));
+    inputScript.push_back(assertActivity("LookedUpWords"));
 
     addTap(MappedInputManager::Button::Back);
-    inputScript.push_back(render("Reader after closing Reader Menu", 4));
+    inputScript.push_back(render("Reader restored after Lookup History", 4));
+    inputScript.push_back(assertActivity("EpubReader"));
+
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Reader Menu reopened for Reader Options", 4));
+    inputScript.push_back(assertActivity("EpubReaderMenu"));
+    for (int index = 0; index < 4; ++index) addTap(MappedInputManager::Button::Down);
+    inputScript.push_back(render("Reader Menu Reader Options selection", 3));
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Reader Options opened with live dictionary context", 4));
+    inputScript.push_back(assertActivity("ReaderOptions"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Reader Menu restored after Reader Options", 4));
+    inputScript.push_back(assertActivity("EpubReaderMenu"));
+    addTap(MappedInputManager::Button::Back);
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Reader restored after Reader Options", 4));
+    inputScript.push_back(assertActivity("EpubReader"));
 
     LOG_INF("SMOKE", "Running reader input script with %d page turn(s)", turns);
   }
@@ -1125,6 +1252,12 @@ class SimulatorSmokeTest {
         break;
       case ScriptActionType::EnableReaderTouch:
         SETTINGS.disableReaderTouchscreen = false;
+        break;
+      case ScriptActionType::SetLookupPowerShortcut:
+        SETTINGS.shortPwrBtn = CrossPointSettings::SHORT_PWRBTN::LOOKUP_WORD;
+        break;
+      case ScriptActionType::ResetPowerShortcut:
+        SETTINGS.shortPwrBtn = CrossPointSettings::SHORT_PWRBTN::IGNORE;
         break;
       case ScriptActionType::OpenBooks:
         activityManager.goToFileBrowser("/books");

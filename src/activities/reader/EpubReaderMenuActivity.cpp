@@ -199,7 +199,7 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
     ReaderOptionsActivity::GlobalSettingsEditCallback endGlobalSettingsEditCallback, void* endGlobalSettingsEditContext,
     const char* dictionaryFontFamilyName, const uint8_t dictionaryFontPointSize, const bool hasDictionaryFontOverride,
     ReaderOptionsActivity::DictionaryFontChangedCallback dictionaryFontChangedCallback,
-    void* dictionaryFontChangedContext)
+    void* dictionaryFontChangedContext, const std::string* bookLanguage, const std::string* bookCachePath)
     : Activity("EpubReaderMenu", renderer, mappedInput),
       menuItems(buildMenuItems(hasFootnotes, hasBookmarks, hasClippings, isCurrentPageBookmarked, isBookCompleted,
                                showReadingPaceReset, hasDictionary, stablePageCount > 0)),
@@ -224,6 +224,8 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(
       hasDictionaryFontOverride(hasDictionaryFontOverride),
       dictionaryFontChangedCallback(dictionaryFontChangedCallback),
       dictionaryFontChangedContext(dictionaryFontChangedContext),
+      bookLanguage(bookLanguage),
+      bookCachePath(bookCachePath),
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {
   if (dictionaryFontFamilyName) {
@@ -379,7 +381,8 @@ bool EpubReaderMenuActivity::activateSelectedItem() {
             renderer, mappedInput, saveReaderSettingsCallback, saveReaderSettingsContext, saveGlobalSettingsCallback,
             saveGlobalSettingsContext, beginGlobalSettingsEditCallback, beginGlobalSettingsEditContext,
             endGlobalSettingsEditCallback, endGlobalSettingsEditContext, stablePageCount > 0, dictionaryFontFamilyName,
-            dictionaryFontPointSize, hasDictionaryFontOverride, dictionaryFontChangedForMenu, this),
+            dictionaryFontPointSize, hasDictionaryFontOverride, dictionaryFontChangedForMenu, this, bookLanguage,
+            bookCachePath),
         [this, before](const ActivityResult& result) {
           const ReaderSettingsChangeMask changed = classifyReaderSettingsChange(before, captureReaderLayoutSettings());
           if (changed != ReaderSettingsChangeMask::None) {

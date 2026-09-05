@@ -55,12 +55,8 @@ void DictionarySelectActivity::onEnter() {
     {
       const std::string activePath = Dictionary::readDictPath();
       if (!activePath.empty()) {
-        for (int i = 0; i < static_cast<int>(dictFolders.size()); i++) {
-          if (folderForIndex(i + 1) == activePath) {
-            selectedIndex = i + 1;
-            break;
-          }
-        }
+        const int entryIndex = dictionaryRegistry.indexOfExactOrEquivalent(activePath);
+        if (entryIndex >= 0) selectedIndex = entryIndex + 1;
       }
     }
   } else {
@@ -82,16 +78,12 @@ void DictionarySelectActivity::onEnter() {
 
     selectedIndex = 0;  // default: Use Global
     if (!currentBookDictPath.empty()) {
-      for (int i = 0; i < static_cast<int>(dictFolders.size()); i++) {
-        if (folderForIndex(i + 1) == currentBookDictPath) {
-          selectedIndex = i + 1;
-          break;
-        }
-      }
+      const int entryIndex = dictionaryRegistry.indexOfExactOrEquivalent(currentBookDictPath);
+      if (entryIndex >= 0) selectedIndex = entryIndex + 1;
     }
 
     // Build augmented "Use Global" label showing the active global dictionary name.
-    // Path format: <dictRoot>/<folder>/<stem> — extract <folder>.
+    // Path format: <root>/<folder>/<stem> — extract <folder>.
     const std::string globalPath = Dictionary::readConfiguredDictPath();
     std::string globalFolderName;
     if (globalPath.empty()) {
@@ -148,18 +140,17 @@ void DictionarySelectActivity::onExit() {
 
 void DictionarySelectActivity::scanDictionaries() {
   // Discovery lives in DictionaryRegistry (shared with the settings list and web UI).
-  // Re-scan on every picker open (matches prior behaviour), then mirror the results into
-  // the activity's parallel vectors so folderForIndex()/metadata/per-book logic is unchanged.
+  // Re-scan on every picker open (matches prior behaviour), then mirror each
+  // entry's display name and complete base path for metadata/per-book logic.
   dictionaryRegistry.discover();
-  dictRoot = dictionaryRegistry.root();
   dictFolders.clear();
-  dictStems.clear();
+  dictBasePaths.clear();
   const auto& entries = dictionaryRegistry.getEntries();
   dictFolders.reserve(entries.size());
-  dictStems.reserve(entries.size());
+  dictBasePaths.reserve(entries.size());
   for (const auto& e : entries) {
     dictFolders.push_back(e.name);
-    dictStems.push_back(e.stem);
+    dictBasePaths.push_back(e.basePath);
   }
 }
 
@@ -168,8 +159,8 @@ void DictionarySelectActivity::scanDictionaries() {
 // ---------------------------------------------------------------------------
 
 std::string DictionarySelectActivity::folderForIndex(int index) const {
-  if (index <= 0 || index > static_cast<int>(dictFolders.size())) return "";
-  return dictRoot + "/" + dictFolders[index - 1] + "/" + dictStems[index - 1];
+  if (index <= 0 || index > static_cast<int>(dictBasePaths.size())) return "";
+  return dictBasePaths[index - 1];
 }
 
 std::string DictionarySelectActivity::effectiveFolderForIndex(int index) const {
@@ -179,7 +170,10 @@ std::string DictionarySelectActivity::effectiveFolderForIndex(int index) const {
 
 bool DictionarySelectActivity::rowIsDisabled(int index) const {
   if (!disableCurrentSelection || currentEffectiveDictPath.empty()) return false;
-  return effectiveFolderForIndex(index) == currentEffectiveDictPath;
+  const std::string candidatePath = effectiveFolderForIndex(index);
+  if (candidatePath == currentEffectiveDictPath) return true;
+  const int candidateEntry = dictionaryRegistry.indexOfExactOrEquivalent(candidatePath);
+  return candidateEntry >= 0 && candidateEntry == dictionaryRegistry.indexOfExactOrEquivalent(currentEffectiveDictPath);
 }
 
 int DictionarySelectActivity::firstSelectableIndexFrom(int start) const {
@@ -204,11 +198,18 @@ bool DictionarySelectActivity::applySelection() {
 
   if (bookCachePath.empty()) {
     // Settings mode: update global dictionary.bin.
-    if (Dictionary::readDictPath() == folder) return false;
+    const std::string activePath = Dictionary::readDictPath();
+    if ((selectedIndex == 0 && activePath.empty()) ||
+        (selectedIndex > 0 && dictionaryRegistry.indexOfExactOrEquivalent(activePath) == selectedIndex - 1)) {
+      return false;
+    }
     Dictionary::saveGlobalDictPath(folder.c_str());
   } else {
     // Per-book mode: save to book cache.
-    if (currentBookDictPath == folder) return false;
+    if ((selectedIndex == 0 && currentBookDictPath.empty()) ||
+        (selectedIndex > 0 && dictionaryRegistry.indexOfExactOrEquivalent(currentBookDictPath) == selectedIndex - 1)) {
+      return false;
+    }
     HalFile f;
     if (Storage.openFileForWrite("DSEL", bookCachePath + "/dictionary.bin", f)) {
       f.write(reinterpret_cast<const uint8_t*>(folder.c_str()), folder.size());
@@ -347,14 +348,14 @@ void DictionarySelectActivity::buildListScreen(UiApp::ScreenType& screen) {
   const std::string activePath = disableCurrentSelection
                                      ? currentEffectiveDictPath
                                      : (bookCachePath.empty() ? Dictionary::readDictPath() : currentBookDictPath);
+  const int activeEntryIndex = dictionaryRegistry.indexOfExactOrEquivalent(activePath);
   std::vector<fui::ListItem> items;
   items.reserve(totalItems);
   for (int i = 0; i < totalItems; ++i) {
     const std::string folder = folderForIndex(i);
     fui::ListItem item;
     item.label = nameForIndex(i);
-    if ((folder.empty() && activePath.empty()) || (!folder.empty() && folder == activePath))
-      item.value = tr(STR_SELECTED);
+    if ((folder.empty() && activePath.empty()) || (i > 0 && i - 1 == activeEntryIndex)) item.value = tr(STR_SELECTED);
     if (rowIsDisabled(i)) item.state = fui::StateDisabled;
     item.actionValue = static_cast<int16_t>(i);
     items.push_back(item);

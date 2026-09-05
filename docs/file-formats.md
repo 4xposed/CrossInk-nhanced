@@ -303,6 +303,14 @@ Binary layout:
 
 ## `section.bin`
 
+### Version 78
+
+Version 78 keeps the version 77 serialized layout unchanged and adds the fork's
+ruby glossary parsing on top of it. Complete files use byte `78`; suspended
+partials use the previously unused sentinel `0xF2`. Both rebuild to avoid reusing
+layout caches from either pre-rebase branch (fork version 67 / `0xF5`, or
+upstream version 77 / `0xF3`).
+
 ### Version 77
 
 Version 77 keeps the serialized layout unchanged. It was bumped because ordered

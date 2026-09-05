@@ -15,6 +15,7 @@
 #include "BookReadingStats.h"
 #include "BookmarkStore.h"
 #include "EndOfBookOptions.h"
+#include "EpubLookupRequest.h"
 #include "EpubReaderMenuActivity.h"
 #include "GlobalReadingStats.h"
 #include "ManualPageTurnQueue.h"
@@ -200,6 +201,7 @@ class EpubReaderActivity final : public Activity {
   bool sideButtonLongPressHandled = false;
   bool frontButtonLongPressHandled = false;
   bool touchDictionaryLookupHandled = false;
+  EpubLookupAvailabilityCache dictionaryLookupAvailability;
   int pageLoadRetryCount = 0;
   enum class BookmarkFeedbackType : uint8_t {
     Added,
@@ -431,6 +433,9 @@ class EpubReaderActivity final : public Activity {
   bool executeLongPowerButtonAction();
   void handleClippingJump(const ClippingJumpResult& clipping);
   bool handleTouchDictionaryLookup();
+  bool isDictionaryLookupAvailable();
+  void renderDictionaryLookupBackground();
+  static void renderDictionaryLookupBackgroundCallback(void* context);
   void openWordSelect(bool framebufferContainsPage, int initialTouchX = -1, int initialTouchY = -1,
                       bool autoLookupInitialWord = false);
   std::unique_ptr<Page> reloadDictionaryLookupPage(int pageOffset = 0);

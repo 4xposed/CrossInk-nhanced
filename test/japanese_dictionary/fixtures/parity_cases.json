@@ -1,0 +1,92 @@
+{
+  "format": 1,
+  "source_masks": {
+    "vocab": 1,
+    "grammar": 2,
+    "names": 4
+  },
+  "cases": [
+    {
+      "label": "ichidan polite past",
+      "surface": "食べました",
+      "canonical_headword": "食べる",
+      "matched_utf8_bytes": 15,
+      "source_mask": 1,
+      "deinflected": true,
+      "priority": 200
+    },
+    {
+      "label": "godan negative past",
+      "surface": "書かなかった",
+      "canonical_headword": "書く",
+      "matched_utf8_bytes": 18,
+      "source_mask": 1,
+      "deinflected": true,
+      "priority": 200
+    },
+    {
+      "label": "suru progressive",
+      "surface": "勉強している",
+      "canonical_headword": "勉強する",
+      "matched_utf8_bytes": 18,
+      "source_mask": 1,
+      "deinflected": true,
+      "priority": 200
+    },
+    {
+      "label": "kanji kuru potential past is unsupported by Matcha",
+      "surface": "来られた",
+      "expected_status": "not_found",
+      "canonical_headword": "",
+      "matched_utf8_bytes": 0,
+      "source_mask": 0,
+      "deinflected": false,
+      "priority": 0
+    },
+    {
+      "label": "i-adjective past",
+      "surface": "高かった",
+      "canonical_headword": "高い",
+      "matched_utf8_bytes": 12,
+      "source_mask": 1,
+      "deinflected": true,
+      "priority": 200
+    },
+    {
+      "label": "katakana name with honorific",
+      "surface": "サクラさん",
+      "canonical_headword": "サクラ",
+      "matched_utf8_bytes": 9,
+      "source_mask": 4,
+      "deinflected": false,
+      "priority": 200
+    },
+    {
+      "label": "trailing case particle",
+      "surface": "食べるを",
+      "canonical_headword": "食べる",
+      "matched_utf8_bytes": 9,
+      "source_mask": 1,
+      "deinflected": false,
+      "priority": 200
+    },
+    {
+      "label": "counter",
+      "surface": "冊",
+      "canonical_headword": "冊",
+      "matched_utf8_bytes": 3,
+      "source_mask": 1,
+      "deinflected": false,
+      "priority": 200
+    },
+    {
+      "label": "grammar phrase",
+      "surface": "に違いない",
+      "canonical_headword": "に違いない",
+      "matched_utf8_bytes": 15,
+      "source_mask": 2,
+      "deinflected": false,
+      "priority": 200
+    }
+  ]
+}

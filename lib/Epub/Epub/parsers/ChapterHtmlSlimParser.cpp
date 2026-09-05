@@ -2555,6 +2555,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     }
     self->inRuby = true;
     self->rubyStartWordIndex = self->currentTextBlock ? static_cast<int>(self->currentTextBlock->size()) : 0;
+    RubyGlossary::resetElement(self->rubyElemBase, self->rubyElemRuby, self->rubyElemRunCount);
     if (self->currentTextBlock) {
       self->currentTextBlock->ensureRubyCapacity();
     }
@@ -3281,6 +3282,26 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
       if (!cleanRuby.empty()) {
         if (baseWordCount > 0) {
           self->currentTextBlock->setRubyGroupAt(self->rubyStartWordIndex, baseWordCount, cleanRuby);
+          char base[RubyGlossary::kMaxTextBytes + 1] = {};
+          size_t baseBytes = 0;
+          bool baseComplete = true;
+          for (int wordIndex = self->rubyStartWordIndex; wordIndex < currentWordCount; ++wordIndex) {
+            const std::string_view word = self->currentTextBlock->wordAt(static_cast<size_t>(wordIndex));
+            if (word.size() > RubyGlossary::kMaxTextBytes - baseBytes) {
+              baseComplete = false;
+              break;
+            }
+            std::memcpy(base + baseBytes, word.data(), word.size());
+            baseBytes += word.size();
+          }
+          if (baseComplete && baseBytes > 0) {
+            RubyGlossary::collectRun(self->rubyHarvest, self->rubyElemBase, self->rubyElemRuby, self->rubyElemRunCount,
+                                     std::string_view(base, baseBytes), cleanRuby);
+          } else {
+            self->rubyElemBase.clear();
+            self->rubyElemRuby.clear();
+            self->rubyElemRunCount = -1;
+          }
           self->rubyStartWordIndex = currentWordCount;
         } else if (self->rubyStartWordIndex > 0) {
           int leaderIdx = self->rubyStartWordIndex - 1;
@@ -3306,6 +3327,7 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
     return;
   }
   if (strcmp(name, "ruby") == 0 && self->inRuby) {
+    RubyGlossary::finishElement(self->rubyHarvest, self->rubyElemBase, self->rubyElemRuby, self->rubyElemRunCount);
     self->inRuby = false;
     self->rubyStartWordIndex = -1;
     self->rubyTextBuffer.clear();
@@ -3630,6 +3652,14 @@ void ChapterHtmlSlimParser::prewarmSectionAdvanceTable(FsFile& file) const {
 
 ChapterHtmlSlimParser::~ChapterHtmlSlimParser() { abortParse(); }
 
+void ChapterHtmlSlimParser::resetRubyParserState() {
+  inRuby = false;
+  rubyStartWordIndex = -1;
+  collectingRubyText = false;
+  rubyTextBuffer.clear();
+  RubyGlossary::resetHarvest(rubyHarvest, rubyElemBase, rubyElemRuby, rubyElemRunCount);
+}
+
 bool ChapterHtmlSlimParser::ensureInputFileOpen() {
   if (parseFile_) {
     return true;
@@ -3659,6 +3689,7 @@ void ChapterHtmlSlimParser::releaseInputFile() {
 bool ChapterHtmlSlimParser::beginParse() {
   malformedMarkupTruncated = false;
   htmlEnded_ = false;
+  resetRubyParserState();
   parseFileOffset_ = 0;
   parseFileSize_ = 0;
   listContextCount_ = 0;
@@ -3812,6 +3843,7 @@ void ChapterHtmlSlimParser::abortParse() {
   inlineStyleCount_ = 0;
   blockStyleBuf_ = nullptr;
   blockStyleCount_ = 0;
+  resetRubyParserState();
 }
 
 bool ChapterHtmlSlimParser::finishParse() {
