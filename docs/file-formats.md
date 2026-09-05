@@ -1,9 +1,10 @@
 # File Formats
 
-These formats describe the SD-card cache files under `/.crosspoint/epub_<hash>/`.
-All POD fields are written in the ESP32 little-endian representation used by
-`Serialization.h`; strings are length-prefixed UTF-8 unless a format notes a
-fixed-size char buffer.
+These formats describe CrossInk's SD-card caches and Japanese dictionary files.
+Per-book caches live under `/.crosspoint/epub_<hash>/`; each section below
+states other locations when applicable. All POD fields are written in the
+ESP32 little-endian representation used by `Serialization.h`; strings are
+length-prefixed UTF-8 unless a format notes a fixed-size char buffer.
 
 ## `/.crosspoint/sleep-image-index/<directory-hash>-{bmp,all}.idx`
 
@@ -301,6 +302,133 @@ Binary layout:
 - `[41-68]` `dayOfWeekSeconds[7]` (`uint32_t` LE each)
 - `[69-72]` `estimatedTimeLeftSeconds` (`uint32_t` LE, `0` means unavailable)
 
+## Japanese dictionary `.idx` / `.dat`
+
+Japanese vocabulary, names, and grammar dictionaries use the same frozen
+Matcha-compatible record layout. The `.idx` file is an array of exactly
+40-byte records sorted in ascending raw UTF-8 byte order. Duplicate headwords
+are allowed and remain adjacent. The sibling `.dat` file is the concatenation
+of the definition byte ranges referenced by those records.
+
+```text
+offset  size  field
+0       32    headword: UTF-8 bytes, followed by at least one NUL and NUL padding
+32      4     definition offset in the sibling .dat file (uint32_t LE)
+36      2     definition length (uint16_t LE)
+38      1     priority (uint8_t; larger values rank first among equal headwords)
+39      1     part-of-speech flags
+```
+
+Part-of-speech bits are `0x01` ichidan verb, `0x02` godan verb, `0x04`
+`suru` verb, `0x08` `kuru` verb, `0x10` i-adjective, `0x20` other, and
+`0x40` reading-form record. Bits may be combined.
+
+The index size must be an exact multiple of 40. Every headword is 1–31 bytes,
+contains valid UTF-8, contains no embedded NUL before its terminator, and has
+only zero bytes after that terminator. `offset + length` must remain within the
+sibling `.dat`. The converter caps the on-disk length at the `uint16_t` maximum
+of 65,535 bytes; firmware lookup deliberately skips an individual sense longer
+than 16 KiB and merges at most five valid senses. Invalid records and short SD
+reads are read errors, not ordinary lookup misses.
+
+## Japanese dictionary `.spx`
+
+### Version 1
+
+An optional `.spx` sibling accelerates searches without changing `.idx` or
+`.dat`. It stores the complete 32-byte headword field from every 48th `.idx`
+record. All integers are little-endian.
+
+```text
+offset  size  field
+0       8     magic: "CPSPX1\0\0"
+8       4     version = 1 (uint32_t LE)
+12      4     stride = 48 (uint32_t LE)
+16      4     .idx record count (uint32_t LE)
+20      4     checkpoint count = ceil(record count / 48) (uint32_t LE)
+24      4     reserved = 0 (uint32_t LE)
+28      4     zero padding
+32      ...   checkpoint count × 32-byte headword fields
+```
+
+The exact file size is `32 + checkpointCount * 32`, and each checkpoint must
+equal records `0, 48, 96, ...` from the sibling `.idx`. A missing, stale,
+malformed, or allocation-failed sidecar is ignored; lookup falls back to the
+original bounded `.idx` search. `scripts/gen_dict_spx.py` validates a temporary
+file before atomically replacing the sidecar.
+
+## `ruby.bin`
+
+### Version 1
+
+Horizontal EPUB parsing harvests furigana from `<ruby>` markup into the
+book-cache-local `ruby.bin`. The glossary is cosmetic: missing, corrupt,
+truncated, oversized, or unreadable files behave as a lookup miss and do not
+prevent the EPUB or dictionary from opening.
+
+All integers are explicitly little-endian. Base text and readings are valid
+UTF-8, nonempty, and at most 32 bytes each. A complete file is capped at 1,024
+records and 16 KiB. Multiple distinct readings for one exact base remain in
+file order and are presented joined with U+30FB (`・`). The declared records
+must consume the file exactly; trailing bytes are invalid.
+
+```text
+u8  version = 1
+u16 recordCount
+repeat recordCount:
+  u8 baseBytes
+  u8 base[baseBytes]
+  u8 rubyBytes
+  u8 ruby[rubyBytes]
+```
+
+Updates use `ruby.bin.tmp` and validate it after close. When replacing an
+existing valid glossary, `ruby.bin.bak` remains recoverable until the temp file
+has been promoted.
+
+## `wlscan.bin`
+
+### Version 2
+
+Each EPUB book cache may contain one disposable snapshot of the most recently
+scanned page. All integers are little-endian. The 32-byte header is:
+
+```text
+offset  size  field
+0       4     magic = 0x534c5743 (bytes "CWLS")
+4       1     version = 2
+5       1     backend: 0 = StarDict, 1 = Japanese
+6       2     flags = 0x0001 (complete scan)
+8       2     spine index (uint16_t LE)
+10      2     page index (uint16_t LE)
+12      4     page-glyph FNV-1a hash (uint32_t LE)
+16      8     dictionary signature (uint64_t LE)
+24      2     candidate count (uint16_t LE)
+26      2     selected cursor (uint16_t LE)
+28      4     candidate-payload FNV-1a hash (uint32_t LE)
+```
+
+It is followed by `candidateCount` eight-byte records:
+
+```text
+offset  size  field
+0       2     first glyph index (uint16_t LE)
+2       1     glyph count (uint8_t)
+3       1     matched UTF-8 byte count (uint8_t)
+4       2     first EPUB page-word index (uint16_t LE)
+6       2     last EPUB page-word index (uint16_t LE)
+```
+
+The file length must be exactly `32 + candidateCount * 8`. The complete flag,
+backend, spine, page, glyph hash, dictionary signature, and payload checksum
+must match. Candidate glyph ranges must be nonempty and inside the current page;
+the byte count must be nonzero and no greater than four times the glyph count;
+page-word indices must be real, ordered, and monotonic; and candidate start
+glyphs must strictly increase. An out-of-range saved cursor loads as zero.
+Incomplete or truncated scans are never saved. Updates validate
+`wlscan.bin.tmp`, preserve the prior file as `wlscan.bin.bak`, and restore it if
+promotion fails.
+
 ## `section.bin`
 
 ### Version 78
@@ -434,7 +562,7 @@ import std.mem;
 import std.string;
 import std.core;
 
-#define EXPECTED_VERSION 77
+#define EXPECTED_VERSION 78
 #define MAX_STRING_LENGTH 65535
 #define FOOTNOTE_NUMBER_LEN 32
 #define FOOTNOTE_HREF_LEN 96

@@ -10,6 +10,7 @@ class EpdFont {
   ~EpdFont() = default;
   void getTextDimensions(const char* string, int* w, int* h) const;
 
+  // Find the exact glyph, loading it on demand for SD fonts; never substitute.
   const EpdGlyph* findGlyph(uint32_t cp) const;
   const EpdGlyph* getGlyph(uint32_t cp) const;
 

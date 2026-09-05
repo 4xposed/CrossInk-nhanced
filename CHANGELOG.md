@@ -70,6 +70,7 @@
 
 ### Added
 
+- Automatic Japanese vocabulary, names, and grammar lookup with conjugation-aware longest matching and a unified floating dictionary panel.
 - Xteink X4 Pro and X4 Classic support, including device-specific firmware and USB Drive access; X4 Pro also supports direct USB file transfers.
 - The built-in EPUB optimizer can keep cover art in color while still resizing it to a reader-safe baseline JPEG.
 - Custom BMP boot screens, selected in the File Browser or rotated from `/bootscreen` or `/.bootscreen`; sleep screens can also be selected from any folder.
@@ -95,6 +96,9 @@
 
 ### Fixed
 
+- Opening page dictionary lookup uses a fast screen refresh and defers brief loading frames to reduce flashing.
+- SD-card glyphs load on demand when rendering uncached text, fixing replacement marks in Japanese book titles and other text.
+- Japanese book titles use the configured CJK SD-font fallback in bold Recent Books and Home layouts instead of replacement marks.
 - Clipping highlights stay aligned after font changes, retain multi-paragraph text, and remain readable in Dark Mode. Selection stays on its final page, and browsing saved clippings responds reliably.
 - Dictionary lookup respects landscape controls and selected fonts, handles repeated lookups more reliably, and returns to the reader cleanly when dismissed.
 - EPUB tables retain column widths and wrap long labels; mixed-direction text, Arabic/Persian shaping, ruby annotations, and footnote styling render correctly.
