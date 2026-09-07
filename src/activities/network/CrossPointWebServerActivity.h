@@ -86,6 +86,12 @@ class CrossPointWebServerActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  bool prepareToSuspend() override {
+    // Main-owner quiescence: pending navigation/sleep suppresses loop(), so
+    // completion/disconnect callbacks cannot be awaited here.
+    if (webServer) webServer->cancelActiveUploads();
+    return !webServer || !webServer->hasActiveUpload();
+  }
   bool skipLoopDelay() override { return webServer && webServer->isRunning(); }
   bool preventAutoSleep() override { return webServer && webServer->isRunning(); }
 };

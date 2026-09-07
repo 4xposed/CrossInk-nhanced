@@ -2,6 +2,8 @@
 
 #include <ArduinoJson.h>
 #include <BoardConfig.h>
+
+#include "util/BookFolderMutation.h"
 #ifdef SIMULATOR
 #include <ArduinoJsonStringCompat.h>
 #endif
@@ -301,6 +303,8 @@ bool isProtectedPath(const String& path) {
 // - FilesPageFooterHtml (from html/FilesPageFooter.html)
 CrossPointWebServer::CrossPointWebServer() {}
 
+bool CrossPointWebServer::hasActiveUpload() const { return upload.file || fontUpload.file || wsUploadInProgress; }
+
 CrossPointWebServer::~CrossPointWebServer() { stop(); }
 
 void CrossPointWebServer::begin() {
@@ -442,6 +446,35 @@ void CrossPointWebServer::abortWsUpload(const char* tag) {
   wsLastProgressSent = 0;
 }
 
+void CrossPointWebServer::cancelActiveUploads() {
+  if (wsUploadInProgress) {
+    // Do not send or flush a socket here: a stalled client must not delay
+    // quiescence. Later frames see the cleared upload owner and cannot write.
+    abortWsUpload("WEB");
+  }
+  const bool hadHttpUpload = bool(upload.file) || bool(fontUpload.file);
+  if (upload.file) {
+    upload.file.close();
+    upload.bufferPos = 0;
+    upload.success = false;
+    upload.error = "Upload aborted";
+    String filePath = upload.path;
+    if (!filePath.endsWith("/")) filePath += "/";
+    filePath += upload.fileName;
+    if (!Storage.remove(filePath.c_str())) LOG_ERR("WEB", "Cannot remove partial upload: %s", filePath.c_str());
+  }
+  if (fontUpload.file) {
+    fontUpload.file.close();
+    fontUpload.bufferPos = 0;
+    fontUpload.valid = false;
+    if (!fontUpload.filePath.empty() && !Storage.remove(fontUpload.filePath.c_str()))
+      LOG_ERR("WEB", "Cannot remove partial font: %s", fontUpload.filePath.c_str());
+    // A late aborted/end callback must not delete a newly recreated path.
+    fontUpload.filePath.clear();
+  }
+  if (hadHttpUpload && server) server->client().stop();
+}
+
 void CrossPointWebServer::stop() {
   if (!running || !server) {
     LOG_DBG("WEB", "stop() called but already stopped (running=%d, server=%p)", running, server.get());
@@ -452,10 +485,7 @@ void CrossPointWebServer::stop() {
 
   LOG_DBG("WEB", "[MEM] Free heap before stop: %d bytes", ESP.getFreeHeap());
 
-  // Close any in-progress WebSocket upload and remove partial file
-  if (wsUploadInProgress && wsUploadFile) {
-    abortWsUpload("WEB");
-  }
+  cancelActiveUploads();
 
   // Stop WebSocket server
   if (wsServer) {
@@ -915,6 +945,13 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
 
   const HTTPUpload& upload = server->upload();
 
+  if (upload.status == UPLOAD_FILE_START && BookFolderMutation::storesFrozen())
+    BookFolderMutation::retryPendingMutation();
+  if (BookFolderMutation::storesFrozen()) {
+    state.success = false;
+    state.error = "metadata_recovery_pending";
+    return;
+  }
   if (upload.status == UPLOAD_FILE_START) {
     state.fileName = StringUtils::sanitizeFilename(upload.filename.c_str()).c_str();
     state.size = 0;
@@ -1037,6 +1074,11 @@ void CrossPointWebServer::handleUploadPost(UploadState& state) const {
 }
 
 void CrossPointWebServer::handleCreateFolder() const {
+  if (BookFolderMutation::storesFrozen()) BookFolderMutation::retryPendingMutation();
+  if (BookFolderMutation::storesFrozen()) {
+    server->send(503, "text/plain", "metadata_recovery_pending");
+    return;
+  }
   // Get folder name from form data
   if (!server->hasArg("name")) {
     server->send(400, "text/plain", "Missing folder name");
@@ -1131,6 +1173,12 @@ void CrossPointWebServer::handleCreateFolder() const {
 }
 
 void CrossPointWebServer::handleRename() const {
+  if (BookFolderMutation::storesFrozen()) BookFolderMutation::retryPendingMutation();
+  if (BookFolderMutation::storesFrozen()) {
+    server->send(503, "text/plain",
+                 "metadata_recovery_pending: content may already have changed; check SD card and retry");
+    return;
+  }
   if (!server->hasArg("path") || !server->hasArg("name")) {
     server->send(400, "text/plain", "Missing path or new name");
     return;
@@ -1214,6 +1262,12 @@ void CrossPointWebServer::handleRename() const {
 }
 
 void CrossPointWebServer::handleMove() const {
+  if (BookFolderMutation::storesFrozen()) BookFolderMutation::retryPendingMutation();
+  if (BookFolderMutation::storesFrozen()) {
+    server->send(503, "text/plain",
+                 "metadata_recovery_pending: content may already have changed; check SD card and retry");
+    return;
+  }
   if (!server->hasArg("path") || !server->hasArg("dest")) {
     server->send(400, "text/plain", "Missing path or destination");
     return;
@@ -1309,6 +1363,12 @@ void CrossPointWebServer::handleMove() const {
 }
 
 void CrossPointWebServer::handleDelete() const {
+  if (BookFolderMutation::storesFrozen()) BookFolderMutation::retryPendingMutation();
+  if (BookFolderMutation::storesFrozen()) {
+    server->send(503, "text/plain",
+                 "metadata_recovery_pending: content may already have changed; check SD card and retry");
+    return;
+  }
   // To ensure backwards compatibility, plain `path` is mapped
   // to a single element JSON array.
   bool hasPathArg = server->hasArg("path");
@@ -1345,56 +1405,36 @@ void CrossPointWebServer::handleDelete() const {
     return;
   }
 
-  // Iterate over paths and delete each item
-  bool allSuccess = true;
-  String failedItems;
-
-  for (const auto& p : paths) {
-    auto itemPath = normalizeWebPath(p.as<String>());
-
-    // Validate path
-    if (itemPath.isEmpty() || itemPath == "/") {
-      failedItems += itemPath + " (cannot delete root); ";
-      allSuccess = false;
-      continue;
-    }
-
-    // Check if item exists
-    if (!Storage.exists(itemPath.c_str())) {
-      failedItems += itemPath + " (not found); ";
-      allSuccess = false;
-      continue;
-    }
-
-    sdFontSystem.markRegistryDirtyForPath(itemPath.c_str());
-    // Decide whether it's a directory or file by opening it
-    bool success = false;
-    HalFile f = Storage.open(itemPath.c_str());
-    if (f && f.isDirectory()) {
-      f.close();
-      success = Storage.removeDir(itemPath.c_str());
-    } else {
-      // It's a file (or couldn't open as dir) — remove file
-      if (f) f.close();
-      success = Storage.remove(itemPath.c_str());
-      clearBookCache(itemPath.c_str());
-    }
-
-    if (!success) {
-      LOG_ERR("WEB", "Failed to delete item: %s", itemPath.c_str());
-      failedItems += itemPath + " (deletion failed); ";
-      allSuccess = false;
-    } else {
-      ImageFolderIndex::invalidateForPath(itemPath.c_str());
-      sdFontSystem.markRegistryDirtyForPath(itemPath.c_str());
-    }
+  if (paths.size() > 64) {
+    server->send(400, "text/plain", "snapshot_limit");
+    return;
   }
-
-  if (allSuccess) {
-    server->send(200, "text/plain", "All items deleted successfully");
-  } else {
-    server->send(500, "text/plain", "Failed to delete some items: " + failedItems);
+  // Normalize in the existing request document; the bounded pointer table does
+  // not retain a second growing list of path strings.
+  for (JsonVariant p : paths) {
+    if (!p.is<const char*>()) {
+      server->send(400, "text/plain", "invalid_path");
+      return;
+    }
+    p.set(normalizeWebPath(p.as<String>()));
   }
+  auto roots = makeUniqueNoThrow<const char*[]>(paths.size());
+  if (!roots) {
+    server->send(503, "text/plain", "out_of_memory");
+    return;
+  }
+  size_t index = 0;
+  for (JsonVariant p : paths) roots[index++] = p.as<const char*>();
+  for (size_t i = 0; i < index; ++i) sdFontSystem.markRegistryDirtyForPath(roots[i]);
+  const auto result = BookFolderMutation::removeMany(roots.get(), index);
+  for (size_t i = 0; i < index; ++i) {
+    ImageFolderIndex::invalidateForPath(roots[i]);
+    sdFontSystem.markRegistryDirtyForPath(roots[i]);
+  }
+  server->send(result == BookFolderMutation::Result::Complete ? 200 : BookFolderMutation::httpStatus(result),
+               "text/plain",
+               result == BookFolderMutation::Result::Complete ? "All items deleted successfully"
+                                                              : BookFolderMutation::error(result));
 }
 
 void CrossPointWebServer::handleSettingsPage() const {
@@ -1937,6 +1977,11 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
       String msg = String((char*)payload);
 
       if (msg.startsWith("START:")) {
+        if (BookFolderMutation::storesFrozen()) BookFolderMutation::retryPendingMutation();
+        if (BookFolderMutation::storesFrozen()) {
+          wsServer->sendTXT(num, "ERROR:metadata_recovery_pending");
+          break;
+        }
         // Reject any START while an upload is already active to prevent
         // leaking the open wsUploadFile handle (owning client re-START included)
         if (wsUploadInProgress) {

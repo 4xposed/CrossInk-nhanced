@@ -1,0 +1,31 @@
+[package]
+name = "crossink-manga"
+default-run = "crossink-manga"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Prepare panel-first Mokuro manga for CrossInk readers"
+license = "GPL-3.0-only"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+zip = { version = "8", default-features = false, features = ["deflate", "bzip2", "zstd"] }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
+ndarray = "0.16"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(crossink_rar_helper)'] }

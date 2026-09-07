@@ -103,6 +103,12 @@ class ActivityManager {
 
   void begin(uint32_t renderTaskStackBytes = 16384);
   void loop();
+#ifdef SIMULATOR
+  Activity* currentForSimulatorTest() const { return currentActivity.get(); }
+#endif
+  bool prepareToSuspend();
+  bool prepareForFolderMutation();
+  bool retrySuspensionAfterFailure() const;
 
   // Will replace currentActivity and drop all activities on stack
   void replaceActivity(std::unique_ptr<Activity>&& newActivity);

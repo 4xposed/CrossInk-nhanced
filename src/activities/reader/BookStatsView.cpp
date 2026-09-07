@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstring>
 
 #include "MappedInputManager.h"
 #include "components/CompactHeader.h"
@@ -752,6 +753,69 @@ void renderEditBookDatesPage(GfxRenderer& renderer, const MappedInputManager* ma
   if (showButtonHints && mappedInput) {
     const auto labels = mappedInput->mapLabels(mappedInput->withBackArrow(tr(STR_BACK)), tr(STR_NEXT_FIELD),
                                                tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
+  }
+}
+
+int readingLanguageRowCount(const ReadingLanguageTotals& totals) {
+  int count = 0;
+  for (const auto& entry : totals.entries)
+    if (entry.seconds) ++count;
+  return count;
+}
+int readingLanguageRowsPerPage(const GfxRenderer& renderer) {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int rowHeight = renderer.getLineHeight(UI_10_FONT_ID) + metrics.verticalSpacing;
+  return std::max(1, std::min(8, (safe.height - 100 - metrics.buttonHintsHeight) / std::max(1, rowHeight)));
+}
+void renderReadingLanguagesPage(GfxRenderer& renderer, const MappedInputManager* input, const char* scope,
+                                const ReadingLanguageTotals& totals, int offset, bool showMore) {
+  renderer.clearScreen();
+  if (input && input->hasTouchHardware())
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_STATS_READING_LANGUAGES), true);
+  else
+    CompactHeader::drawTitle(renderer, tr(STR_STATS_READING_LANGUAGES));
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  const int x = safe.x + metrics.contentSidePadding;
+  const int width = safe.width - 2 * metrics.contentSidePadding;
+  int y = safe.y + 70;
+  char scopeLabel[96];
+  const int scopeLength = snprintf(scopeLabel, sizeof(scopeLabel), "%s", scope);
+  size_t length = strlen(scopeLabel);
+  if (scopeLength >= static_cast<int>(sizeof(scopeLabel))) {
+    while (length && (static_cast<unsigned char>(scopeLabel[length - 1]) & 0xc0) == 0x80) --length;
+    if (length && static_cast<unsigned char>(scopeLabel[length - 1]) >= 0xc0) --length;
+  }
+  scopeLabel[length] = 0;
+  while (length && renderer.getTextWidth(UI_10_FONT_ID, scopeLabel) > width) {
+    --length;
+    while (length && (static_cast<unsigned char>(scopeLabel[length]) & 0xc0) == 0x80) --length;
+    scopeLabel[length] = 0;
+  }
+  renderer.drawText(UI_10_FONT_ID, x, y, scopeLabel);
+  y += renderer.getLineHeight(UI_10_FONT_ID) + metrics.verticalSpacing;
+  const int count = readingLanguageRowCount(totals), rows = readingLanguageRowsPerPage(renderer);
+  int index = 0, drawn = 0;
+  for (unsigned slot = 0; slot < 8; ++slot) {
+    const auto& entry = totals.entries[slot];
+    if (!entry.seconds) continue;
+    if (index++ < offset) continue;
+    if (drawn++ >= rows) break;
+    const char* label = slot == 0   ? tr(STR_STATS_LANGUAGE_UNKNOWN)
+                        : slot == 1 ? tr(STR_STATS_LANGUAGE_OTHER)
+                                    : entry.tag;
+    char duration[32];
+    BookReadingStats::formatDuration(entry.seconds, duration, sizeof(duration));
+    renderer.drawText(UI_10_FONT_ID, x, y, label);
+    renderer.drawText(UI_10_FONT_ID, x + width - renderer.getTextWidth(UI_10_FONT_ID, duration), y, duration);
+    y += renderer.getLineHeight(UI_10_FONT_ID) + metrics.verticalSpacing;
+  }
+  if (!count) renderer.drawText(UI_10_FONT_ID, x, y, tr(STR_STATS_LANGUAGE_EMPTY));
+  if (input) {
+    const auto labels = input->mapLabels(input->withBackArrow(tr(STR_EXIT)), "", input->withBackArrow(tr(STR_BACK)),
+                                         showMore || offset + rows < count ? tr(STR_MORE) : "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   }
 }

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "./FileBrowserActivity.h"
+#include "MangaCoverWork.h"
 #include "QuickActions.h"
 #include "activities/Activity.h"
 #include "activities/reader/BookReadingStats.h"
@@ -28,6 +29,8 @@ class HomeActivity final : public Activity {
   static constexpr int kMaxCachedBooks = 3;
 
  private:
+  MangaCoverWork coverWork;
+  std::array<MangaCoverAttempt, kMaxCachedBooks> coverAttempts{};
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
   int lastCarouselBookIndex = 0;  // remembered position when leaving carousel row
@@ -139,6 +142,9 @@ class HomeActivity final : public Activity {
         initialBookPath(std::move(initialBookPathValue)) {}
   void onEnter() override;
   void onExit() override;
+  void requestBackgroundCancellation() override { coverWork.requestCancellation(); }
+  bool prepareToSuspend() override { return !coverWork.active; }
+  void onResume() override { coverWork.authorizeIntent(); }
   void loop() override;
   void render(RenderLock&&) override;
   bool isHomeActivity() const override { return true; }

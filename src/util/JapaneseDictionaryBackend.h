@@ -16,6 +16,22 @@ class JapaneseDictionaryBackend {
   bool bookReading(std::string_view surface, DictionaryOwnedText& out);
   DictionaryCapabilities capabilities() const;
   uint64_t signature() const;
+  DictionaryScanIdentityStatus beginScanIdentity(DictionaryScanIdentityState& state) {
+    return index_.beginScanIdentity(state);
+  }
+  DictionaryScanIdentityStatus stepScanIdentity(DictionaryScanIdentityState& state, size_t budget) {
+    if (cancelled_) {
+      state.cancel();
+      return state.status();
+    }
+    auto status = index_.stepScanIdentity(state, budget);
+    if (cancelled_) {
+      state.cancel();
+      return state.status();
+    }
+    return status;
+  }
+  bool resumeScanIdentity(DictionaryScanIdentityState& state) { return index_.resumeScanIdentity(state); }
   void cancel();
   void close();
 

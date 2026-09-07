@@ -29,6 +29,7 @@ target_include_directories(crosspoint_test_common INTERFACE
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
   ${REPO_ROOT}/lib/MemoryBudget
+  ${REPO_ROOT}/lib/CooperativeCancellation
 )
 target_compile_options(crosspoint_test_common INTERFACE
   -Wall
@@ -94,3 +95,28 @@ add_subdirectory(opds_parser)
 add_subdirectory(opds_download_path)
 add_subdirectory(opds_download_action)
 add_subdirectory(japanese_dictionary)
+add_subdirectory(manga_format)
+add_subdirectory(manga_book)
+
+add_subdirectory(manga_navigation)
+add_subdirectory(manga_progress)
+
+add_subdirectory(manga_cover)
+add_subdirectory(manga_pixel_cache)
+
+add_subdirectory(book_deletion_snapshot)
+
+add_subdirectory(manga_geometry)
+add_subdirectory(manga_bitmap_pixels)
+add_subdirectory(builtin_font_pool)
+add_subdirectory(image_cache_decode)
+
+add_subdirectory(manga_prefetch)
+
+add_subdirectory(reading_language_stats)
+add_subdirectory(book_folder_mutation)
+
+add_subdirectory(manga_menu)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME MangaSourceBoundaryTest
+  COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s ${REPO_ROOT}/test/source_contracts -v)

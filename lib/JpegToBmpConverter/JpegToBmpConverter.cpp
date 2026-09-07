@@ -1,6 +1,7 @@
 #include "JpegToBmpConverter.h"
 
 #include <Arena.h>
+#include <CheckedPrint.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <JPEGDEC.h>
@@ -202,6 +203,7 @@ int32_t bmpJpegSeek(JPEGFILE* pFile, int32_t pos) {
 
 // Context passed to the JPEGDEC draw callback via setUserPointer()
 struct BmpConvertCtx {
+  CooperativeCancellation cancellation;
   Print* bmpOut;
   int srcWidth;
   int srcHeight;
@@ -329,6 +331,10 @@ static bool shouldContainAdaptive(const int srcWidth, const int srcHeight, const
 
 // Write a fully-assembled output row (grayscale bytes, length outWidth) to BMP
 static void writeOutputRow(BmpConvertCtx* ctx, const uint8_t* srcRow, int outY) {
+  if (ctx->error || ctx->cancellation.requested()) {
+    ctx->error = true;
+    return;
+  }
   memset(ctx->bmpRow, 0, ctx->bytesPerRow);
 
   if (USE_8BIT_OUTPUT && !ctx->oneBit) {
@@ -361,7 +367,7 @@ static void writeOutputRow(BmpConvertCtx* ctx, const uint8_t* srcRow, int outY) 
       ctx->fsDitherer->nextRow();
   }
 
-  ctx->bmpOut->write(ctx->bmpRow, ctx->bytesPerRow);
+  if (ctx->bmpOut->write(ctx->bmpRow, ctx->bytesPerRow) != static_cast<size_t>(ctx->bytesPerRow)) ctx->error = true;
 }
 
 static void scaleRowLinear(BmpConvertCtx* ctx, const uint8_t* srcRow, uint8_t* dstRow) {
@@ -393,7 +399,7 @@ static void processSmoothSourceRow(BmpConvertCtx* ctx, const uint8_t* srcRow, co
     ctx->smoothCurrRow = tmp;
     ctx->smoothPrevY = srcY;
     if (ctx->srcHeight <= 1) {
-      while (ctx->smoothNextOutY < ctx->outHeight) {
+      while (!ctx->error && ctx->smoothNextOutY < ctx->outHeight) {
         writeOutputRow(ctx, ctx->smoothPrevRow, ctx->smoothNextOutY);
         ctx->smoothNextOutY++;
         ctx->currentOutY++;
@@ -402,7 +408,7 @@ static void processSmoothSourceRow(BmpConvertCtx* ctx, const uint8_t* srcRow, co
     return;
   }
 
-  while (ctx->smoothNextOutY < ctx->outHeight) {
+  while (!ctx->error && ctx->smoothNextOutY < ctx->outHeight) {
     const uint64_t srcY_fp =
         static_cast<uint64_t>(ctx->srcYOffset_fp) + static_cast<uint64_t>(ctx->smoothNextOutY) * ctx->scaleY_fp;
     const int y0 = std::min(ctx->srcHeight - 1, static_cast<int>(srcY_fp >> 16));
@@ -428,7 +434,7 @@ static void finishSmoothUpscale(BmpConvertCtx* ctx) {
     return;
   }
 
-  while (ctx->smoothNextOutY < ctx->outHeight) {
+  while (!ctx->error && ctx->smoothNextOutY < ctx->outHeight) {
     writeOutputRow(ctx, ctx->smoothPrevRow, ctx->smoothNextOutY);
     ctx->smoothNextOutY++;
     ctx->currentOutY++;
@@ -437,6 +443,10 @@ static void finishSmoothUpscale(BmpConvertCtx* ctx) {
 
 // Flush one scaled output row from Y-axis accumulators and advance currentOutY
 static void flushScaledRow(BmpConvertCtx* ctx) {
+  if (ctx->error || ctx->cancellation.requested()) {
+    ctx->error = true;
+    return;
+  }
   memset(ctx->bmpRow, 0, ctx->bytesPerRow);
 
   if (USE_8BIT_OUTPUT && !ctx->oneBit) {
@@ -471,7 +481,7 @@ static void flushScaledRow(BmpConvertCtx* ctx) {
       ctx->fsDitherer->nextRow();
   }
 
-  ctx->bmpOut->write(ctx->bmpRow, ctx->bytesPerRow);
+  if (ctx->bmpOut->write(ctx->bmpRow, ctx->bytesPerRow) != static_cast<size_t>(ctx->bytesPerRow)) ctx->error = true;
   ctx->currentOutY++;
 }
 
@@ -481,7 +491,11 @@ static void flushScaledRow(BmpConvertCtx* ctx) {
 // row), applies scaling + dithering and writes packed BMP rows to bmpOut.
 int bmpDrawCallback(JPEGDRAW* pDraw) {
   auto* ctx = reinterpret_cast<BmpConvertCtx*>(pDraw->pUser);
-  if (!ctx || ctx->error) return 0;
+  if (!ctx) return 0;
+  if (ctx->error || ctx->cancellation.requested()) {
+    ctx->error = true;
+    return 0;
+  }
 
   const uint8_t* pixels = reinterpret_cast<uint8_t*>(pDraw->pPixels);
   const int stride = pDraw->iWidth;
@@ -504,7 +518,7 @@ int bmpDrawCallback(JPEGDRAW* pDraw) {
   // Clamp to MAX_MCU_HEIGHT so srcRow never indexes past the populated mcuBuf rows.
   const int safeEndRow = blockY + std::min(blockH, MAX_MCU_HEIGHT);
 
-  for (int y = blockY; y < safeEndRow && y < ctx->srcHeight; y++) {
+  for (int y = blockY; !ctx->error && y < safeEndRow && y < ctx->srcHeight; y++) {
     const uint8_t* srcRow = ctx->mcuBuf + (y - blockY) * ctx->srcWidth;
 
     if (ctx->smoothUpscale) {
@@ -539,7 +553,7 @@ int bmpDrawCallback(JPEGDRAW* pDraw) {
       }
 
       // Flush output row(s) whose Y boundary we've crossed
-      while (srcY_fp >= ctx->nextOutY_srcStart && ctx->currentOutY < ctx->outHeight) {
+      while (!ctx->error && srcY_fp >= ctx->nextOutY_srcStart && ctx->currentOutY < ctx->outHeight) {
         flushScaledRow(ctx);
         ctx->nextOutY_srcStart = static_cast<uint32_t>(static_cast<uint64_t>(ctx->srcYOffset_fp) +
                                                        static_cast<uint64_t>(ctx->currentOutY + 1) * ctx->scaleY_fp);
@@ -593,8 +607,12 @@ static bool isProgressiveJpeg(FsFile& file) {
 }  // namespace
 
 // Internal implementation with configurable target size and bit depth
-bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bmpOut, int targetWidth, int targetHeight,
-                                                     bool oneBit, bool crop, bool adaptiveContain, bool imageLevels) {
+bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& destination, int targetWidth,
+                                                     int targetHeight, bool oneBit, bool crop, bool adaptiveContain,
+                                                     CooperativeCancellation cancellation,
+                                                     BmpConversionDimensions* sourceDimensions, bool imageLevels) {
+  CheckedPrint bmpOut(destination);
+  if (cancellation.requested()) return false;
   if (ESP.getFreeHeap() < MIN_FREE_HEAP) {
     LOG_ERR("JPG", "Not enough heap for JPEG decoder (%u free, need %u)", ESP.getFreeHeap(), MIN_FREE_HEAP);
     return false;
@@ -622,6 +640,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
 
   const int srcWidth = jpeg->getWidth();
   const int srcHeight = jpeg->getHeight();
+  if (sourceDimensions) *sourceDimensions = {srcWidth, srcHeight, progressive};
 
   constexpr int MAX_IMAGE_WIDTH = 2048;
   constexpr int MAX_IMAGE_HEIGHT = 3072;
@@ -665,6 +684,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
 
   BmpConvertCtx ctx = {};
   ctx.bmpOut = &bmpOut;
+  ctx.cancellation = cancellation;
   ctx.srcWidth = effectiveSrcW;
   ctx.srcHeight = effectiveSrcH;
   ctx.outWidth = outWidth;
@@ -735,21 +755,21 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
   }
 
   if (oneBit) {
-    ctx.atkinson1BitDitherer = makeUniqueNoThrow<Atkinson1BitDitherer>(outWidth);
-    if (!ctx.atkinson1BitDitherer || !ctx.atkinson1BitDitherer->isValid()) {
+    ctx.atkinson1BitDitherer = makeUniqueNoThrow<Atkinson1BitDitherer>();
+    if (!ctx.atkinson1BitDitherer || !ctx.atkinson1BitDitherer->begin(outWidth)) {
       LOG_ERR("JPG", "OOM: Atkinson1BitDitherer");
       return false;
     }
   } else if (!USE_8BIT_OUTPUT) {
     if (USE_ATKINSON) {
-      ctx.atkinsonDitherer = makeUniqueNoThrow<AtkinsonDitherer>(outWidth, imageLevels);
-      if (!ctx.atkinsonDitherer || !ctx.atkinsonDitherer->isValid()) {
+      ctx.atkinsonDitherer = makeUniqueNoThrow<AtkinsonDitherer>();
+      if (!ctx.atkinsonDitherer || !ctx.atkinsonDitherer->begin(outWidth, imageLevels)) {
         LOG_ERR("JPG", "OOM: AtkinsonDitherer");
         return false;
       }
     } else if (USE_FLOYD_STEINBERG) {
-      ctx.fsDitherer = makeUniqueNoThrow<FloydSteinbergDitherer>(outWidth, imageLevels);
-      if (!ctx.fsDitherer || !ctx.fsDitherer->isValid()) {
+      ctx.fsDitherer = makeUniqueNoThrow<FloydSteinbergDitherer>();
+      if (!ctx.fsDitherer || !ctx.fsDitherer->begin(outWidth, imageLevels)) {
         LOG_ERR("JPG", "OOM: FloydSteinbergDitherer");
         return false;
       }
@@ -780,7 +800,7 @@ bool JpegToBmpConverter::jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bm
     return false;
   }
 
-  return true;
+  return bmpOut.good() && !cancellation.requested();
 }
 
 // Core function: Convert JPEG file to 2-bit BMP (uses default target size)
@@ -788,11 +808,23 @@ bool JpegToBmpConverter::jpegFileToBmpStream(FsFile& jpegFile, Print& bmpOut, bo
   // Use runtime display dimensions (swapped for portrait cover sizing)
   const int targetWidth = display.getDisplayHeight();
   const int targetHeight = display.getDisplayWidth();
-  return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetWidth, targetHeight, false, crop, false, imageLevels);
+  return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetWidth, targetHeight, false, crop, false, {}, nullptr, imageLevels);
+}
+
+// Convert with custom target size (for thumbnails, 2-bit)
+bool JpegToBmpConverter::jpegFileToBmpStreamWithSize(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
+                                                     int targetMaxHeight, bool adaptiveContain,
+                                                     CooperativeCancellation cancellation,
+                                                     BmpConversionDimensions* sourceDimensions) {
+  return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, false, true, adaptiveContain,
+                                     cancellation, sourceDimensions);
 }
 
 // Convert to 1-bit BMP (black and white only, no grays) for fast home screen rendering
 bool JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(FsFile& jpegFile, Print& bmpOut, int targetMaxWidth,
-                                                         int targetMaxHeight, bool adaptiveContain) {
-  return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, true, true, adaptiveContain);
+                                                         int targetMaxHeight, bool adaptiveContain,
+                                                         CooperativeCancellation cancellation,
+                                                         BmpConversionDimensions* sourceDimensions) {
+  return jpegFileToBmpStreamInternal(jpegFile, bmpOut, targetMaxWidth, targetMaxHeight, true, true, adaptiveContain,
+                                     cancellation, sourceDimensions);
 }

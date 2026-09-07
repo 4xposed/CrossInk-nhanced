@@ -1,7 +1,10 @@
 #pragma once
+#include <MangaCover.h>
+
 #include <string>
 #include <utility>
 
+#include "SleepCoverBudget.h"
 #include "activities/Activity.h"
 
 class Bitmap;
@@ -19,6 +22,9 @@ class SleepActivity final : public Activity {
   void onEnter() override;
 
  private:
+  mutable SleepCoverBudget mangaCoverBudget;
+  mutable manga::ThumbnailDiagnostics mangaCoverDiagnostics;
+  void logMangaCoverAttempt(bool cachedFallback) const;
   void renderDefaultSleepScreen() const;
   void renderCustomSleepScreen() const;
   void renderCoverSleepScreen() const;

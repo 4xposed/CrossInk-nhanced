@@ -1,0 +1,402 @@
+# Manga port validation ledger
+
+This ledger distinguishes implemented foundation tests from final port acceptance.
+The complete feature inventory remains `2026-09-05-manga-port-handoff.md`.
+
+## Baseline, 2026-09-05
+
+- Branch: `matcha_features`, HEAD `ea039400` (`add a mini Yomitan`).
+- Tracked worktree clean before manga work; `.codegraph/` and existing
+  `docs/superpowers/` untracked and preserved.
+- Matcha source: `61ca61ba86e3c5709a24d1b9c4f3cf2d41488012` (only index untracked).
+- FreeInk SDK: `1e8ee543edca397f2b8747811f5a88f1bc35d233`, unchanged.
+- Native baseline: `ctest --test-dir build/task16-tests -j 1 --output-on-failure`,
+  **504/504 passed**. Log: `/private/tmp/crossink-manga-baseline.log`.
+- No firmware flash, cloud OCR, translation call, or model download performed.
+
+## Foundation acceptance
+
+| Check | Status |
+| --- | --- |
+| Original converter byte fixtures with provenance | Passed; original pinned writer, SHA and artifact hashes recorded |
+| Decoder bounds, version, malformed/truncation tests | 13 tests passed, including ignored offset of zero-length records |
+| Offline converter round trips, ordering and geometry | 9 passed; 1 PDF test skipped because PyMuPDF is absent |
+| Native regression suite after changes | Rebuilt suite, 517/517 passed sequentially |
+| Independent review of foundation changes | Complete; empty-page offset issue fixed, no unresolved blockers |
+| Working-tree and dictionary preservation check | Branch/HEAD/SDK preserved; tracked changes limited to changelog, format docs and native test registration |
+
+Commands/logs:
+
+- `cmake --build build/task16-tests -j 4`, then `ctest --test-dir
+  build/task16-tests -j 1 --output-on-failure`: logs at
+  `/private/tmp/crossink-manga-native-{build,tests}.log`.
+- `/usr/bin/python3 -m unittest discover -s test/manga_converter -v`: log at
+  `/private/tmp/crossink-manga-converter-tests.log`. Uses installed Pillow 11.3.0;
+  no optional dependencies installed, sockets/subprocess/model imports blocked in tests.
+- Actual PlatformIO `riscv32-esp-elf-g++` and `xtensa-esp32s3-elf-g++` compiled
+  `lib/MangaPanel/MangaFormat.cpp` with `-std=gnu++2a -Os -fno-exceptions -fno-rtti
+  -Wall -Wextra -Werror`. Both passed. This does not establish full firmware size,
+  OTA headroom, or hardware behavior; decoder is not yet referenced by app code.
+- Separate AddressSanitizer/UndefinedBehaviorSanitizer decoder build: **13/13
+  passed**, with exceptions and RTTI disabled (implementer run).
+
+Foundation review: `2026-09-05-manga-foundation-review.md`. Code and tests remain
+uncommitted. Storage adapter continuation is recorded below; full-reader acceptance
+is deliberately still pending.
+
+## Storage adapter continuation
+
+Scope: Task 4, `2026-09-05-manga-storage-plan.md`. The adapter uses the firmware
+HAL and closes files before returning. No dictionary, SDK, renderer or application
+navigation code changes are part of this task.
+
+- Actual C3 firmware-header compile passed with `-Werror`, reusing the installed
+  PlatformIO compile database flags and includes for `src/main.cpp` with the new
+  adapter source substituted. Log: `/private/tmp/crossink-manga-storage-c3.log`.
+- Compiler `-fstack-usage` reports maximum **128-byte function-local stack frame**
+  for adapter functions. This excludes callees and does not establish the required
+  FreeRTOS task stack size or replace a hardware high-water-mark measurement.
+- Required path/page allocations and optional metadata/TOC/legacy-scan allocations
+  are fallible. Native tests inject failure at the allocation boundary using the
+  real Memory helper, with no production test hook.
+- Legacy page scanning trades repeated directory reads for bounded RAM. Canonical
+  first/last filename probes avoid the full scan. Neither behavior is a measured
+  on-device speed claim.
+- Independent review found and resolved a filename-read error case: failed
+  `getName` returns Error instead of skipping an entry and shifting page indexes.
+
+Final validation:
+
+- `cmake --build build/task16-tests -j 4` and sequential CTest: **538/538 passed**,
+  including **21 adapter tests**. Logs: `/private/tmp/crossink-manga-storage-build.log`
+  and `/private/tmp/crossink-manga-storage-tests.log`.
+- Separate Debug build `build/manga-book-sanitizers` with
+  `-fsanitize=address,undefined -fno-omit-frame-pointer`: **21/21 passed**, no
+  diagnostics, using `ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1
+  build/manga-book-sanitizers/manga_book/MangaBookTest`. LeakSanitizer is unsupported
+  on this Darwin runtime; the first leak-enabled invocation stopped before tests.
+  Test-only allocator interception needs exceptions enabled; production compilation
+  uses exceptions disabled. The tests independently enforce file handle closure.
+- Sticky/S3 actual SDK+HAL-header object compilation passed with warnings as errors,
+  C++20, exceptions and RTTI disabled. The Sticky compile database was generated by
+  `pio run -e sticky -t compiledb` (success); app HAL/Memory/Logging/SdFat/BoardConfig
+  include paths were added to the generated Arduino-core compile command for the
+  isolated adapter compile. Log: `/private/tmp/crossink-manga-storage-s3.log`.
+  PlatformIO needed cache access beyond the sandbox and refreshed its pinned Arduino
+  framework packages. The ignored compile database now targets Sticky. No tracked
+  source or SDK gitlink changed during that generation.
+- Independent review: `2026-09-05-manga-storage-review.md`, no unresolved blockers.
+- Final branch/HEAD remain `matcha_features` / `ea039400`; dictionary source and SDK
+  remain unchanged. All port work remains uncommitted.
+
+Task 4 is complete; next is the reader activity/navigation integration. No full
+firmware link, upload or physical device test is claimed.
+
+## Device integration acceptance — all pending
+
+Run on Xteink X4 (C3), reTerminal Sticky and Xteink X4 Pro (S3) once
+reader integration exists. Use owned synthetic or user-provided fixtures.
+
+| Scenario | Expected behavior / evidence |
+| --- | --- |
+| Folder named arbitrarily, nested several levels | `panels.idx` marker opens manga; ordinary folders still browse normally |
+| Original Matcha output with Japanese metadata and TOC | Correct title/author/language, chapter labels and page positions |
+| Canonical pages, older natural-sort names, flat/new panel folders | Identical page/panel order; panel crop never becomes library cover |
+| Page/panel forward and backward, zero-panel page | Correct boundary transitions and overview fallback |
+| Panels-only book, missing image, damaged index | Usable supported fallback or translated error; no crash or stale pixels |
+| Confirm/menu/Back/held Back and touch | Matches documented button semantics; touch respects runtime usable bounds |
+| Per-book Panels Only / Rotate Panels, all orientations | Saved settings; aspect fit and OCR highlights match image transform |
+| Bookmarks, chapter selection, percentage jump | Correct page/panel and label; unreachable TOC entries handled safely |
+| Home, Recent, Continue, reopen, sleep/wake | Saved position/settings persist; reading time/finished status stay consistent |
+| Cold then warm cache; replace source with same-size image | Same geometry/pixels; source replacement invalidates stale cache |
+| Truncated cache and interrupted cache publication | Source fallback succeeds; no partial cache accepted as complete |
+| Rapid navigation, lookup, exit and sleep during prefetch | Foreground input remains responsive; worker cancels and joins safely |
+| Repeated open/close and long navigation run | Log internal free heap, largest allocation and task watermark; no monotonic loss |
+| Grayscale, monochrome, rotation and many fast turns | Correct planes, no second framebuffer, acceptable periodic ghosting cleanup |
+| OCR Japanese and StarDict, no OCR/no match/replaced dictionary | Unified engine behavior preserved, correct highlights, no stale scan results |
+| Nested lookup, history/saved words and return to reader | Correct navigation and reader font restored |
+| Move/rename/delete/cache-clean book actions | Durable progress/bookmarks survive disposable-cache cleaning and valid moves |
+
+For cold image tests clear only disposable manga pixel/scan caches, retaining durable
+book state. EPUB cache clearing is needed only if an EPUB decoder/layout change
+requires it; do not clear unrelated user caches indiscriminately. Simulator builds
+cannot verify image pixels, physical refresh, or real SD same-file access limits.
+
+## Dictionary hardware handoff — pending
+
+An existing Python monitor owns `/dev/cu.usbmodem1101`; it was not interrupted.
+No dictionary SD paths have been renamed, removed, or overwritten in this session.
+Before restoration, verify `/dictionaries/jp.user-backup-20260905` is the original
+and `/dictionaries/jp` is still the tiny test fixture. Preserve the backup. Preserve
+user `/fonts/NotoSansJP` and `/fonts/BookerlyJP`. Track temporary English fixture,
+EPUB fixtures and the specific cache path from the handoff separately.
+
+Existing dictionary hardware gaps remain S3 checks, long-run navigation/heap,
+missing/replaced dictionaries, and the rest of the original matrix. A native test
+pass is not hardware certification. Prior X4 OTA headroom was only 50288 bytes;
+remeasure all target builds before reader integration is considered deliverable.
+
+## Foreground reader continuation (Task 5)
+
+The foreground activity now dispatches indexed folders from Books and supports
+page/panel navigation, per-book panel settings and saved position, chapter and
+percent selection, and per-panel bookmarks. It uses existing BW/dither rendering
+and no second framebuffer. Full grayscale/cache parity, thumbnails/library actions,
+prefetch and OCR/dictionary integration remain Tasks 6–9.
+
+- Native suite: **559/559 passed** after rebuilding, sequential CTest. Includes
+  12 navigation tests, 7 progress-store tests, and 23 MangaBook tests.
+- Navigation ASan/UBSan: **12/12 passed**; adapter ASan/UBSan: **23/23 passed**.
+- Independent reader review and resolved findings:
+  `2026-09-05-manga-reader-review.md`.
+- Final default/C3 build: **6,529,328 bytes**, **24,272 bytes OTA headroom**.
+  Full simulator and sticky-simulator builds also passed. Log:
+  `/private/tmp/crossink-manga-reader-final-builds.log`.
+- Simulator-only Confirm release suppression fix rebuilt in both profiles; existing
+  EPUB/dictionary smoke still passes. Logs: `/private/tmp/crossink-manga-reader-sim-final.log`
+  and `/private/tmp/crossink-manga-reader-smoke.log`.
+- Manga smoke passed in both simulator profiles, including real manual-refresh
+  manager dispatch, child menus, bookmark reload and exact persisted page/panel/
+  preference values. Touch profile uses a screen tap for the first panel transition.
+  These tests exercise BMP rendering but do not compare pixels or establish JPEG/PNG
+  rendering: those simulator decoders remain stubs.
+- Final Sticky/S3 build passed: **6,317,520 bytes**, **236,080 bytes OTA headroom**.
+  Log: `/private/tmp/crossink-manga-reader-sticky-final.log`.
+- Final 2026-09-06 smoke reruns passed (exit 0) on both simulator profiles, including
+  actual Books folder selection on reopen and persisted state validation. Logs:
+  `/private/tmp/crossink-manga-reader-manga-smoke.log` and
+  `/private/tmp/crossink-manga-reader-touch-smoke.log`. No manga/storage/bookmark
+  error logs occurred. Existing EPUB/dictionary smoke also passed on the final binary.
+- No hardware upload, hardware SD change, commit, push, dictionary source change,
+  or SDK gitlink change was performed.
+
+## User-authorized X4 upload — 2026-09-06
+
+User explicitly requested flashing. Read-only esptool identification confirmed
+ESP32-C3 revision v0.4 on `/dev/cu.usbmodem1101`, resolving an initial automatic
+approval rejection that had treated the USB device as S3. The subsequent approved
+`pio run -e default -t upload --upload-port /dev/cu.usbmodem1101` succeeded;
+6,529,328 firmware bytes were written at 0x10000 and the flash hash verified.
+Log: `/private/tmp/crossink-manga-flash.log`.
+
+A 15-second serial check after reset confirmed hardware X4, SD card detected,
+completed display refreshes and ongoing periodic heap reporting, with no panic
+or reboot loop observed. At ten seconds: free internal heap 114,492 bytes,
+largest allocation 65,524 bytes. Log: `/private/tmp/crossink-manga-boot.log`.
+The boot also reported unavailable IMU/RTC; this check does not establish those
+peripherals or manga image/navigation correctness. On-device manga testing by
+opening the extracted parent folder in Books remains pending. No commit or push.
+
+## User hardware confirmations after Task 5 upload
+
+On the flashed X4 the user confirmed manga opens, reopening resumes the same panel, Back returns to the full page, and wide-panel rotation works. These are user observations, separate from the serial boot check. Task 6 library/cover/stats/action checks remain pending.
+
+## Task 6 library integration — 2026-09-06
+
+- Native suite rebuilt and passed **575/575** sequentially. Includes 24 MangaBook
+  tests, 9 cover tests, 9 progress-store tests, and 4 bounded deletion-snapshot tests.
+  Logs: `/private/tmp/crossink-manga-library-native-{build,tests}.log`.
+- Full button and Sticky touch simulator builds passed.
+  Log: `/private/tmp/crossink-manga-library-simulators-final.log`.
+- Manga button and touch smoke passed with first/final page progress, physical-page
+  stats including final-page repeat protection, bounded metadata in recents, Grid
+  reopening, persisted bookmarks/preferences, cache clearing preserving progress/stats,
+  sleep cover generation, and corrupt sleep-thumbnail recovery. BMP image pixels are
+  exercised but not screenshot-compared; simulator JPEG/PNG converters are still stubs.
+- Additional button manga runs passed in Lyra Carousel, Minimal, and Dashboard themes.
+  Default Lyra also verifies the Home-size thumbnail exists after returning from Grid.
+  Logs: `/private/tmp/crossink-manga-library-{smoke,touch-smoke,carousel-smoke,minimal-smoke,dashboard-smoke}.log`.
+- Existing EPUB/dictionary smoke passed on the rebuilt button simulator.
+  Log: `/private/tmp/crossink-manga-library-dictionary-smoke.log`.
+- Default/C3 firmware passed: **6,542,528 bytes**, **11,072 bytes OTA headroom**.
+  Sticky/S3 firmware passed: **6,329,200 bytes**, **224,400 bytes OTA headroom**.
+  Both completed successfully; log `/private/tmp/crossink-manga-library-firmware-final.log`.
+- Independent review/re-review: `2026-09-06-manga-library-review.md`; no unresolved
+  blocking findings. Observable snapshot failures/overflow cancel deletion. HAL
+  enumeration cannot distinguish all I/O errors from normal EOF, and bookmark
+  deletion's existing void API limits aggregate cleanup reporting.
+- No new hardware upload or SD modification in Task 6. Dictionary implementation
+  and SDK gitlink remain unchanged; no commit or push. Prior Task 5 hardware
+  confirmations do not establish Task 6 cover/stat/action behavior.
+
+Hardware follow-up on X4: open Home and Recent Books after reading manga; verify
+cover/title/author/progress and reopening. Dwell on physical pages for more than
+ten seconds, advance past the final panel and inspect statistics/completed state.
+Clear the manga reading cache and confirm cover regeneration plus saved panel and
+bookmarks. Use a disposable copied manga folder to test confirmed deletion. Check
+serial free heap/largest block across repeated cold/warm Home visits. No cache reset
+is required for existing books: `thumb_v2_*` isolates the corrected cover format.
+
+Remaining full-port acceptance: source/cache image parity and grayscale, cancellable
+prefetch/cover work, OCR/unified lookup, all-target/hardware matrix, and dictionary
+backup restoration. No language-attributed stats are claimed because CrossInk's
+current stats schema has no language dimension. Folder rename/move is not exposed
+on-device; external path changes still create a new manga state identity.
+
+Final Task 6 firmware SHA-256:
+
+- `.pio/build/default/firmware.bin`: `7a5aac7751d6d7ed6026f540136c77886791f2dc002c2a18a6ebce6d1e598e10`
+- `.pio/build/sticky/firmware.bin`: `657f41ebcc2d2fdd2fb255f5009e0785d71e303155eeb014dd802e5028c3ed39`
+
+## Task 7 — geometry, grayscale and validated pixel caches (2026-09-06)
+
+Implemented integer fitting and pinned counterclockwise aspect rotation; MPX1
+sidecars identify source content, dimensions, orientation and pixel policy. Raw
+cache lengths, headers and payload CRCs are validated before rows reach the
+framebuffer. Matching source fingerprints reuse cached source dimensions without
+decoder probing. Partial publication regenerates safely; progress/bookmarks are
+outside these disposable files.
+
+Cold and warm draws use the same row replay for BW and both gray planes, then
+restore BW into the existing framebuffer through the documented renderer cleanup
+API. The activity owns one fallible 9,216-byte scratch allocation, reused across
+images. Manga BMPs validate DIB40/BI_RGB headers before parsing and use fixed
+four-level quantization without the shared decoder's unchecked dither allocations.
+JPEG/PNG keep their existing decoder/dithering path. See the
+[review and decisions](2026-09-06-manga-pixel-review.md).
+
+Fresh verification:
+
+- Native build and sequential CTest: **599/599 passed**. Geometry: 8 tests;
+  pixel-cache identity/publication/row reads: 10 tests; BMP producer: 6 tests.
+- Both button and Sticky touch simulator builds passed. Grayscale BMP smoke tests
+  compared cold/warm BW, LSB, MSB and restored-BW framebuffer hashes and asserted
+  cached source-geometry reuse. All passed on the final reviewed reader revision.
+- Monochrome manga and EPUB/dictionary lookup/history/menu smoke flows passed.
+- Final C3/default image: **6,551,008 bytes**, **2,592 bytes OTA headroom**.
+  SHA-256: `5533178781da44f9f56b38edf8a3cf08a5d3ffec75a9cdcb1e6fd82cae104bc5`.
+- Final Sticky/S3 image: **6,336,464 bytes**, **217,136 bytes OTA headroom**.
+  SHA-256: `1ee84709efd06ba70a645c7e48af9f8981b65599ef8d7fa0498e5fa3f4c711cb`.
+
+Evidence: `/private/tmp/crossink-manga-pixel-{native-build,native-tests,simulators-final,
+gray-smoke,touch-gray-smoke,mono-smoke,dictionary-smoke,default-final,sticky-final}.log`.
+
+At implementation completion there was no Task 7 flash, commit, staging or push. Dictionary implementation, user fonts,
+SDK pin and device dictionary backup remain unchanged. Physical JPEG/PNG quality,
+gray-level transitions/ghosting and repeated-turn heap measurements remain pending.
+Follow the [Task 7 hardware steps](2026-09-06-manga-pixel-plan.md). No source or
+progress reset is needed; pixel files regenerate independently. Remaining port
+work is cancellable prefetch, OCR/unified lookup and the all-device acceptance
+matrix, including dictionary-backup restoration. C3 flash space must be addressed
+as those remaining features are added.
+
+### Task 7 user-authorized X4 flash — 2026-09-06
+
+After the user requested flashing, esptool confirmed ESP32-C3 revision v0.4,
+MAC `e0:72:a1:82:d2:e4`, on `/dev/cu.usbmodem1101`. The verified default image
+above was written directly to the existing app0 offset `0x10000`: **6,551,008
+bytes**, flash hash verified, followed by a hard reset. No rebuild, partition
+change, SD-card cleanup or dictionary-backup restoration was performed.
+
+A 15-second serial check confirmed X4 detection, SD card detection, completed
+display refreshes and periodic heap reporting with no panic/reboot loop observed.
+At ten seconds: free internal heap **100,244 bytes**, largest allocation **65,524
+bytes**. The existing unavailable IMU/RTC messages remain; visual manga quality,
+rotation and gray transitions still require user observation. Serial port closed.
+
+Logs: `/private/tmp/crossink-manga-pixel-flash.log` and
+`/private/tmp/crossink-manga-pixel-boot.log`. No commits or pushes.
+
+## Task 8 intermediate software verification — 2026-09-06
+
+Renderer-free decoder work passed independent review and 39 focused tests with
+real JPEG/PNG codecs, cancellation, failed writes/finalization, and original
+foreground golden hashes. Font pooling equivalence and compiler include ordering
+also pass; every built-in font remains available.
+
+The initial worker integration builds for simulator and C3. Its C3 image is
+6,430,176 bytes, leaving 123,424 bytes in the existing OTA partition. Native tests
+pass 631/631 sequentially. Monochrome and grayscale manga simulator flows pass;
+the grayscale log records worker warming of the first panel and next overview,
+followed by foreground cache hits and matching BW/gray/restored-BW hashes. Existing
+EPUB/dictionary smoke passes. These results precede the final lifecycle stress
+tests and memory refinements, so Task 8 is not yet accepted or flashed.
+
+Logs: `/private/tmp/crossink-manga-prefetch-worker-{simulator,default,native-tests,
+smoke,gray-smoke,epub-smoke}.log`. The connected X4 still runs Task 7 firmware.
+
+### Task 8 final software gate
+
+Fix1 passes independent scoped review (pending input ordering addressed), all
+637 native tests, and the complete deterministic held-file grayscale stress flow
+(32.096 s). First/last-boundary opposing input and duplicate menu intent behave
+correctly. Forced Push/Pop/Replace/refresh/main sleep wait for worker cleanup;
+simulator interception skips only the final hardware sleep call.
+
+C3/default build passes: **6,430,368 bytes**, **123,232 bytes free**. SHA256:
+`89be65f08a61098b68b1ed9edfcbe9827fca91704a083edcb6e0078b6e742437`.
+Stable checkpoint image/ELF are `/private/tmp/crossink-task8b-firmware.{bin,elf}`.
+Logs: `/private/tmp/crossink-manga-prefetch-fix1-{default,native-tests,stress}.log`.
+The USB endpoint was absent at the pre-flash check (no USB serial device listed),
+so **Task 8 has not been flashed**. S3 builds and physical prefetch/heap/stack
+observations remain pending. Original Japanese dictionary backup is untouched;
+the separate requested data-copy approval remains pending.
+
+## Task 9a adapter and S3 builds
+
+Independent spec/quality review passes for owned OCR source/geometry/clipping.
+All 285 JapaneseDictionaryTest cases pass, including sixteen new manga adapter
+and real Japanese/StarDict scanner cases. UI/child lifecycle and verified scan
+identity are still Tasks 9b/9c.
+
+Sticky and X4 Pro builds pass with Task 8 and the Task 9a adapter. Sticky image:
+6,215,936 bytes (337,664 free); X4 Pro: 6,312,624 bytes (240,976 free). Logs:
+`/private/tmp/crossink-manga-ocr9a-sticky.log` and
+`/private/tmp/crossink-manga-ocr9a-x4-pro.log`. This verifies S3 compilation, not
+physical touch, image, heap or sleep behavior. No device flash occurred.
+
+## Task 9b shared lookup and stored translations
+
+Independent spec and quality review approve the integration after fix1. Full
+native suite passes **659/659** (31.39 s), including 286 dictionary tests and five
+translation tests. Final simulator/default OCR flow passes **28.742 s**, Sticky
+touch OCR flow **28.997 s**, and EPUB regression **3.360 s**. Both simulator
+profiles build successfully. Logs are
+`/private/tmp/crossink-manga-ocr9b-{native-tests,smoke,touch-smoke,epub-smoke}.log`.
+
+Coverage includes panel-Confirm/overview-menu entry, word and definition paging,
+nested Back, dictionary switching, clipping/history, exact restored framebuffer
+and orientation, reader font metrics, translation without OCR or dictionaries,
+empty feedback, crop-only text fallback, repeated Confirm while prefetch drains,
+forced lookup teardown/reopen, and actual touch gestures. Fixture sort ordering,
+auxiliary-book placement, and a swipe beginning inside the intentional Back zone
+were corrected; no production dictionary or input algorithm was changed.
+Missing-cover/cache diagnostics in negative fixtures are expected and recorded.
+
+External persistent scans remain disabled until Task 9c verifies dictionary
+identity. No physical C3/S3 OCR, large SD-font pressure or e-ink overlay acceptance
+is claimed. USB enumeration after the user's latest "connected" message still
+shows no reader endpoint, including outside the sandbox. Task 7 remains the last
+flashed firmware; no dictionary backup copy or restoration occurred.
+
+## Task 9c verified scan identity — 2026-09-07
+
+Independent spec and quality review approve canonical index verification and
+cache integration. The full native suite passes **675/675** (31.10 s), including
+302 dictionary tests. Final button OCR smoke passes **28.845 s**, Sticky touch
+OCR **29.136 s**, and EPUB regression **3.255 s**. Actual activity checks assert
+a cold fresh scan and a second activation loading the verified cache with cursor
+1 restored. Late-verification cursor preservation uses composed native components;
+large-index activity timing/cancellation remains part of hardware acceptance.
+
+All firmware builds pass. Actual image sizes and app-partition headroom:
+
+| Target | Image bytes | Free bytes |
+| --- | ---: | ---: |
+| default / C3 | 6,448,928 | 104,672 |
+| Sticky | 6,232,096 | 321,504 |
+| X4 Pro | 6,328,832 | 224,768 |
+
+C3 SHA256: `fb8d5c719aec67552d0c7c5fa0e45d937379990ff7672843b1e7ed67d27b7f8b`.
+Reviewed checkpoint: `/private/tmp/crossink-task9c-firmware.{bin,elf}`. Logs:
+`/private/tmp/crossink-manga-ocr9c-{default,s3-builds,native-tests,smoke,touch-smoke,epub-smoke}.log`.
+HEAD and SDK gitlink remain unchanged. No firmware flash or dictionary mutation.
+
+Verification reads full canonical indexes/metadata/synonyms and records dictionary
+data availability/size, excluding definition bodies and disposable accelerators.
+Large dictionaries can finish progressive scanning before verification, making
+warm caches unhelpful for those activations. This preserves first-definition
+responsiveness and strict invalidation; native timings do not predict SD latency.
+Hardware heap/stack, SD fonts, large-index timing and physical overlays remain
+unverified. USB enumeration still shows no reader endpoint; backup-copy approval
+remains pending after the earlier automatic approval rejection.

@@ -1,5 +1,6 @@
 #include "PngToBmpConverter.h"
 
+#include <CheckedPrint.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
 #include <InflateStream.h>
@@ -272,6 +273,7 @@ static bool shouldContainAdaptive(const int srcWidth, const int srcHeight, const
 
 // Context for streaming PNG decompression
 struct PngDecodeContext {
+  CooperativeCancellation cancellation;
   InflateStream reader;
   FsFile* file;
 
@@ -360,6 +362,7 @@ static size_t pngIdatFillCallback(void* vctx, const uint8_t** data) {
 
 // Decode one scanline: decompress filter byte + raw bytes, then unfilter
 static bool decodeScanline(PngDecodeContext& ctx) {
+  if (ctx.cancellation.requested()) return false;
   // Decompress filter byte
   uint8_t filterType;
   if (!ctx.reader.read(&filterType, 1)) return false;
@@ -488,8 +491,12 @@ static void convertScanlineToGray(const PngDecodeContext& ctx, uint8_t* grayRow)
   }
 }
 
-bool PngToBmpConverter::pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOut, int targetWidth, int targetHeight,
-                                                   bool oneBit, bool crop, bool adaptiveContain, bool imageLevels) {
+bool PngToBmpConverter::pngFileToBmpStreamInternal(FsFile& pngFile, Print& destination, int targetWidth,
+                                                   int targetHeight, bool oneBit, bool crop, bool adaptiveContain,
+                                                   CooperativeCancellation cancellation,
+                                                   BmpConversionDimensions* sourceDimensions, bool imageLevels) {
+  CheckedPrint bmpOut(destination);
+  if (cancellation.requested()) return false;
   // Verify PNG signature
   uint8_t sig[8];
   if (pngFile.read(sig, 8) != 8 || memcmp(sig, PNG_SIGNATURE, 8) != 0) {
@@ -510,6 +517,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOu
   uint32_t width, height;
   if (!readBE32(pngFile, width) || !readBE32(pngFile, height)) return false;
 
+  if (sourceDimensions) *sourceDimensions = {static_cast<int>(width), static_cast<int>(height)};
   uint8_t ihdrRest[5];
   if (pngFile.read(ihdrRest, 5) != 5) return false;
 
@@ -587,8 +595,15 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOu
   }
 
   // Initialize decode context
-  PngDecodeContext ctx = {};
+  // Palette and compressed-input buffer exceed the render task stack budget.
+  auto context = makeUniqueNoThrow<PngDecodeContext>();
+  if (!context) {
+    LOG_ERR("PNG", "OOM for PNG context (%u bytes)", unsigned(sizeof(PngDecodeContext)));
+    return false;
+  }
+  auto& ctx = *context;
   ctx.file = &pngFile;
+  ctx.cancellation = cancellation;
   ctx.width = width;
   ctx.height = height;
   ctx.bitDepth = bitDepth;
@@ -612,6 +627,7 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOu
   // We need to read chunks until we find IDAT, collecting PLTE along the way
   bool foundIdat = false;
   while (!foundIdat) {
+    if (cancellation.requested()) return false;
     uint32_t chunkLen;
     if (!readBE32(pngFile, chunkLen)) break;
 
@@ -783,7 +799,8 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOu
         else if (fsDitherer)
           fsDitherer->nextRow();
       }
-      bmpOut.write(rowBuffer, bytesPerRow);
+      if (cancellation.requested() || bmpOut.write(rowBuffer, bytesPerRow) != static_cast<size_t>(bytesPerRow))
+        return false;
       yieldDuringDecode(rowsSinceYield);
     } else {
       const uint64_t srcY_fp = static_cast<uint64_t>(y + 1) << 16;
@@ -858,7 +875,8 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOu
             fsDitherer->nextRow();
         }
 
-        bmpOut.write(rowBuffer, bytesPerRow);
+        if (cancellation.requested() || bmpOut.write(rowBuffer, bytesPerRow) != static_cast<size_t>(bytesPerRow))
+          return false;
         currentOutY++;
         yieldDuringDecode(rowsSinceYield);
 
@@ -885,17 +903,28 @@ bool PngToBmpConverter::pngFileToBmpStreamInternal(FsFile& pngFile, Print& bmpOu
 
   if (success) {
   }
-  return success;
+  return success && bmpOut.good() && !cancellation.requested();
 }
 
 bool PngToBmpConverter::pngFileToBmpStream(FsFile& pngFile, Print& bmpOut, bool crop, bool imageLevels) {
   // Use runtime display dimensions (swapped for portrait cover sizing)
   const int targetWidth = display.getDisplayHeight();
   const int targetHeight = display.getDisplayWidth();
-  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetWidth, targetHeight, false, crop, false, imageLevels);
+  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetWidth, targetHeight, false, crop, false, {}, nullptr, imageLevels);
+}
+
+bool PngToBmpConverter::pngFileToBmpStreamWithSize(FsFile& pngFile, Print& bmpOut, int targetMaxWidth,
+                                                   int targetMaxHeight, bool adaptiveContain,
+                                                   CooperativeCancellation cancellation,
+                                                   BmpConversionDimensions* sourceDimensions) {
+  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetMaxWidth, targetMaxHeight, false, true, adaptiveContain,
+                                    cancellation, sourceDimensions);
 }
 
 bool PngToBmpConverter::pngFileTo1BitBmpStreamWithSize(FsFile& pngFile, Print& bmpOut, int targetMaxWidth,
-                                                       int targetMaxHeight, bool adaptiveContain) {
-  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetMaxWidth, targetMaxHeight, true, true, adaptiveContain);
+                                                       int targetMaxHeight, bool adaptiveContain,
+                                                       CooperativeCancellation cancellation,
+                                                       BmpConversionDimensions* sourceDimensions) {
+  return pngFileToBmpStreamInternal(pngFile, bmpOut, targetMaxWidth, targetMaxHeight, true, true, adaptiveContain,
+                                    cancellation, sourceDimensions);
 }

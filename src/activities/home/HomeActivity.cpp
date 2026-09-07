@@ -9,6 +9,8 @@
 #include <I18n.h>
 #include <Memory.h>
 #include <MemoryBudget.h>
+#include <MangaBook.h>
+#include <MangaCover.h>
 #include <Serialization.h>
 #include <Utf8.h>
 #include <Xtc.h>
@@ -25,12 +27,14 @@
 #include "../reader/BookReadingStats.h"
 #include "../reader/BookStatsActivity.h"
 #include "../reader/EpubReaderUtils.h"
+#include "../reader/MangaProgressStore.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "GlobalActions.h"
 #include "KOReaderCredentialStore.h"
+#include "MangaCoverInput.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBookProgress.h"
@@ -43,6 +47,12 @@
 #include "fontIds.h"
 
 namespace {
+bool isMangaRecentBook(const RecentBook& book) {
+  // Readers persist this versioned template, so warm Home paths avoid probing
+  // the SD marker repeatedly. The probe keeps older/stale metadata retryable.
+  return book.coverBmpPath.rfind("/.crosspoint/manga_", 0) == 0 || manga::MangaBook::isMangaFolder(book.path.c_str());
+}
+
 constexpr uint32_t CAROUSEL_CACHE_MAGIC = 0x43434152;  // "CCAR"
 // Cached frames include all Home visuals, including the menu icons. Bump this
 // whenever their rendering changes so stale snapshots are rebuilt after OTA.
@@ -157,6 +167,9 @@ void appendHashedFileStateToKey(std::string& key, const std::string& path) {
 }
 
 std::string getRecentBookCachePath(const RecentBook& book) {
+  if (isMangaRecentBook(book)) {
+    return manga::cachePath(book.path);
+  }
   if (FsHelpers::hasEpubExtension(book.path)) {
     return Epub::cachePathForFilePath(book.path, "/.crosspoint");
   }
@@ -170,7 +183,7 @@ std::string getRecentBookCachePath(const RecentBook& book) {
 }
 
 BookReadingStats loadRecentBookStats(const RecentBook& book) {
-  if (!FsHelpers::hasEpubExtension(book.path) && !FsHelpers::hasXtcExtension(book.path)) {
+  if (!FsHelpers::hasEpubExtension(book.path) && !FsHelpers::hasXtcExtension(book.path) && !isMangaRecentBook(book)) {
     return BookReadingStats{};
   }
 
@@ -233,6 +246,9 @@ bool hasThumbnailPlaceholder(const std::string& coverBmpPath) {
 }
 
 std::string getReusableCoverPath(const RecentBook& book) {
+  if (isMangaRecentBook(book)) {
+    return manga::thumbnailTemplatePath(book.path);
+  }
   if (FsHelpers::hasEpubExtension(book.path)) {
     return Epub(book.path, "/.crosspoint").getThumbBmpPath();
   }
@@ -243,7 +259,8 @@ std::string getReusableCoverPath(const RecentBook& book) {
 }
 
 bool ensureReusableCoverPath(RecentBook& book) {
-  if (book.coverState == RecentBook::CoverState::Missing || hasThumbnailPlaceholder(book.coverBmpPath)) {
+  if (!isMangaRecentBook(book) &&
+      (book.coverState == RecentBook::CoverState::Missing || hasThumbnailPlaceholder(book.coverBmpPath))) {
     return false;
   }
 
@@ -253,6 +270,7 @@ bool ensureReusableCoverPath(RecentBook& book) {
   }
 
   book.coverBmpPath = reusablePath;
+  if (isMangaRecentBook(book)) book.coverState = RecentBook::CoverState::Unknown;
   updateRecentBookCover(book);
   return true;
 }
@@ -430,9 +448,12 @@ void appendCarouselCoverStateToKey(std::string& key, const RecentBook& book) {
 
   const std::string cachePath = getRecentBookCachePath(book);
   if (!cachePath.empty()) {
-    appendHashedFileStateToKey(key, cachePath + "/progress.bin");
-    if (FsHelpers::hasEpubExtension(book.path) || FsHelpers::hasXtcExtension(book.path)) {
-      appendHashedFileStateToKey(key, cachePath + "/stats_v5.bin");
+    if (isMangaRecentBook(book))
+      appendHashedFileStateToKey(key, manga::MangaProgressStore::statePath(book.path));
+    else
+      appendHashedFileStateToKey(key, cachePath + "/progress.bin");
+    if (FsHelpers::hasEpubExtension(book.path) || FsHelpers::hasXtcExtension(book.path) || isMangaRecentBook(book)) {
+      appendHashedFileStateToKey(key, cachePath + "/stats_v6.bin");
     }
   } else {
     key += "no-cache-path";
@@ -623,6 +644,8 @@ int HomeActivity::getMenuItemCount() const {
 }
 
 void HomeActivity::loadRecentBooks(int maxBooks) {
+  coverAttempts.fill({});
+  coverWork.authorizeIntent();
   recentBooks.clear();
   const auto& books = RECENT_BOOKS.getBooks();
   recentBooks.reserve(std::min(static_cast<int>(books.size()), maxBooks));
@@ -655,6 +678,12 @@ void HomeActivity::loadAllBookStats() {
 }
 
 void HomeActivity::loadRecentCovers(int coverHeight) {
+  manga::ThumbnailDiagnostics coverDiagnostics;
+  auto batch = coverWork.batch();
+  if (batch.cancelled()) return;
+  coverWork.active = true;
+  const ScopedCleanup finishCoverWork{[&] { coverWork.active = false; }};
+
   // Thumbnail generation may need a 32 KB contiguous inflate buffer. The Home
   // cover snapshot is only a redraw cache, so release it before ZIP work.
   if (coverBuffer) {
@@ -685,6 +714,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 
   int progress = 0;
   for (size_t bookIdx = 0; bookIdx < recentBooks.size(); ++bookIdx) {
+    if (batch.cancelled()) break;
     RecentBook& book = recentBooks[bookIdx];
     if (!Storage.exists(book.path.c_str())) {
       progress++;
@@ -702,8 +732,31 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
         const bool centerMissing = !Storage.exists(centerPath.c_str());
         const bool sideMissing = !Storage.exists(sidePath.c_str());
 
-        if (centerMissing || sideMissing) {
-          if (FsHelpers::hasEpubExtension(book.path)) {
+        if (centerMissing || sideMissing || isMangaRecentBook(book)) {
+          if (isMangaRecentBook(book)) {
+            if (coverAttempts[bookIdx].attempted) continue;
+            coverAttempts[bookIdx].attempted = true;
+            manga::MangaBook mangaBook;
+            if (mangaBook.open(book.path.c_str(), manga::OpenMode::Cover)) {
+              if (centerMissing || sideMissing) showLoadingProgress(10 + progress * progressIncrement);
+              const auto center = manga::generateThumbnailControlled(
+                  mangaBook, book.path, LyraCarouselTheme::kCenterThumbW, LyraCarouselTheme::kCenterThumbH,
+                  batch.cancellation(), &coverDiagnostics);
+              coverAttempts[bookIdx].record(LyraCarouselTheme::kCenterThumbW, LyraCarouselTheme::kCenterThumbH,
+                                            coverDiagnostics);
+              if (batch.cancelled()) break;
+              const auto side = manga::generateThumbnailControlled(mangaBook, book.path, LyraCarouselTheme::kSideCoverW,
+                                                                   LyraCarouselTheme::kSideCoverH, batch.cancellation(),
+                                                                   &coverDiagnostics);
+              coverAttempts[bookIdx].record(LyraCarouselTheme::kSideCoverW, LyraCarouselTheme::kSideCoverH,
+                                            coverDiagnostics);
+              if (batch.cancelled()) break;
+              if (center == manga::ThumbnailResult::Published || side == manga::ThumbnailResult::Published)
+                bookUpdated[bookIdx] = true;
+              coverRendered = false;
+              requestUpdate();
+            }
+          } else if (FsHelpers::hasEpubExtension(book.path)) {
             Epub epub(book.path, "/.crosspoint");
             showLoadingProgress(10 + progress * progressIncrement);
             if (!epub.load(true, true, Epub::XLocationLoadMode::Skip)) {
@@ -750,8 +803,9 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
         }
       } else {
         // Non-carousel: generate the active theme's thumbnail size.
+        const bool mangaBook = isMangaRecentBook(book);
         const bool supportsExactHomeThumb =
-            FsHelpers::hasEpubExtension(book.path) || FsHelpers::hasXtcExtension(book.path);
+            FsHelpers::hasEpubExtension(book.path) || FsHelpers::hasXtcExtension(book.path) || mangaBook;
         const bool useDashboardThumb = isDashboard && supportsExactHomeThumb;
         const bool useMinimalThumb = isMinimal && supportsExactHomeThumb;
         const bool useExactHomeThumb = useDashboardThumb || useMinimalThumb;
@@ -759,8 +813,30 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
             useDashboardThumb ? dashboardHomeCoverPath(book, coverHeight)
                               : (useMinimalThumb ? minimalHomeCoverPath(book, coverHeight)
                                                  : UITheme::getCoverThumbPath(book.coverBmpPath, coverHeight));
-        if (coverPath.empty() || !Storage.exists(coverPath.c_str())) {
-          if (FsHelpers::hasEpubExtension(book.path)) {
+        const bool coverMissing = coverPath.empty() || !Storage.exists(coverPath.c_str());
+        if (coverMissing || mangaBook) {
+          if (mangaBook) {
+            if (coverAttempts[bookIdx].attempted) continue;
+            coverAttempts[bookIdx].attempted = true;
+            manga::MangaBook coverBook;
+            if (coverBook.open(book.path.c_str(), manga::OpenMode::Cover)) {
+              if (coverMissing) showLoadingProgress(10 + progress * progressIncrement);
+              const int width = useDashboardThumb ? dashboardHomeCoverWidth(coverHeight)
+                                                  : (useMinimalThumb ? minimalHomeCoverWidth(coverHeight) : 0);
+              const int height = useDashboardThumb
+                                     ? dashboardHomeCoverHeight(coverHeight)
+                                     : (useMinimalThumb ? minimalHomeCoverHeight(coverHeight) : coverHeight);
+              const auto result = manga::generateThumbnailControlled(coverBook, book.path, width, height,
+                                                                     batch.cancellation(), &coverDiagnostics);
+              coverAttempts[bookIdx].record(width, height, coverDiagnostics);
+              if (batch.cancelled()) break;
+              const bool success =
+                  result == manga::ThumbnailResult::Published || result == manga::ThumbnailResult::Cached;
+              if (coverMissing && success && bookIdx < bookUpdated.size()) bookUpdated[bookIdx] = true;
+              coverRendered = false;
+              requestUpdate();
+            }
+          } else if (FsHelpers::hasEpubExtension(book.path)) {
             Epub epub(book.path, "/.crosspoint");
             showLoadingProgress(10 + progress * progressIncrement);
             if (!epub.load(true, true, Epub::XLocationLoadMode::Skip)) {
@@ -812,8 +888,9 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
     progress++;
   }
 
-  recentsLoaded = true;
+  recentsLoaded = !batch.cancelled();
   recentsLoading = false;
+  if (batch.cancelled()) return;
 
   // Re-render only the affected slots rather than rebuilding the entire cache.
   if (isCarouselTheme) {
@@ -1080,6 +1157,8 @@ void HomeActivity::updateHighlightedBookContext(const bool allowEpubLoad) {
 }
 
 void HomeActivity::onExit() {
+  if (coverWork.active) LOG_ERR("MCV", "Cover owner exited before draining");
+  coverAttempts.fill({});
   Activity::onExit();
 
   carouselMenuTouchDownIndex = -1;
@@ -1503,6 +1582,7 @@ bool HomeActivity::preRenderCarouselFrames(bool showProgressPopup) {
 }
 
 void HomeActivity::loop() {
+  MangaCoverInput coverInput(coverWork, mappedInput);
   if (quickActionsLongPowerHandled) {
     if (!mappedInput.isPressed(MappedInputManager::Button::Power)) {
       quickActionsLongPowerHandled = false;
@@ -2378,8 +2458,11 @@ void HomeActivity::onReadingStatsOpen() {
   const std::string bookTitle =
       highlightedBookIdx >= 0 ? recentBooks[highlightedBookIdx].title : std::string(tr(STR_READING_STATS));
   const std::string bookPath = getCurrentBookPath();
-  const std::string cachePath =
-      FsHelpers::hasEpubExtension(bookPath) ? Epub::cachePathForFilePath(bookPath, "/.crosspoint") : std::string{};
+  const std::string cachePath = FsHelpers::hasEpubExtension(bookPath)
+                                    ? Epub::cachePathForFilePath(bookPath, "/.crosspoint")
+                                : FsHelpers::hasXtcExtension(bookPath) ? Xtc(bookPath, "/.crosspoint").getCachePath()
+                                : manga::MangaBook::isMangaFolder(bookPath.c_str()) ? manga::cachePath(bookPath)
+                                                                                    : std::string{};
   if (showAllDevicesStats) {
     startActivityForResult(std::make_unique<BookStatsActivity>(renderer, mappedInput, bookTitle, cachePath,
                                                                currentBookStats, currentBookProgressPercent, false, 0,

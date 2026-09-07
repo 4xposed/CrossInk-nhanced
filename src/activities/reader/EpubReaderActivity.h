@@ -456,7 +456,9 @@ class EpubReaderActivity final : public Activity {
   bool isAtOrPastCompletionTrigger() const;
   bool shouldQueueCompletionPromptOnChapterExit() const;
   void queueCompletionPromptIfNeeded();
-  void setBookCompleted(bool isCompleted);
+  bool completionBookSaved = true;
+  bool completionGlobalSaved = true;
+  bool setBookCompleted(bool isCompleted);
   void showCompletedFeedback(bool isCompleted);
   void showTiltPageTurnFeedback(bool enabled);
   // Shared dismissal rule for the transient bookmark/completed/tilt confirmations.

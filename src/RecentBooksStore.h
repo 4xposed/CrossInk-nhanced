@@ -35,7 +35,7 @@ class RecentBooksStore : public PersistableStore<RecentBooksStore> {
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);
   bool saveToFile() const;
-  bool loadFromFile();
+  bool loadFromFile(bool mutationReload = false);
 
   // Add a new book to the front, or refresh an existing entry and promote it
   // to the front.

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 #include "util/DictionaryEngineTypes.h"
 
@@ -29,6 +30,33 @@ struct PageTextSourceView {
   const PageTextGlyph* glyphs = nullptr;
   uint16_t glyphCount = 0;
   uint32_t contentHash = 0;
+};
+
+// Value-only source transferred into the shared lookup activity. No page or
+// renderer references survive construction; moved-from owners expose an empty view.
+struct OwnedLookupTextSource {
+  std::unique_ptr<PageTextGlyph[]> glyphs;
+  uint16_t glyphCount = 0;
+  uint32_t contentHash = 0;
+  bool truncated = false;
+  OwnedLookupTextSource() = default;
+  OwnedLookupTextSource(OwnedLookupTextSource&& other) noexcept { *this = std::move(other); }
+  OwnedLookupTextSource& operator=(OwnedLookupTextSource&& other) noexcept {
+    if (this != &other) {
+      glyphs = std::move(other.glyphs);
+      glyphCount = std::exchange(other.glyphCount, 0);
+      contentHash = std::exchange(other.contentHash, 0);
+      truncated = std::exchange(other.truncated, false);
+    }
+    return *this;
+  }
+  PageTextSourceView view() const { return {glyphs.get(), glyphCount, contentHash}; }
+  void clear() {
+    glyphs.reset();
+    glyphCount = 0;
+    contentHash = 0;
+    truncated = false;
+  }
 };
 
 struct PageTextBounds {

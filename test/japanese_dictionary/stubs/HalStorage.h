@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -33,6 +34,11 @@ inline uint32_t directoryAllocationFailureCount = 0;
 inline uint32_t openCount = 0;
 inline uint32_t closeCount = 0;
 inline uint32_t readCount = 0;
+inline std::map<std::string, size_t> readBytes;
+inline std::map<std::string, size_t> activeReaders;
+inline size_t maximumReadBytes = 0;
+inline bool rejectDuplicateReaders = false;
+inline void (*afterRead)() = nullptr;
 inline bool writeOpenFailureCreatesFile = false;
 inline std::vector<std::pair<std::string, std::string>> renameFailures;
 
@@ -57,6 +63,10 @@ inline void reset() {
   openCount = 0;
   closeCount = 0;
   readCount = 0;
+  readBytes.clear();
+  maximumReadBytes = 0;
+  rejectDuplicateReaders = false;
+  afterRead = nullptr;
   writeOpenFailureCreatesFile = false;
   renameFailures.clear();
 }
@@ -84,9 +94,14 @@ class HalFile {
       }
       return false;
     }
+    if (!write && hal_storage_test::rejectDuplicateReaders && hal_storage_test::activeReaders[firmwarePath])
+      return false;
     stream_.open(path,
                  write ? (std::ios::binary | std::ios::out | std::ios::trunc) : (std::ios::binary | std::ios::in));
-    if (stream_.is_open()) ++hal_storage_test::openCount;
+    if (stream_.is_open()) {
+      ++hal_storage_test::openCount;
+      if (!write) ++hal_storage_test::activeReaders[firmwarePath_];
+    }
     return stream_.is_open();
   }
 
@@ -152,6 +167,7 @@ class HalFile {
           ++hal_storage_test::matchingCloseCount == hal_storage_test::closeFailureOrdinal) {
         failed = true;
       }
+      if (!writable_) --hal_storage_test::activeReaders[firmwarePath_];
       stream_.close();
       ++hal_storage_test::closeCount;
     }
@@ -176,6 +192,7 @@ class HalFile {
   }
 
   size_t fileSize() { return size(); }
+  uint64_t fileSize64() { return size(); }
 
   bool seek(size_t offset) {
     if (firmwarePath_ == hal_storage_test::seekFailurePath) return false;
@@ -204,13 +221,17 @@ class HalFile {
 
   int read(void* destination, size_t count) {
     ++hal_storage_test::readCount;
+    hal_storage_test::maximumReadBytes = std::max(hal_storage_test::maximumReadBytes, count);
     const auto position = stream_.tellg();
     if (firmwarePath_ == hal_storage_test::shortReadPath && position >= 0 &&
         static_cast<size_t>(position) >= hal_storage_test::shortReadOffset && count > 0) {
       --count;
     }
     stream_.read(static_cast<char*>(destination), static_cast<std::streamsize>(count));
-    return static_cast<int>(stream_.gcount());
+    const int actual = static_cast<int>(stream_.gcount());
+    hal_storage_test::readBytes[firmwarePath_] += actual;
+    if (hal_storage_test::afterRead) hal_storage_test::afterRead();
+    return actual;
   }
 
   size_t write(const void* source, size_t count) {

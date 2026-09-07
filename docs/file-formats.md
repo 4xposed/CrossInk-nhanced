@@ -6,6 +6,42 @@ states other locations when applicable. All POD fields are written in the
 ESP32 little-endian representation used by `Serialization.h`; strings are
 length-prefixed UTF-8 unless a format notes a fixed-size char buffer.
 
+The portable Matcha manga book format (`panels.idx`, `panels.dat`, `meta.bin`,
+and `toc.idx`) is documented separately in [Manga format](manga-format.md).
+These are converter-produced book files, not disposable firmware caches. Manga reading position and panel preferences use a separate durable
+[versioned progress record](manga-progress.md); deleting render caches must not
+delete this state.
+
+Manga thumbnails use the disposable `/.crosspoint/manga_<crc>/thumb_v3_<width>x<height>.bmp`
+cache and a 40-byte `.src` identity sidecar. Version 3 (`MCG3`) replaces version 2;
+old `thumb_v2` covers are ignored and regenerated, with no durable data migration.
+All fields are unsigned little-endian integers, with no padding:
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 4 | Magic, ASCII `MCG3` |
+| 4 | 4 | Resolved source-path CRC32 |
+| 8 | 4 | Source-content CRC32 |
+| 12 | 4 | Requested width |
+| 16 | 4 | Requested height |
+| 20 | 4 | Exact emitted BMP width |
+| 24 | 4 | Exact emitted BMP height (absolute) |
+| 28 | 4 | Complete BMP CRC32, including header and palette |
+| 32 | 8 | Source byte length |
+
+CRCs use `uzlib_crc32` with initial value zero. They detect accidental corruption
+and bind transaction pairs; they are not adversarial authentication. Publication
+checks emitted geometry against real converter-reported source geometry. Reuse
+and recovery check exact emitted dimensions, full BMP extent and digest, plus
+requested/source identity for reuse. See [Manga covers](manga-covers.md). The
+shared current `stats_v6.bin` record and supported legacy stats files are preserved during reading-cache clearing.
+
+Manga grayscale pixels use `pixels_v1_p<page>_<panel>.pxc` in that same disposable
+cache directory, with a 48-byte `MPX1` version-1 `.id` envelope. Source content,
+screen geometry, orientation, pixel policy and payload CRC must match before
+rendering. The raw 2-bit decoder payload remains unchanged for EPUB. See
+[Manga pixel cache](manga-pixel-cache.md) for the layout and failure behavior.
+
 ## `/.crosspoint/sleep-image-index/<directory-hash>-{bmp,all}.idx`
 
 ### Version 1
@@ -281,10 +317,10 @@ their own per-book stats files without overwriting each other. Version 5 extends
 version 4 with a cached live reader book time-left estimate so Home and Reading
 Stats can show the same estimate the reader last computed.
 
-When `stats_v5.bin` is missing, CrossInk can read the previous versioned stats
-filename (`stats_v4.bin` for version 5, `stats_v5.bin` after a future version 6
-bump) before falling back to legacy `stats.bin` files with compatible stats
-payloads. Future changes are always saved to the current versioned filename.
+This section documents the retained v5 compatibility layout. Current firmware
+writes `stats_v6.bin`; when it is absent, loading falls back through `stats_v5.bin`,
+`stats_v4.bin` and compatible legacy `stats.bin` payloads. Subsequent changes save
+to v6; its language summary and local-day appendix are documented below.
 
 Binary layout:
 
@@ -388,6 +424,21 @@ has been promoted.
 
 ## `wlscan.bin`
 
+The dictionary identity is a domain-separated, full canonical index fingerprint,
+verified incrementally once per lookup activation. Japanese identity covers active
+vocabulary/grammar/names index bytes, resolved paths, availability, and data-file
+sizes. StarDict covers full `.idx`, optional `.syn`, `.ifo`, the resolved base path,
+parsed index descriptors, and `.dict` availability/size. Definition payloads and
+rebuildable accelerators (`.spx`, `.qidx`, `.oft`, `.cspt`) are excluded. The binary
+layout remains unchanged; the new domain invalidates earlier sampled identities.
+Pending, failed, cancelled, or truncated scans cannot publish a persistent cache.
+Files are assumed immutable for an active lookup; a new activation always verifies
+again. Large indexes can bypass loading while progressive lookup supplies the first
+definition, then finish verification to allow saving without replacing live candidates.
+Canonical indexes over UINT32_MAX bytes disable cache verification; definition-file
+sizes are captured through the HAL's existing 64-bit size API without reading payloads.
+
+
 ### Version 2
 
 Each EPUB book cache may contain one disposable snapshot of the most recently
@@ -402,7 +453,7 @@ offset  size  field
 8       2     spine index (uint16_t LE)
 10      2     page index (uint16_t LE)
 12      4     page-glyph FNV-1a hash (uint32_t LE)
-16      8     dictionary signature (uint64_t LE)
+16      8     verified canonical dictionary scan identity (uint64_t LE)
 24      2     candidate count (uint16_t LE)
 26      2     selected cursor (uint16_t LE)
 28      4     candidate-payload FNV-1a hash (uint32_t LE)
@@ -952,3 +1003,107 @@ the card to the host. Manage Fonts performs a full rescan; alternatively remove
 this cache to force reinspection after external same-length font changes.
 
 EPUB layout cache versions and identities are unchanged by this catalog.
+
+## Reading language statistics (book v6 / global v4)
+
+Book `stats_v6.bin` retains v5 fields at bytes 0–72 (version byte 6), then
+stores eight language entries at bytes 73–136; its fixed summary is 137 bytes.
+Global `global_stats.bin` retains v3 fields at bytes 0–158 (version byte 4), then
+stores entries at bytes 159–222; its fixed summary is 223 bytes. Each entry is
+four NUL-terminated tag bytes followed by LE32 seconds. Slots 0/1 are `und` and
+`mul`; slots 2–7 hold six normalized primary tags in first-encounter order.
+Overflow languages accumulate in `mul`. Counters saturate at UINT32_MAX. Legacy
+book v1–v5/global v1–v3 time migrates to Unknown without invented daily history.
+
+Local files append `LDAY`, version 1 (u8), reserved zero (u8), row count (LE16),
+anchor day (LE32): 12 bytes. Each strictly increasing unique row is day index
+(LE32, existing days since 2000-01-01; zero is unavailable) followed by eight LE32
+seconds cells, 36 bytes. At most 730 rows fall within `[max(1,anchor-729),anchor]`.
+Maximum local sizes are 26,429 book / 26,515 global bytes. Empty files have a
+zero-row/zero-anchor appendix. Missing appendices mean unavailable day history;
+truncation, extra bytes, invalid tags/dates, unsupported versions and invalid row
+ordering are rejected. Ordinary metadata saves preserve validated history;
+explicit reset clears the local summary and history together. Backups preserve
+complete files. Atomic publication and recovery apply per file, not across the
+book/global pair; failed targets receive at most one immediate retry.
+
+Nearby transfers only the 223-byte global summary (237-byte packet). Reserved
+stats envelope byte 7 advertises maximum importable summary version; zero means
+legacy maximum v3. Updated peers never downgrade v4 language totals, but import
+and durably acknowledge supported legacy summaries before reporting mismatch.
+Synced snapshots contain no daily appendix; all-device language totals aggregate
+summaries only. Local daily spans use the readers' existing active-time calendar
+convention, which compresses paused/idle gaps. They are not wall-clock histories.
+
+
+## Manga folder mutation journal (CMJ1, version 1)
+
+Firmware WebDAV directory MOVE and USB RENAME stage state in
+`/.crosspoint/manga-mutation/`. Manga deletion from both Recent layouts and recursive HTTP/USB/browser deletion use the same
+bounded snapshot with a delete-specific outcome record. This journal never
+instructs boot recovery to delete content. Raw SD/USB mass-storage renames are
+outside firmware event tracking and retain the existing path-identity limitation.
+
+All integers are little endian; fields are encoded bytewise, without native
+struct serialization. CRC32 is reflected IEEE CRC32 (polynomial `0xedb88320`,
+initial/final inversion; `123456789` => `cbf43926`). The 48-byte `CMJ1` header has
+version/u16 at 4, header length/u16 at 6, operation/u8 at 8 (1 move, 2 delete),
+reserved zero at 9, root/book/file counts/u16 at 10/12/14, operation ID/u64 at 16,
+immutable payload length/CRC/u32 at 24/28, twelve reserved zero bytes at 32, and
+header CRC/u32 over bytes 0–43 at 44. Limits: 64 roots/directories/books, 16 durable
+files per book, 1024 files, 16 KiB path arena, 1023-byte normalized paths, and
+2,334,216 payload bytes on SD. Move has exactly one root and at least one manga;
+delete has no immutable File records.
+
+Immutable records are grouped Root, Book, File, Shared, each with an eight-byte
+envelope: type/u8, reserved zero/u8, ordinal/u16, body length/u32. Root body has
+old/new path byte counts/u16 then exact UTF-8 bytes (new empty for delete). Book
+body has root index/u16, kind/u8 (0 file, 1 manga), reserved zero/u8, path
+length/u16 and path bytes. The root index is an ordinal, not an operation ID.
+File body has book index/u16, family/u8 (1 progress, 2 current bookmark, 3 legacy
+bookmark, 4 cache durable file), reserved zero/u8, source/destination path
+lengths/u16, source/output byte lengths/u64, source/output CRC/u32, then paths.
+Every loaded path must match the exact identity derived from its book and
+family; CRC validity alone grants no file ownership. Shared body is 28 bytes:
+kind/u8 (recent=0, state=1), source-present/u8, flags/u16, source/output
+lengths/u64 and source/output CRC/u32. Delete sets flags=1 and defers output
+length/CRC as zero; absent source has zero source length/CRC.
+
+Append-only `CMP1` phase records are 24 bytes: magic, sequence/u32, phase/u8,
+reserved zero/u8, index/u16 (`ffff` when unused), operation ID/u64, CRC/u32 over
+bytes 0–19. Phases 1–14 are PREPARED, MOVED, FILE_PUBLISHED, RECENT_PUBLISHED,
+STATE_PUBLISHED, REFERENCES_DONE, SOURCE_REMOVED, TOKEN_REMOVED, DONE,
+DELETE_STARTED, CONTENT_SUCCEEDED, CONTENT_FAILED, DELETE_METADATA_DONE, ABORTED.
+The operation-specific parser enforces sequence, ownership, indices and ordering.
+Only a torn final append is discarded; interior corruption or CRC-valid semantic
+corruption blocks replay. No scanning ahead for a later recognizable record.
+
+Delete appends one 64-byte `CMO1` outcome: magic, sequence/u32 at 4, operation
+ID/u64 at 8, absent-book mask/u64 at 16, recent output length/u64 at 24 and CRC/u32
+at 32, state output length/u64 at 36 and CRC/u32 at 44, partial/interrupted flag/u32
+at 48, eight reserved zero bytes at 52, CRC/u32 over bytes 0–59 at 60. Normal
+ordering is DELETE_STARTED → CONTENT_SUCCEEDED/FAILED → CMO1. Boot replay may
+append CMO1 directly after DELETE_STARTED only with interrupted=true; it never
+later appends CONTENT_SUCCEEDED/FAILED or resumes content deletion. Shared
+originals must be checked, synced, closed, reread and owner-validated before
+PREPARED/DELETE_STARTED. CMO1 and staged output fingerprints become durable before
+metadata publication. Recreated/surviving paths retain metadata.
+
+A 24-byte `CMT1` source token contains magic, operation ID/u64 at 4, immutable
+header CRC/u32 at 12, four reserved zero bytes, and CRC/u32 at 20. A checked
+24-byte `CMI1` staging marker uses operation ID/u64 at 4, eight reserved zero
+bytes at 12, CRC/u32 at 20; it precedes stage writes and is removed before
+PREPARED. Only a valid staging marker authorizes cleanup of interrupted
+preparation. Cleanup renames the sole terminal journal (or pre-prepare marker)
+to `/.crosspoint/manga-mutation.finalize`, removes the empty staging directory,
+and retains the terminal file until checked owner reload completes. Unknown
+files, markers, journals or mismatched output fingerprints block recovery.
+
+Stats files, including full v6 local-day appendices and supported recovery
+siblings, are transported as opaque whole files. Current/legacy bookmarks remain
+separate and only the embedded book path changes. Pixel/thumbnail caches are
+disposable; `dictionary.bin` and `dictionary_history.txt` are durable.
+
+## Mokuro panel books
+
+The Rust `tools/crossink-manga` converter writes version 2 `book.mki`/`book.mkd` indexes, 1-bit BMP panel images, and metadata. See [the Mokuro wire format](mokuro-format.md) for field layouts and limits. These files are independent of the existing Matcha panel indexes; firmware accepts both formats.

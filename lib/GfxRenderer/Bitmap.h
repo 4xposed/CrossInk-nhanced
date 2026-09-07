@@ -106,6 +106,6 @@ class Bitmap {
   mutable int sourceRowsRead = 0;
   mutable int outputRowsRead = 0;
 
-  mutable AtkinsonDitherer* atkinsonDitherer = nullptr;
-  mutable FloydSteinbergDitherer* fsDitherer = nullptr;
+  mutable std::unique_ptr<AtkinsonDitherer> atkinsonDitherer;
+  mutable std::unique_ptr<FloydSteinbergDitherer> fsDitherer;
 };

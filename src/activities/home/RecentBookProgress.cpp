@@ -4,6 +4,7 @@
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <MangaBook.h>
 #include <Serialization.h>
 #include <Txt.h>
 #include <Xtc.h>
@@ -15,6 +16,7 @@
 
 #include "RecentBooksStore.h"
 #include "activities/reader/EpubReaderUtils.h"
+#include "activities/reader/MangaProgressStore.h"
 
 namespace {
 constexpr uint32_t EPUB_PERCENT_CACHE_MAGIC = 0x45505250;  // "EPRP"
@@ -221,6 +223,17 @@ float loadTxtProgressPercent(const RecentBook& book) {
 }  // namespace
 
 float RecentBookProgress::loadPercent(const RecentBook& book) {
+  if (manga::MangaBook::isMangaFolder(book.path.c_str())) {
+    manga::Progress progress;
+    manga::MangaProgressStore store(book.path);
+    manga::MangaBook mangaBook;
+    if (!store.load(progress) || !mangaBook.open(book.path.c_str(), manga::OpenMode::Index) ||
+        mangaBook.pageCount() == 0) {
+      return -1.0f;
+    }
+    const uint32_t page = std::min(progress.page, mangaBook.pageCount() - 1);
+    return clampProgressPercent(100.0f * static_cast<float>(page + 1) / mangaBook.pageCount());
+  }
   if (FsHelpers::hasEpubExtension(book.path)) {
     return loadEpubProgressPercent(book);
   }

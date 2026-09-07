@@ -1,0 +1,13 @@
+{
+  "revision": "d07c68104f1de8e62a992e46250feeb5c6a22290",
+  "files": {
+    "src/HalStorage.h": {
+      "before": "1b2b5e5d9a2dee61f9836e92f1511a2e1a939b59fad2de2cee2c74ffbfd30ccf",
+      "after": "6716629417a04a6b7cb5ee87f78d653f067e945e529d2ccf32eb677311e46606"
+    },
+    "src/HalStorage.cpp": {
+      "before": "dcd5eb283227f9b11ce51668bf508c0f87164875c36c66ac3511bcf4ece67137",
+      "after": "8489db003a4e152d620c0c439cfbaeda32d3780d4d5fa6711a000cee566b01e0"
+    }
+  }
+}

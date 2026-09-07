@@ -186,6 +186,15 @@ EpubReaderWordLookupActivity::EpubReaderWordLookupActivity(GfxRenderer& renderer
   initializeRequest(std::move(request));
 }
 
+EpubReaderWordLookupActivity::EpubReaderWordLookupActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                                           OwnedLookupTextSource source, EpubLookupPageRequest request)
+    : Activity("EpubReaderWordLookup", renderer, mappedInput),
+      externalMode_(true),
+      externalSource_(std::move(source)),
+      pageMode_(true) {
+  initializeRequest(std::move(request));
+}
+
 EpubReaderWordLookupActivity::~EpubReaderWordLookupActivity() {
   if (!shutdownComplete_) LOG_ERR("WLA", "Lookup activity destroyed before its resources were drained");
 }
@@ -193,6 +202,8 @@ EpubReaderWordLookupActivity::~EpubReaderWordLookupActivity() {
 void EpubReaderWordLookupActivity::initializeRequest(EpubLookupPageRequest&& request) {
   bookLanguage_ = std::move(request.bookLanguage);
   bookCachePath_ = std::move(request.bookCachePath);
+  externalScanCachePath_ = std::move(request.scanCacheFilePath);
+  externalBackgroundRender_ = request.renderExternalBackground;
   spineIndex_ = request.spineIndex;
   pageIndex_ = request.pageIndex;
   marginLeft_ = request.marginLeft;
@@ -244,8 +255,7 @@ DictionaryStatus EpubReaderWordLookupActivity::openEngine() {
   }
   capabilities_ = engine_.capabilities();
   cacheBackend_ = engine_.backendKind();
-  cacheDictionarySignature_ = engine_.signature();
-  cacheIdentityValid_ = true;
+  refreshScanIdentity();
   return DictionaryStatus::Found;
 }
 
@@ -257,24 +267,23 @@ DictionaryStatus EpubReaderWordLookupActivity::reopenCancelledEngine() {
   if (!engineOpen_) LOG_ERR("WLA", "Dictionary engine reopen failed with status %u", static_cast<unsigned>(status));
   if (engineOpen_) {
     cacheBackend_ = engine_.backendKind();
-    cacheDictionarySignature_ = engine_.signature();
-    cacheIdentityValid_ = true;
+    refreshScanIdentity();
   }
   return status;
 }
 
 DictionaryStatus EpubReaderWordLookupActivity::initializePageMode(const bool deferInitialSelection) {
-  if (!page_ && readerPageReload_) {
+  if (!externalMode_ && !page_ && readerPageReload_) {
     RenderLock lock(*this);
     page_ = readerPageReload_(readerContext_);
   }
-  if (!page_) {
+  if (!externalMode_ && !page_) {
     LOG_ERR("WLA", "Cannot open page lookup without a reader page");
     return DictionaryStatus::ReadError;
   }
 
-  DictionaryStatus sourceStatus = DictionaryStatus::Unavailable;
-  {
+  DictionaryStatus sourceStatus = sourceView().glyphCount ? DictionaryStatus::Found : DictionaryStatus::NotFound;
+  if (!externalMode_) {
     RenderLock lock(*this);
     sourceStatus = pageSource_.build(*page_, renderer, SETTINGS.getReaderFontId(), marginLeft_, marginTop_);
   }
@@ -284,7 +293,14 @@ DictionaryStatus EpubReaderWordLookupActivity::initializePageMode(const bool def
   }
 
   scanCachePath_[0] = '\0';
-  if (!bookCachePath_.empty()) {
+  if (!externalScanCachePath_.empty()) {
+    const int written =
+        std::snprintf(scanCachePath_.data(), scanCachePath_.size(), "%s", externalScanCachePath_.c_str());
+    if (written < 0 || static_cast<size_t>(written) >= scanCachePath_.size()) {
+      scanCachePath_[0] = '\0';
+      LOG_ERR("WLA", "External scan cache path is too long");
+    }
+  } else if (!bookCachePath_.empty()) {
     const int written =
         std::snprintf(scanCachePath_.data(), scanCachePath_.size(), "%s/wlscan.bin", bookCachePath_.c_str());
     if (written < 0 || static_cast<size_t>(written) >= scanCachePath_.size()) {
@@ -293,14 +309,8 @@ DictionaryStatus EpubReaderWordLookupActivity::initializePageMode(const bool def
     }
   }
 
-  const PageTextSourceView source = pageSource_.view();
-  const PageWordScanCacheIdentity identity{
-      cacheBackend_, spineIndex_, pageIndex_, source.contentHash, cacheDictionarySignature_, source.glyphCount};
-  cacheLoaded_ = scanCachePath_[0] != '\0' && scanCache_.load(scanCachePath_.data(), identity);
-  if (cacheLoaded_) {
-    flow_.beginPage(openedAtMs_, scanCache_.candidateCount(), true, scanCache_.cursor(), deferInitialSelection);
-    return DictionaryStatus::Found;
-  }
+  const PageTextSourceView source = sourceView();
+  cacheLoaded_ = false;
 
   const DictionaryProbeFn probe{this, [](void* context, const DictionaryQuery& query, DictionaryProbeResult& out) {
                                   return static_cast<EpubReaderWordLookupActivity*>(context)->engine_.probe(query, out);
@@ -336,6 +346,10 @@ void EpubReaderWordLookupActivity::onEnter() {
   Activity::onEnter();
   LOG_INF("WLA", "Lookup enter heap free=%u maxAlloc=%u activity=%u", static_cast<unsigned>(ESP.getFreeHeap()),
           static_cast<unsigned>(ESP.getMaxAllocHeap()), static_cast<unsigned>(sizeof(*this)));
+  scanIdentity_ = DictionaryScanIdentityState{};
+  identityPolicy_ = DictionaryScanIdentityPolicy{};
+  identityStarted_ = false;
+  cacheIdentityValid_ = false;
   openedAtMs_ = millis();
   mappedInput.setReaderTouchscreenOverride(true);
   ignoreInitialBackRelease_ = mappedInput.isPressed(MappedInputManager::Button::Back);
@@ -400,14 +414,16 @@ void EpubReaderWordLookupActivity::onEnter() {
 }
 
 void EpubReaderWordLookupActivity::saveCompleteScanCache() {
-  if (!pageMode_ || !cacheIdentityValid_ || scanCachePath_[0] == '\0') return;
-  const PageTextSourceView source = pageSource_.view();
+  if (!pageMode_ || !cacheIdentityValid_ || scanIdentity_.status() != DictionaryScanIdentityStatus::Ready ||
+      scanCachePath_[0] == '\0')
+    return;
+  const PageTextSourceView source = sourceView();
   const PageWordScanCacheIdentity identity{
       cacheBackend_, spineIndex_, pageIndex_, source.contentHash, cacheDictionarySignature_, source.glyphCount};
   const uint16_t count = cacheLoaded_ ? scanCache_.candidateCount() : scanner_.candidateCount();
   const bool cursorValid = count == 0 ? flow_.cursor() == 0 : flow_.cursor() < count;
   const bool shouldSave =
-      !pageSource_.truncated() && (cacheLoaded_ || (scanner_.completedSuccessfully() && !scanner_.truncated()));
+      !sourceTruncated() && (cacheLoaded_ || (scanner_.completedSuccessfully() && !scanner_.truncated()));
   bool saved = false;
   if (shouldSave && cursorValid) {
     saved = cacheLoaded_ ? scanCache_.saveLoaded(scanCachePath_.data(), identity, flow_.cursor())
@@ -417,6 +433,8 @@ void EpubReaderWordLookupActivity::saveCompleteScanCache() {
 }
 
 void EpubReaderWordLookupActivity::releaseOwnedState(const bool renderLockAlreadyHeld) {
+  scanIdentity_ = DictionaryScanIdentityState{};
+  cacheIdentityValid_ = false;
   pendingSuggestions_ = {};
   pendingResult_ = {};
   activeResult_ = {};
@@ -428,6 +446,8 @@ void EpubReaderWordLookupActivity::releaseOwnedState(const bool renderLockAlread
   definitionBackChain_.clear();
   scanCache_.clear();
   scanner_.clear();
+  externalBackgroundRender_ = nullptr;
+  externalSource_.clear();
   pageSource_.clear();
   page_.reset();
   dictionaryOverridePath_.reset();
@@ -464,6 +484,7 @@ void EpubReaderWordLookupActivity::shutdownBeforeFinish() {
   flow_.onWorkerReleased();
 
   saveCompleteScanCache();
+  scanIdentity_.cancel();
   engine_.close();
   engineOpen_ = false;
   releaseOwnedState(/*renderLockAlreadyHeld=*/false);
@@ -486,6 +507,7 @@ void EpubReaderWordLookupActivity::onExit() {
     DictionaryLookupWorker::instance().waitForOwner(this);
     flow_.onWorkerReleased();
     saveCompleteScanCache();
+    scanIdentity_.cancel();
     engine_.close();
     engineOpen_ = false;
     releaseOwnedState(/*renderLockAlreadyHeld=*/true);
@@ -575,7 +597,7 @@ void EpubReaderWordLookupActivity::runWorker() {
 
 DictionaryStatus EpubReaderWordLookupActivity::encodeCandidateText(const PageWordCandidate& candidate,
                                                                    DictionaryOwnedText& out) {
-  const PageTextSourceView source = pageSource_.view();
+  const PageTextSourceView source = sourceView();
   if (!source.glyphs || candidate.glyphCount == 0 || candidate.firstGlyph >= source.glyphCount ||
       candidate.glyphCount > source.glyphCount - candidate.firstGlyph) {
     LOG_ERR("WLA", "Selected page candidate is outside the immutable source");
@@ -813,7 +835,10 @@ void EpubReaderWordLookupActivity::processWorkerCompletion() {
 }
 
 void EpubReaderWordLookupActivity::runScanSlice() {
-  if (cacheLoaded_ || flow_.scanComplete() || flow_.scanFailed() || flow_.workerOwned() || scanner_.done()) return;
+  if (cacheLoaded_ || flow_.scanComplete() || flow_.scanFailed() || flow_.workerOwned() ||
+      DictionaryLookupWorker::instance().isBusy() || scanner_.done())
+    return;
+  identityPolicy_.progressiveStarted();
   const uint16_t beforeCount = scanner_.candidateCount();
   const bool beforeDone = scanner_.done();
   flow_.beginScanSlice(millis());
@@ -852,7 +877,7 @@ void EpubReaderWordLookupActivity::updateHighlightSnapshot(RenderSnapshot& snaps
   const PageWordCandidate* candidate = selectedCandidate();
   if (!candidate) return;
   snapshot.highlightValid =
-      unionPageTextGlyphBounds(pageSource_.view(), candidate->firstGlyph, candidate->glyphCount, snapshot.highlight);
+      unionPageTextGlyphBounds(sourceView(), candidate->firstGlyph, candidate->glyphCount, snapshot.highlight);
 }
 
 void EpubReaderWordLookupActivity::publishRenderSnapshot(const bool requestRender) {
@@ -903,8 +928,8 @@ void EpubReaderWordLookupActivity::observeOpenDeadline(const uint32_t nowMs) {
 }
 
 bool EpubReaderWordLookupActivity::skipLoopDelay() {
-  return !exiting_ &&
-         (DictionaryLookupWorker::instance().owns(this) || flow_.workerOwned() || flow_.initialBurstActive(millis()));
+  return !exiting_ && (DictionaryLookupWorker::instance().owns(this) || flow_.workerOwned() ||
+                       flow_.initialBurstActive(millis()) || identityStepEligible());
 }
 
 void EpubReaderWordLookupActivity::finishLookup(const bool cancelled) {
@@ -918,7 +943,7 @@ void EpubReaderWordLookupActivity::finishLookup(const bool cancelled) {
 void EpubReaderWordLookupActivity::returnCurrentClipping() {
   const PageWordCandidate* candidate = selectedCandidate();
   if (!candidate) return;
-  const PageTextSourceView source = pageSource_.view();
+  const PageTextSourceView source = sourceView();
   if (!source.glyphs) return;
   const uint16_t end = static_cast<uint16_t>(candidate->firstGlyph + candidate->glyphCount);
   uint16_t firstGlyph = candidate->firstGlyph;
@@ -1023,9 +1048,9 @@ void EpubReaderWordLookupActivity::openSuggestions() {
   // A child can be replaced globally while this activity is parked on the
   // stack. Close the session first so its onExit fallback never waits or does
   // SD I/O while ActivityManager owns RenderLock.
+  saveCompleteScanCache();
   engine_.close();
   engineOpen_ = false;
-  saveCompleteScanCache();
   startActivityForResult(std::move(child), [this](const ActivityResult& result) {
     {
       RenderLock lock(*this);
@@ -1087,9 +1112,9 @@ void EpubReaderWordLookupActivity::openDictionarySwitcher() {
   }
   // SdFat permits only one reader on hardware. Release the active backend
   // before the child enumerates dictionary metadata.
+  saveCompleteScanCache();
   engine_.close();
   engineOpen_ = false;
-  saveCompleteScanCache();
   startActivityForResult(std::move(child), [this](const ActivityResult& result) {
     {
       RenderLock lock(*this);
@@ -1134,6 +1159,7 @@ void EpubReaderWordLookupActivity::openDictionarySwitcher() {
     }
     DictionaryOwnedText previousOverride = std::move(dictionaryOverridePath_);
     dictionaryOverridePath_ = std::move(selectedOverride);
+    identityStarted_ = false;  // Successful picker choice starts a fresh verification, even for the same path.
     const DictionaryStatus openStatus = openEngine();
     if (openStatus != DictionaryStatus::Found) {
       dictionaryOverridePath_ = std::move(previousOverride);
@@ -1188,8 +1214,7 @@ uint16_t EpubReaderWordLookupActivity::candidateAtPoint(const int x, const int y
   for (uint16_t index = 0; index < count; ++index) {
     const PageWordCandidate* candidate = candidateAt(index);
     PageTextBounds bounds;
-    if (!candidate ||
-        !unionPageTextGlyphBounds(pageSource_.view(), candidate->firstGlyph, candidate->glyphCount, bounds)) {
+    if (!candidate || !unionPageTextGlyphBounds(sourceView(), candidate->firstGlyph, candidate->glyphCount, bounds)) {
       continue;
     }
     if (x >= bounds.x && x < bounds.x + bounds.width && y >= bounds.y && y < bounds.y + bounds.height) return index;
@@ -1220,7 +1245,7 @@ bool EpubReaderWordLookupActivity::resolvePendingInitialTouch() {
     return true;
   }
 
-  const PageTextSourceView source = pageSource_.view();
+  const PageTextSourceView source = sourceView();
   uint16_t touchedGlyph = UINT16_MAX;
   for (uint16_t index = 0; index < source.glyphCount; ++index) {
     const auto& glyph = source.glyphs[index];
@@ -1740,9 +1765,13 @@ void EpubReaderWordLookupActivity::loop() {
   }
 #endif
 
-  // Input is always polled before this bounded main-task scan slice.
+  // Input is always polled before bounded identity/probe work. The existing
+  // skipLoopDelay path yields to FreeRTOS between subsequent identity chunks.
+  runInitialIdentitySlice();
+  const uint32_t scanStarted = millis();
   runScanSlice();
   processWorkerCompletion();
+  if (millis() - scanStarted < DictionaryLookupFlow::kScanSliceMs) runIdentityStep();
 }
 
 EpubReaderWordLookupActivity::PanelLayout EpubReaderWordLookupActivity::panelLayoutLocked() const {
@@ -1820,6 +1849,8 @@ void EpubReaderWordLookupActivity::renderReaderBackground() {
       page_->render(renderer, SETTINGS.getReaderFontId(), marginLeft_, marginTop_,
                     ReaderUtils::readerForegroundBlack());
     }
+  } else if (externalBackgroundRender_) {
+    externalBackgroundRender_(readerContext_, sourceView());
   } else if (readerBackgroundRender_) {
     readerBackgroundRender_(readerContext_);
   }
@@ -1860,7 +1891,8 @@ void EpubReaderWordLookupActivity::drawPanelHeader(const PanelLayout& layout, co
     }
   }
   const bool foregroundBlack = ReaderUtils::readerForegroundBlack();
-  renderer.drawText(UI_10_FONT_ID, layout.contentX, layout.panel.y + 3, tr(STR_LOOKUP), foregroundBlack,
+  renderer.drawText(UI_10_FONT_ID, layout.contentX, layout.panel.y + 3,
+                    sourceTruncated() ? tr(STR_LOOKUP_TRUNCATED) : tr(STR_LOOKUP), foregroundBlack,
                     EpdFontFamily::BOLD);
   if (position[0] != '\0') {
     const int width = renderer.getTextWidth(UI_10_FONT_ID, position);
@@ -1976,7 +2008,8 @@ void EpubReaderWordLookupActivity::drawButtonHints() const {
 
 void EpubReaderWordLookupActivity::displayPanelRefresh(const bool framebufferContainedPage) {
   if (initialRender_) {
-    const DictionaryLookupPanelRefresh refresh = dictionaryLookupInitialPanelRefresh(framebufferContainedPage, pageMode_);
+    const DictionaryLookupPanelRefresh refresh =
+        dictionaryLookupInitialPanelRefresh(framebufferContainedPage, pageMode_);
     renderer.displayBuffer(refresh == DictionaryLookupPanelRefresh::Fast ? HalDisplay::FAST_REFRESH
                                                                          : HalDisplay::FULL_REFRESH);
     initialRender_ = false;
@@ -1997,9 +2030,9 @@ void EpubReaderWordLookupActivity::render(RenderLock&&) {
   const RenderSnapshot snapshot = renderSnapshot_;
   // ActivityManager also requests an initial render, independently of snapshot
   // publication. Defer that loading frame even when the word scan was cached.
-  if (initialRender_ && !dictionaryLookupShouldRenderSnapshot(
-                            snapshot.state, static_cast<uint32_t>(millis() - openedAtMs_) <
-                                                DictionaryLookupFlow::kOpenDeadlineMs)) {
+  if (initialRender_ &&
+      !dictionaryLookupShouldRenderSnapshot(
+          snapshot.state, static_cast<uint32_t>(millis() - openedAtMs_) < DictionaryLookupFlow::kOpenDeadlineMs)) {
     return;
   }
   const bool framebufferContainedPage = initialRender_ && framebufferContainsPage_;
@@ -2034,4 +2067,91 @@ void EpubReaderWordLookupActivity::render(RenderLock&&) {
   renderer.drawText(UI_10_FONT_ID, layout.contentX, footerY, source, foregroundBlack);
   drawButtonHints();
   displayPanelRefresh(framebufferContainedPage);
+}
+
+#ifdef SIMULATOR
+void EpubReaderWordLookupActivity::simulatorLogSelection() const {
+  const auto* candidate = selectedCandidate();
+  LOG_INF("SMOKE", "Manga lookup state=%u cursor=%u query=%.*s firstGlyph=%u count=%u ordinal=%u definitionPage=%d",
+          static_cast<unsigned>(flow_.state()), flow_.cursor(), static_cast<int>(lookupText_.view().size()),
+          lookupText_.view().data(), candidate ? candidate->firstGlyph : 0, candidate ? candidate->glyphCount : 0,
+          candidate ? candidate->firstPageWord : 0, flow_.definitionPage());
+}
+#endif
+
+void EpubReaderWordLookupActivity::refreshScanIdentity() {
+  if (!pageMode_) return;
+  const bool hadIdentity = identityStarted_;
+  const bool verificationFailed = hadIdentity && scanIdentity_.status() != DictionaryScanIdentityStatus::Pending &&
+                                  scanIdentity_.status() != DictionaryScanIdentityStatus::Ready;
+  const bool sameRoute = hadIdentity && engine_.resumeScanIdentity(scanIdentity_);
+  if (!sameRoute) {
+    cacheIdentityValid_ = false;
+    cacheDictionarySignature_ = 0;
+    identityPolicy_ = DictionaryScanIdentityPolicy{};
+    // I/O/OOM/cancellation disables caching for this activation. A deliberate
+    // dictionary picker choice resets identityStarted_ and starts a new route.
+    if (!verificationFailed) engine_.beginScanIdentity(scanIdentity_);
+    identityStarted_ = true;
+    if (hadIdentity && sourceView().glyphCount) {
+      // A route change invalidates candidate source tokens too, not only the digest.
+      cacheLoaded_ = false;
+      scanCache_.clear();
+      scanner_.clear();
+      const auto status = initializePageMode(pendingInitialTouchSelection_);
+      if (status != DictionaryStatus::Found) flow_.onInitializationFailed(status);
+    }
+  }
+  cacheIdentityValid_ = scanIdentity_.status() == DictionaryScanIdentityStatus::Ready;
+  cacheDictionarySignature_ = scanIdentity_.digest();
+}
+
+bool EpubReaderWordLookupActivity::identityStepEligible() const {
+  const auto state = flow_.state();
+  return pageMode_ && identityPolicy_.eligible(
+                          scanIdentity_.status(), engineOpen_, exiting_, flow_.workerOwned(),
+                          DictionaryLookupWorker::instance().isBusy(),
+                          state == DictionaryLookupFlowState::Ready || state == DictionaryLookupFlowState::NotFound,
+                          pendingInitialTouchSelection_, flow_.scanComplete() && !flow_.hasSelection());
+}
+
+void EpubReaderWordLookupActivity::runIdentityStep() {
+  if (!identityStepEligible()) return;
+  const auto status = engine_.stepScanIdentity(scanIdentity_, DictionaryScanIdentityPolicy::kChunkBytes);
+  if (status == DictionaryScanIdentityStatus::Ready) {
+    cacheDictionarySignature_ = scanIdentity_.digest();
+    cacheIdentityValid_ = true;
+    LOG_INF("WLA", "Dictionary scan identity verified after %u ms (cache load %s)",
+            static_cast<unsigned>(millis() - openedAtMs_), identityPolicy_.canLoad() ? "eligible" : "bypassed");
+  }
+}
+
+void EpubReaderWordLookupActivity::runInitialIdentitySlice() {
+  if (!pageMode_ || !identityPolicy_.initialOpportunity()) return;
+  const uint32_t started = millis();
+  for (unsigned step = 0; step < DictionaryScanIdentityPolicy::kInitialSteps && identityStepEligible(); ++step) {
+    if (mappedInput.isPressed(MappedInputManager::Button::Back)) break;
+    runIdentityStep();
+    if (millis() - started >= DictionaryScanIdentityPolicy::kInitialMs) break;
+  }
+  identityPolicy_.initialFinished();
+  tryLoadVerifiedScanCache();
+}
+
+void EpubReaderWordLookupActivity::tryLoadVerifiedScanCache() {
+  if (!identityPolicy_.canLoad() || !cacheIdentityValid_ || sourceTruncated() || scanCachePath_[0] == '\0' ||
+      flow_.hasSelection() || scanner_.candidateCount() != 0)
+    return;
+  const PageTextSourceView source = sourceView();
+  const PageWordScanCacheIdentity identity{
+      cacheBackend_, spineIndex_, pageIndex_, source.contentHash, cacheDictionarySignature_, source.glyphCount};
+  cacheLoaded_ = scanCache_.load(scanCachePath_.data(), identity);
+  if (!cacheLoaded_) return;
+  LOG_INF("WLA", "Verified dictionary scan cache loaded: candidates=%u cursor=%u",
+          static_cast<unsigned>(scanCache_.candidateCount()), static_cast<unsigned>(scanCache_.cursor()));
+  scanner_.clear();
+  flow_.beginPage(openedAtMs_, scanCache_.candidateCount(), true, scanCache_.cursor(), pendingInitialTouchSelection_);
+  if (pendingInitialTouchSelection_) resolvePendingInitialTouch();
+  executeFlowCommands();
+  publishRenderSnapshot();
 }

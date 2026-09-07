@@ -1,0 +1,10 @@
+add_executable(MangaFormatTest MangaFormatTest.cpp ${REPO_ROOT}/lib/MangaPanel/MangaFormat.cpp)
+target_include_directories(MangaFormatTest PRIVATE ${REPO_ROOT}/lib/MangaPanel)
+target_compile_definitions(MangaFormatTest PRIVATE MANGA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+target_link_libraries(MangaFormatTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(MangaFormatTest)
+
+add_executable(MangaTranslationTest MangaTranslationTest.cpp ${REPO_ROOT}/lib/MangaPanel/MangaFormat.cpp)
+target_include_directories(MangaTranslationTest PRIVATE ${REPO_ROOT}/lib/MangaPanel ${REPO_ROOT}/src/activities/reader)
+target_link_libraries(MangaTranslationTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(MangaTranslationTest)

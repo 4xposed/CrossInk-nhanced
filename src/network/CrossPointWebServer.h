@@ -62,6 +62,10 @@ class CrossPointWebServer {
 
   // Check if server is running
   bool isRunning() const { return running; }
+  bool hasActiveUpload() const;
+  // Main owner only, between handleClient calls. Close partial transfers without
+  // stopping the server, so a pushed screen can safely return to this activity.
+  void cancelActiveUploads();
 
   WsUploadStatus getWsUploadStatus() const;
 

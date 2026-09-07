@@ -8,6 +8,9 @@
 #include <algorithm>
 #include <mutex>
 
+#include "util/BookFolderMutation.h"
+#include "util/BookMutationJsonAllocator.h"
+
 namespace {
 constexpr uint8_t STATE_FILE_VERSION = 5;
 constexpr char STATE_FILE_BIN[] = "/.crosspoint/state.bin";
@@ -54,6 +57,7 @@ void CrossPointState::pushRecentBoot(uint16_t idx) {
 }
 
 bool CrossPointState::saveToFile() const {
+  if (BookFolderMutation::storesFrozen()) return false;
   std::lock_guard<std::mutex> storeLock(storeMutex);
   std::lock_guard<std::mutex> stateLock(_mutex);
   JsonDocument doc;
@@ -61,7 +65,16 @@ bool CrossPointState::saveToFile() const {
   return PersistableStoreBase::writeDocToFile(STATE_FILE_JSON, doc);
 }
 
-bool CrossPointState::loadFromFile() {
+bool CrossPointState::loadFromFile(bool mutationReload) {
+  if (!mutationReload && BookFolderMutation::storesFrozen()) return false;
+  if (mutationReload) {
+    std::lock_guard<std::mutex> storeLock(storeMutex);
+    bookmutation::BoundedJsonAllocator allocator;
+    JsonDocument document(&allocator);
+    if (!bookmutation::readBoundedOwnerJson(STATE_FILE_JSON, document)) return false;
+    std::lock_guard<std::mutex> stateLock(_mutex);
+    return fromJson(document.as<JsonVariantConst>());
+  }
   // Try JSON first
   if (Storage.exists(STATE_FILE_JSON)) {
     std::lock_guard<std::mutex> storeLock(storeMutex);

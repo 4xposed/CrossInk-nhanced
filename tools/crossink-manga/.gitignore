@@ -1,0 +1,8 @@
+/target/
+/vendor/
+/vendor-config.txt
+/dist/
+
+/models-build/
+
+/rar-helper/target/

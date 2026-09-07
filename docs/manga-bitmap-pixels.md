@@ -1,0 +1,13 @@
+# Manga BMP pixel-cache producer
+
+`manga::writeBitmapPixels()` converts a BMP into the same raw 2-bit pixel layout used by the existing JPEG and PNG decoder cache: a four-byte little-endian width/height header followed by logical top-down rows, with four pixels packed most-significant first and levels 0 (black) through 3 (white).
+
+The caller owns one `manga::kBitmapPixelScratchBytes` (9216-byte) buffer and may reuse it for the activity lifetime. At the maximum supported 2048-pixel source width, it is partitioned into an 8192-byte 32-bpp input row, a 512-byte `Bitmap` 2-bit row, and a 512-byte scaled output row. The producer allocates no image or framebuffer and reads every source row.
+
+The producer uses `Bitmap` without its heap-backed error-diffusion ditherer. Native 1-bit and 2-bit palettes preserve their source levels directly; other BMP formats use `Bitmap`'s deterministic four-level quantization. This makes top-down and bottom-up encodings produce identical logical pixels and avoids roughly 12 KB of hidden row-error allocations on the C3. The quality tradeoff is that high-color BMP gradients use fixed/native quantization rather than error diffusion. Manga converters can pre-dither BMP assets when they need finer perceived gradients.
+
+The source may be up to 2048 by 3072 pixels. The allocation-free probe accepts the 40-byte Windows `BITMAPINFOHEADER`, supported packed/color depths, and uncompressed `BI_RGB` data. It rejects extended DIB variants, overlapping palette/pixel offsets, inconsistent declared or actual file lengths, and out-of-range dimensions before `Bitmap` parses the file. Target dimensions must be positive, no larger than 2048 by 3072, and must not upscale either source axis. Scaling uses `sourceX = floor(outputX * sourceWidth / outputWidth)` and the matching Y formula. Bottom-up BMP rows are written to their final output offsets with seeks, so the cache body is always logical top-down without retaining the image.
+
+The destination is a caller-selected temporary path. Any parse, read, seek, write, sync, or close failure closes both handles and removes the partial destination. The caller is responsible for validating and atomically promoting the completed temporary file. Manga integration uses this producer only for grayscale BMPs; native 1-bit BMPs keep the existing direct BW fast path.
+
+The grayscale display flow can rebuild the BW framebuffer from this cache after displaying the gray planes and call `cleanupGrayscaleWithFrameBuffer()`. That avoids a second framebuffer-sized BW backup. The earlier `storeBwBuffer()` audit recommendation remains a valid fallback strategy, but it is not an SDK requirement when the cache can replay the BW pixels.

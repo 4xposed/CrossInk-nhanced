@@ -6,6 +6,7 @@
 #include "DictHtmlRenderer.h"
 #include "Dictionary.h"
 #include "DictionaryEngineTypes.h"
+#include "DictionaryScanIdentity.h"
 
 class StarDictBackend {
  public:
@@ -16,6 +17,9 @@ class StarDictBackend {
   DictionaryStatus streamDefinition(DictionaryDefinitionMode mode, DictionaryDefinitionSink sink);
   DictionaryCapabilities capabilities() const;
   uint64_t signature() const;
+  DictionaryScanIdentityStatus beginScanIdentity(DictionaryScanIdentityState& state);
+  DictionaryScanIdentityStatus stepScanIdentity(DictionaryScanIdentityState& state, size_t byteBudget);
+  bool resumeScanIdentity(DictionaryScanIdentityState& state);
   void cancel();
   void close();
   bool cancelled() const;
@@ -31,6 +35,10 @@ class StarDictBackend {
                           std::string_view& normalized);
   static bool shouldCancel(void* context);
   bool hashFileSamples(const char* path);
+  bool scanFileDescriptor(unsigned ordinal, uint64_t& size, bool& present);
+  const char* scanFilePath(unsigned ordinal);
+  DictionaryOwnedText resolvedPath_;
+  DictionaryScanIdentityStatus identityRouteStatus_ = DictionaryScanIdentityStatus::Unavailable;
   DictionaryStatus streamPlain(DictionaryDefinitionSink sink);
 
   const char* bookCachePath_ = nullptr;

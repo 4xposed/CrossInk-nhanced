@@ -5,6 +5,8 @@
 #include <memory>
 #include <string_view>
 
+#include "DictionaryScanIdentity.h"
+
 enum class JapaneseDictStatus : uint8_t {
   Found,
   NotFound,
@@ -89,6 +91,9 @@ class DictIndex {
                                  uint8_t posMask = 0);
   uint8_t availableSources() const;
   uint64_t signature() const;
+  DictionaryScanIdentityStatus beginScanIdentity(DictionaryScanIdentityState& state);
+  DictionaryScanIdentityStatus stepScanIdentity(DictionaryScanIdentityState& state, size_t byteBudget);
+  bool resumeScanIdentity(DictionaryScanIdentityState& state);
   void close();
 
  private:

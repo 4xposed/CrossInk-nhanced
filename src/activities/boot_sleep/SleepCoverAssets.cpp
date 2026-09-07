@@ -1,14 +1,21 @@
 #include "SleepCoverAssets.h"
 
+#include <Bitmap.h>
 #include <Epub.h>
 #include <FsHelpers.h>
+#include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <Logging.h>
+#include <MangaBook.h>
+#include <MangaCover.h>
+#include <Memory.h>
 #include <Txt.h>
 #include <Xtc.h>
 
 #include <cstdint>
 
 #include "CrossPointSettings.h"
+#include "Epub/converters/ImageDecoderFactory.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/minimal/MinimalTheme.h"
@@ -37,6 +44,89 @@ bool shouldPrepareDashboardCover() {
 bool fileExists(const std::string& path) { return !path.empty() && Storage.exists(path.c_str()); }
 
 int readerFontIdForRenderer(const GfxRenderer* renderer) { return renderer ? SETTINGS.getReaderFontId() : 0; }
+
+bool isManga(const std::string& path) { return manga::MangaBook::isMangaFolder(path.c_str()); }
+
+bool mangaCoverCancelled(CooperativeCancellation cancellation, manga::ThumbnailDiagnostics* diagnostics) {
+  if (!cancellation.requested()) return false;
+  if (diagnostics) diagnostics->result = manga::ThumbnailResult::Cancelled;
+  return true;
+}
+
+bool prepareManga(const std::string& path, const int width, const int height, CooperativeCancellation cancellation,
+                  manga::ThumbnailDiagnostics* diagnostics) {
+  if (diagnostics) *diagnostics = {};
+  if (mangaCoverCancelled(cancellation, diagnostics)) return false;
+  manga::MangaBook book;
+  if (!book.open(path.c_str(), manga::OpenMode::Cover, cancellation) ||
+      mangaCoverCancelled(cancellation, diagnostics)) {
+    mangaCoverCancelled(cancellation, diagnostics);
+    return false;
+  }
+  const auto result = manga::generateThumbnailControlled(book, path, width, height, cancellation, diagnostics);
+  LOG_DBG("SLP", "Manga cover result=%d", static_cast<int>(result));
+  return result == manga::ThumbnailResult::Cached || result == manga::ThumbnailResult::Published;
+}
+
+bool mangaFullDimensions(manga::MangaBook& book, const std::string& path, const GfxRenderer& renderer, int& width,
+                         int& height, CooperativeCancellation cancellation) {
+  if (cancellation.requested()) return false;
+  auto imagePath = makeUniqueNoThrow<char[]>(path.size() + 258);
+  if (!imagePath) {
+    LOG_ERR("SLP", "OOM for manga cover path (%u bytes)", unsigned(path.size() + 258));
+    return false;
+  }
+  if (book.pageImagePath(0, imagePath.get(), path.size() + 258, cancellation) != manga::PathResult::Found) return false;
+  if (cancellation.requested()) return false;
+  ImageDimensions source{};
+  if (FsHelpers::hasBmpExtension(imagePath.get())) {
+    FsFile file;
+    if (!Storage.openFileForRead("SLP", imagePath.get(), file)) return false;
+    Bitmap bitmap(file);
+    if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+      source.width = bitmap.getWidth();
+      source.height = bitmap.getHeight();
+    }
+    file.close();
+  } else {
+    const std::string sourcePath(imagePath.get());
+    ImageToFramebufferDecoder* decoder = ImageDecoderFactory::getDecoder(sourcePath);
+    if (!decoder || !decoder->getDimensions(sourcePath, source)) return false;
+  }
+  if (cancellation.requested()) return false;
+  return manga::fitThumbnailDimensions(source.width, source.height, renderer.getScreenWidth(),
+                                       renderer.getScreenHeight(), width, height);
+}
+
+bool prepareFullManga(const std::string& path, const GfxRenderer& renderer, CooperativeCancellation cancellation,
+                      manga::ThumbnailDiagnostics* diagnostics, std::string* preparedPath) {
+  if (diagnostics) *diagnostics = {};
+  if (mangaCoverCancelled(cancellation, diagnostics)) return false;
+  manga::MangaBook book;
+  int width = 0, height = 0;
+  if (!book.open(path.c_str(), manga::OpenMode::Cover, cancellation) ||
+      mangaCoverCancelled(cancellation, diagnostics) ||
+      !mangaFullDimensions(book, path, renderer, width, height, cancellation) ||
+      mangaCoverCancelled(cancellation, diagnostics)) {
+    mangaCoverCancelled(cancellation, diagnostics);
+    return false;
+  }
+  const auto result = manga::generateThumbnailControlled(book, path, width, height, cancellation, diagnostics);
+  LOG_DBG("SLP", "Full manga cover result=%d", static_cast<int>(result));
+  const bool ready = result == manga::ThumbnailResult::Cached || result == manga::ThumbnailResult::Published;
+  if (ready && preparedPath) *preparedPath = manga::thumbnailPath(path, width, height);
+  return ready;
+}
+
+std::string fullMangaPath(const std::string& path, const GfxRenderer& renderer, CooperativeCancellation cancellation) {
+  if (cancellation.requested()) return {};
+  manga::MangaBook book;
+  int width = 0, height = 0;
+  if (!book.open(path.c_str(), manga::OpenMode::Cover, cancellation) ||
+      !mangaFullDimensions(book, path, renderer, width, height, cancellation))
+    return {};
+  return manga::thumbnailPath(path, width, height);
+}
 
 }  // namespace
 
@@ -68,7 +158,11 @@ bool prepareTxt(const Txt& txt) {
 }
 
 bool prepareFullCoverForPath(const std::string& bookPath, const bool cropped, const GfxRenderer* renderer,
-                             bool imageLevels) {
+                             CooperativeCancellation cancellation, manga::ThumbnailDiagnostics* diagnostics,
+                             std::string* preparedPath, bool imageLevels) {
+  if (preparedPath) preparedPath->clear();
+  if (diagnostics) *diagnostics = {};
+  if (mangaCoverCancelled(cancellation, diagnostics)) return false;
   if (bookPath.empty()) {
     return false;
   }
@@ -91,10 +185,15 @@ bool prepareFullCoverForPath(const std::string& bookPath, const bool cropped, co
     Txt txt(bookPath, "/.crosspoint");
     return txt.generateCoverBmp(imageLevels);
   }
+  if (isManga(bookPath) && renderer) {
+    return prepareFullManga(bookPath, *renderer, cancellation, diagnostics, preparedPath);
+  }
   return false;
 }
 
-bool prepareMinimalCoverForPath(const std::string& bookPath, const GfxRenderer* renderer) {
+bool prepareMinimalCoverForPath(const std::string& bookPath, const GfxRenderer* renderer,
+                                CooperativeCancellation cancellation, manga::ThumbnailDiagnostics* diagnostics) {
+  if (diagnostics) *diagnostics = {};
   if (bookPath.empty()) {
     return false;
   }
@@ -119,10 +218,15 @@ bool prepareMinimalCoverForPath(const std::string& bookPath, const GfxRenderer* 
     Txt txt(bookPath, "/.crosspoint");
     return txt.generateCoverBmp();
   }
+  if (isManga(bookPath)) {
+    return prepareManga(bookPath, kMinimalSleepCoverWidth, kMinimalSleepCoverHeight, cancellation, diagnostics);
+  }
   return false;
 }
 
-bool prepareDashboardCoverForPath(const std::string& bookPath, const GfxRenderer* renderer) {
+bool prepareDashboardCoverForPath(const std::string& bookPath, const GfxRenderer* renderer,
+                                  CooperativeCancellation cancellation, manga::ThumbnailDiagnostics* diagnostics) {
+  if (diagnostics) *diagnostics = {};
   if (bookPath.empty()) {
     return false;
   }
@@ -147,6 +251,9 @@ bool prepareDashboardCoverForPath(const std::string& bookPath, const GfxRenderer
     Txt txt(bookPath, "/.crosspoint");
     return txt.generateCoverBmp();
   }
+  if (isManga(bookPath)) {
+    return prepareManga(bookPath, kDashboardSleepCoverWidth, kDashboardSleepCoverHeight, cancellation, diagnostics);
+  }
   return false;
 }
 
@@ -160,10 +267,15 @@ std::string reusableCoverPathFor(const std::string& bookPath) {
   if (FsHelpers::hasTxtExtension(bookPath) || FsHelpers::hasMarkdownExtension(bookPath)) {
     return Txt(bookPath, "/.crosspoint").getCoverBmpPath();
   }
+  if (isManga(bookPath)) {
+    return manga::thumbnailTemplatePath(bookPath);
+  }
   return {};
 }
 
-std::string cachedCoverPathFor(const std::string& bookPath, const bool cropped, bool imageLevels) {
+std::string cachedCoverPathFor(const std::string& bookPath, const bool cropped, const GfxRenderer* renderer,
+                               CooperativeCancellation cancellation, bool imageLevels) {
+  if (cancellation.requested()) return {};
   std::string coverPath;
   if (FsHelpers::hasEpubExtension(bookPath)) {
     coverPath = Epub(bookPath, "/.crosspoint").getCoverBmpPath(cropped, imageLevels);
@@ -171,6 +283,8 @@ std::string cachedCoverPathFor(const std::string& bookPath, const bool cropped, 
     coverPath = Xtc(bookPath, "/.crosspoint").getCoverBmpPath();
   } else if (FsHelpers::hasTxtExtension(bookPath) || FsHelpers::hasMarkdownExtension(bookPath)) {
     coverPath = Txt(bookPath, "/.crosspoint").getCoverBmpPath(imageLevels);
+  } else if (renderer && isManga(bookPath)) {
+    coverPath = fullMangaPath(bookPath, *renderer, cancellation);
   }
 
   return fileExists(coverPath) ? coverPath : std::string{};
@@ -181,6 +295,10 @@ std::string cachedMinimalCoverPathFor(const std::string& bookPath) {
     const Epub epub(bookPath, "/.crosspoint");
     const std::string coverPath = epub.getAdaptiveThumbBmpPath(kMinimalSleepCoverWidth, kMinimalSleepCoverHeight);
     return fileExists(coverPath) ? epub.getThumbBmpPath() : std::string{};
+  }
+  if (isManga(bookPath)) {
+    const std::string coverPath = manga::thumbnailPath(bookPath, kMinimalSleepCoverWidth, kMinimalSleepCoverHeight);
+    return fileExists(coverPath) ? manga::thumbnailTemplatePath(bookPath) : std::string{};
   }
 
   const std::string reusablePath = reusableCoverPathFor(bookPath);
@@ -194,6 +312,10 @@ std::string cachedDashboardCoverPathFor(const std::string& bookPath) {
     const Epub epub(bookPath, "/.crosspoint");
     const std::string coverPath = epub.getAdaptiveThumbBmpPath(kDashboardSleepCoverWidth, kDashboardSleepCoverHeight);
     return fileExists(coverPath) ? epub.getThumbBmpPath() : std::string{};
+  }
+  if (isManga(bookPath)) {
+    const std::string coverPath = manga::thumbnailPath(bookPath, kDashboardSleepCoverWidth, kDashboardSleepCoverHeight);
+    return fileExists(coverPath) ? manga::thumbnailTemplatePath(bookPath) : std::string{};
   }
 
   const std::string reusablePath = reusableCoverPathFor(bookPath);

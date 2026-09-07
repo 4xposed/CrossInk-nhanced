@@ -66,7 +66,7 @@ void ReaderOptionsActivity::onEnter() {
 
   activeSubmenu = SettingAction::None;
   settingsDirty = false;
-  dictionarySettingsRegistry.discover(/*autoSelectDefault=*/false);
+  if (settingsScope == ReaderSettingsScope::Book) dictionarySettingsRegistry.discover(/*autoSelectDefault=*/false);
   rebuildSettingsList();
   uiReady = false;
   visibleRows = 1;
@@ -82,6 +82,12 @@ void ReaderOptionsActivity::rebuildSettingsList() {
   fontSettings.clear();
   pageLayoutSettings.clear();
   screenMarginSettings.clear();
+  if (settingsScope == ReaderSettingsScope::Manga) {
+    settings = buildMangaReaderSettingsList(getBaseSettingsList(), mappedInput.hasTouchHardware());
+    setCurrentSettings();
+    selectedIndex = 0;
+    return;
+  }
   const bool needsFonts = activeSubmenu == SettingAction::ReaderFontOptions;
   if (needsFonts) sdFontSystem.refreshIfDirty();
   const std::string_view liveBookLanguage = bookLanguage ? std::string_view(*bookLanguage) : std::string_view{};
@@ -254,8 +260,11 @@ void ReaderOptionsActivity::closeSubmenu() {
 }
 
 void ReaderOptionsActivity::onExit() {
-  dictionarySettingsRegistry.clear();
-  sdFontSystem.releaseRegistry();
+  if (settingsScope == ReaderSettingsScope::Manga && settingsDirty) persistReaderSettings();
+  if (settingsScope == ReaderSettingsScope::Book) {
+    dictionarySettingsRegistry.clear();
+    sdFontSystem.releaseRegistry();
+  }
   Activity::onExit();
 }
 
@@ -310,7 +319,10 @@ void ReaderOptionsActivity::openEnumOptionPicker(const SettingInfo& setting) {
           selectedSetting.valueSetter(static_cast<uint8_t>(selectedIndex));
         }
 
-        persistReaderSettings();
+        if (settingsScope == ReaderSettingsScope::Manga)
+          settingsDirty = true;
+        else
+          persistReaderSettings();
         requestUpdate();
       },
       note);

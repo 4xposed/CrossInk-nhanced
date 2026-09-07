@@ -13,6 +13,7 @@
 #include <iostream>
 #include <iterator>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -35,6 +36,7 @@
 #include "GfxRenderer.h"
 #include "HalStorage.h"
 #include "Memory.h"
+#include "MangaPageTextSource.h"
 #include "PageTextSource.h"
 #include "PageWordScanCache.h"
 #include "PageWordScanner.h"
@@ -6209,3 +6211,940 @@ TEST_F(JapaneseDictionaryTest, EngineOwnsTemporaryStarDictSwitchBoundary) {
   EXPECT_EQ(result.headword.view(), "switched");
 }
 }  // namespace
+
+namespace {
+std::vector<uint8_t> mangaOcrFixture(const std::vector<std::vector<std::string>>& panels) {
+  std::vector<uint8_t> bytes{static_cast<uint8_t>(panels.size()), 0};
+  for (const auto& texts : panels) {
+    for (int v : {0, 0, 100, 200}) appendLe16(bytes, v);
+    bytes.push_back(static_cast<uint8_t>(texts.size()));
+    bytes.push_back(0);
+    appendLe16(bytes, 0);
+    for (const auto& text : texts) {
+      for (int v : {10, 20, 30, 40}) appendLe16(bytes, v);
+      appendLe16(bytes, text.size());
+      bytes.insert(bytes.end(), text.begin(), text.end());
+    }
+  }
+  return bytes;
+}
+MangaLookupGeometry mangaGeometry() {
+  MangaLookupGeometry g;
+  g.sourceWidth = 100;
+  g.sourceHeight = 200;
+  g.views = {{5, 7, 100, 200}, {7, 5, 200, 100}, 120, 220, 0};
+  g.layout = {{5, 7, 100, 200}, 120, 220, 0};
+  return g;
+}
+}  // namespace
+TEST(MangaPageTextSourceTest, OwnsLexicalRunsAndWholeBlockBounds) {
+  auto bytes = mangaOcrFixture({{"hello world", "猫犬"}, {"other"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, mangaGeometry(), source), DictionaryStatus::Found);
+  auto view = source.view();
+  ASSERT_EQ(view.glyphCount, 15);
+  EXPECT_EQ(view.glyphs[0].pageWord, view.glyphs[4].pageWord);
+  EXPECT_NE(view.glyphs[0].pageWord, view.glyphs[6].pageWord);
+  EXPECT_NE(view.glyphs[0].paragraph, view.glyphs[12].paragraph);
+  EXPECT_EQ(view.glyphs[0].x, 15);
+  EXPECT_EQ(view.glyphs[0].y, 27);
+  EXPECT_EQ(view.glyphs[0].width, 30);
+  EXPECT_EQ(view.glyphs[4].width, 30);
+  auto moved = std::move(source);
+  EXPECT_EQ(source.view().glyphCount, 0);
+  bytes.clear();
+  EXPECT_EQ(moved.view().glyphs[0].codepoint, 'h');
+}
+TEST(MangaPageTextSourceTest, FailsClosedOnBudgetAndAllocationFailure) {
+  auto bytes = mangaOcrFixture({{std::string(1025, 'a')}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  EXPECT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::OutOfMemory);
+  EXPECT_TRUE(source.truncated);
+  EXPECT_EQ(source.view().glyphCount, 0);
+  bytes = mangaOcrFixture({{"cat"}});
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  dict_memory_test::reset();
+  dict_memory_test::rejectAll = true;
+  EXPECT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::OutOfMemory);
+  EXPECT_EQ(source.view().glyphCount, 0);
+  dict_memory_test::reset();
+}
+TEST(MangaPageTextSourceTest, ReconstructsByteOffsetsAfterOwnerTeardown) {
+  const std::string text = std::string("bad\0", 4) + "猫犬" + char(0xff) + "hello world";
+  auto bytes = mangaOcrFixture({{text}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_NE(source.view().glyphs[0].paragraph, source.view().glyphs[4].paragraph);
+  source.clear();
+  char out[64];
+  size_t written = 0;
+  EXPECT_TRUE(copyMangaLookupClipping(page, -1, {1, 1, 3, 6}, out, sizeof(out), written));
+  EXPECT_EQ(std::string(out, written), "犬");
+  EXPECT_TRUE(copyMangaLookupClipping(page, -1, {2, 3, 1, 3}, out, sizeof(out), written));
+  EXPECT_EQ(std::string(out, written), "ello wor");
+  EXPECT_FALSE(copyMangaLookupClipping(page, -1, {1, 1, 1, 6}, out, sizeof(out), written));
+}
+
+TEST(MangaPageTextSourceTest, KeepsCompletePrefixAndNeverAnIncompleteLatinToken) {
+  auto bytes = mangaOcrFixture({{"cat " + std::string(1100, 'x')}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_TRUE(source.truncated);
+  EXPECT_EQ(source.glyphCount, 4);
+  EXPECT_EQ(source.view().glyphs[3].pageWord, PageTextGlyph::kSyntheticPageWord);
+  EXPECT_EQ(dict_memory_test::largestRequest, kMangaLookupMaxGlyphs * sizeof(PageTextGlyph));
+}
+TEST(MangaPageTextSourceTest, TextFallbackWrapsAndTruncatesAtCompleteRun) {
+  auto bytes = mangaOcrFixture({{"cat dog elephant"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto g = mangaGeometry();
+  g.textOnly = true;
+  g.views.base = {3, 5, 40, 40};
+  g.cellWidth = 10;
+  g.lineHeight = 20;
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, g, source), DictionaryStatus::Found);
+  EXPECT_TRUE(source.truncated);
+  ASSERT_EQ(source.glyphCount, 8);
+  EXPECT_EQ(source.view().glyphs[0].x, 3);
+  EXPECT_EQ(source.view().glyphs[0].y, 5);
+  EXPECT_EQ(source.view().glyphs[4].x, 3);
+  EXPECT_EQ(source.view().glyphs[4].y, 25);
+  EXPECT_EQ(source.view().glyphs[4].width, 10);
+  EXPECT_EQ(source.view().glyphs[4].height, 20);
+  g.cellWidth = 0;
+  EXPECT_EQ(buildMangaLookupTextSource(page, -1, g, source), DictionaryStatus::ReadError);
+  EXPECT_EQ(source.glyphCount, 0);
+}
+TEST(MangaPageTextSourceTest, MapsEveryImageAndBaseOrientationWithAsymmetricInsets) {
+  // Oracle maps pixel-edge corners through the renderer's physical coordinate
+  // equations, independently of the adapter's relative quarter-turn loop.
+  auto physical = [](int o, int x, int y) -> std::pair<int, int> {
+    switch (o) {
+      case 0:
+        return {y, 200 - x};
+      case 1:
+        return {300 - x, 200 - y};
+      case 2:
+        return {300 - y, x};
+      default:
+        return {x, y};
+    }
+  };
+  auto logical = [](int o, int x, int y) -> std::pair<int, int> {
+    switch (o) {
+      case 0:
+        return {200 - y, x};
+      case 1:
+        return {300 - x, 200 - y};
+      case 2:
+        return {y, 300 - x};
+      default:
+        return {x, y};
+    }
+  };
+  for (int base = 0; base < 4; ++base)
+    for (int image = 0; image < 4; ++image) {
+      SCOPED_TRACE(std::to_string(base) + "/" + std::to_string(image));
+      auto g = mangaGeometry();
+      g.sourceWidth = 100;
+      g.sourceHeight = 100;
+      g.views.orientation = base;
+      g.views.screenWidth = base % 2 ? 300 : 200;
+      g.views.screenHeight = base % 2 ? 200 : 300;
+      g.views.base = {3, 7, g.views.screenWidth - 14, g.views.screenHeight - 20};
+      g.layout = {{13, 17, 100, 100}, image % 2 ? 300 : 200, image % 2 ? 200 : 300, image};
+      auto a = physical(image, 23, 37), b = physical(image, 53, 77);
+      a = logical(base, a.first, a.second);
+      b = logical(base, b.first, b.second);
+      int l = std::max(3, std::min(a.first, b.first)), t = std::max(7, std::min(a.second, b.second));
+      int r = std::min(g.views.screenWidth - 11, std::max(a.first, b.first));
+      int bottom = std::min(g.views.screenHeight - 13, std::max(a.second, b.second));
+      PageTextBounds bounds;
+      ASSERT_TRUE(mapMangaLookupBlock({10, 20, 30, 40}, g, bounds));
+      EXPECT_EQ(bounds.x, l);
+      EXPECT_EQ(bounds.y, t);
+      EXPECT_EQ(bounds.width, r - l);
+      EXPECT_EQ(bounds.height, bottom - t);
+    }
+}
+TEST(MangaPageTextSourceTest, ClipsSourceAndScreenEdgesWithoutOverflowOrInventedCropOrigin) {
+  auto g = mangaGeometry();
+  PageTextBounds out;
+  ASSERT_TRUE(mapMangaLookupBlock({90, 190, 65535, 65535}, g, out));
+  EXPECT_EQ(out.x, 95);
+  EXPECT_EQ(out.y, 197);
+  EXPECT_EQ(out.width, 10);
+  EXPECT_EQ(out.height, 10);
+  EXPECT_FALSE(mapMangaLookupBlock({100, 0, 20, 20}, g, out));
+  EXPECT_FALSE(mapMangaLookupBlock({0, 0, 0, 20}, g, out));
+  g.views.base.x = INT_MAX;
+  EXPECT_FALSE(mapMangaLookupBlock({0, 0, 20, 20}, g, out));
+  g = mangaGeometry();
+  g.layout.orientation = 4;
+  EXPECT_FALSE(mapMangaLookupBlock({0, 0, 20, 20}, g, out));
+  g = mangaGeometry();
+  g.layout.geometry = {0, 0, 51, 103};
+  ASSERT_TRUE(mapMangaLookupBlock({10, 20, 30, 40}, g, out));
+  EXPECT_EQ(out.x, 5);
+  EXPECT_EQ(out.y, 10);
+  EXPECT_EQ(out.width, 16);
+  EXPECT_EQ(out.height, 21);
+}
+TEST(MangaPageTextSourceTest, ScopeBoundaryHashesAndCacheNamesSeparateAllPagesAndPanels) {
+  auto bytes = mangaOcrFixture({{"cat"}, {"cat"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource a, b, c;
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, mangaGeometry(), a), DictionaryStatus::Found);
+  ASSERT_EQ(buildMangaLookupTextSource(page, 1, mangaGeometry(), b), DictionaryStatus::Found);
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), c), DictionaryStatus::Found);
+  EXPECT_NE(a.contentHash, b.contentHash);
+  EXPECT_NE(a.contentHash, c.contentHash);
+  EXPECT_EQ(c.glyphCount, 8);
+  char name[64];
+  std::set<std::string> names;
+  for (uint32_t pageIndex : {0u, 1u, 255u, 256u, 9999u})
+    for (int panel = -1; panel < 255; ++panel) {
+      ASSERT_TRUE(mangaLookupCacheFileName(pageIndex, panel, name, sizeof(name)));
+      EXPECT_TRUE(names.insert(name).second);
+    }
+  EXPECT_FALSE(mangaLookupCacheFileName(UINT32_MAX, 0, name, sizeof(name)));
+  EXPECT_FALSE(mangaLookupCacheFileName(0, 255, name, sizeof(name)));
+  EXPECT_FALSE(mangaLookupCacheFileName(0, 0, name, 2));
+  EXPECT_EQ(name[0], 0);
+  auto changed = mangaOcrFixture({{"car"}});
+  ASSERT_EQ(manga::format::decodePage(changed, page), manga::format::Error::None);
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, mangaGeometry(), b), DictionaryStatus::Found);
+  EXPECT_NE(a.contentHash, b.contentHash);
+}
+TEST(MangaPageTextSourceTest, RejectsMalformedSequencesAsParagraphSeparatorsAndClippingBoundaries) {
+  const std::vector<std::string> malformed{"\xc0\xaf", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\xe2\x82", "\x80"};
+  for (const auto& separator : malformed) {
+    auto bytes = mangaOcrFixture({{"猫" + separator + "犬"}});
+    manga::format::PageView page;
+    ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+    OwnedLookupTextSource source;
+    ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+    EXPECT_NE(source.view().glyphs[0].paragraph, source.view().glyphs[source.glyphCount - 2].paragraph);
+    char out[32];
+    size_t written;
+    EXPECT_TRUE(copyMangaLookupClipping(page, -1, {1, 1, 0, 3}, out, sizeof(out), written));
+    EXPECT_EQ(std::string(out, written), "犬");
+    EXPECT_FALSE(copyMangaLookupClipping(page, -1, {0, 1, 0, 3}, out, sizeof(out), written));
+    EXPECT_EQ(written, 0u);
+  }
+}
+TEST_F(JapaneseDictionaryTest, MangaOcrUsesRealStarDictScannerWholeWordsIncludingUnknowns) {
+  writeStarDict({{"cat", "feline"}, {"dog", "canine"}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"en", nullptr}), DictionaryStatus::Found);
+  auto bytes = mangaOcrFixture({{"cat unknown—dog"}, {"cat"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, mangaGeometry(), source), DictionaryStatus::Found);
+  PageWordScanner scanner;
+  ASSERT_EQ(
+      scanner.begin(source.view(), engine.backendKind(),
+                    {&engine, [](void* p, const DictionaryQuery& q,
+                                 DictionaryProbeResult& r) { return static_cast<DictionaryEngine*>(p)->probe(q, r); }}),
+      DictionaryStatus::Found);
+  scanToEnd(scanner);
+  ASSERT_TRUE(scanner.completedSuccessfully());
+  ASSERT_EQ(scanner.candidateCount(), 3);
+  EXPECT_EQ(scanner.candidate(0)->glyphCount, 3);
+  EXPECT_EQ(scanner.candidate(1)->glyphCount, 7);
+  EXPECT_EQ(scanner.candidate(2)->glyphCount, 3);
+  EXPECT_EQ(scanner.candidate(2)->firstPageWord, 2);
+}
+TEST_F(JapaneseDictionaryTest, MangaOcrUsesRealJapaneseLongestDeinflectionGrammarNamesAndCounters) {
+  writeVocab({{"猫", "cat", 230, 0},
+              {"猫犬", "pair", 230, 0},
+              {"食べる", "eat", 230, DictIndexRecord::POS_V1},
+              {"人", "person", 230, 0},
+              {"ムー", "partial name", 230, DictIndexRecord::POS_OTHER}});
+  writeSource("/dictionaries/jp/grammar", {{"について", "about", 230, DictIndexRecord::POS_OTHER}});
+  writeSource("/dictionaries/jp/names", {{"太郎", "name", 230, DictIndexRecord::POS_OTHER}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  const std::vector<std::string> surfaces{"猫犬", "食べました", "について", "太郎さん", "３人", "ムーミンさん"};
+  for (const auto& text : surfaces) {
+    SCOPED_TRACE(text);
+    auto bytes = mangaOcrFixture({{text}});
+    manga::format::PageView page;
+    ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+    OwnedLookupTextSource source;
+    ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+    PageWordScanner scanner;
+    const DictionaryProbeFn probe{&engine, [](void* p, const DictionaryQuery& q, DictionaryProbeResult& r) {
+                                    return static_cast<DictionaryEngine*>(p)->probe(q, r);
+                                  }};
+    ASSERT_EQ(scanner.begin(source.view(), engine.backendKind(), probe), DictionaryStatus::Found);
+    scanToEnd(scanner);
+    ASSERT_TRUE(scanner.completedSuccessfully());
+    ASSERT_GE(scanner.candidateCount(), 1);
+    EXPECT_EQ(scanner.candidate(0)->firstGlyph, 0);
+    // Compare against the existing scanner's plain glyph fixture to pin all
+    // segmentation policy without changing the dictionary/scanner implementation.
+    std::u32string codepoints;
+    const auto* cursor = reinterpret_cast<const unsigned char*>(text.c_str());
+    while (*cursor) codepoints.push_back(utf8NextCodepoint(&cursor));
+    auto reference = makeScannerGlyphs(codepoints);
+    PageWordScanner baseline;
+    ASSERT_EQ(baseline.begin({reference.data(), uint16_t(reference.size()), 1}, engine.backendKind(), probe),
+              DictionaryStatus::Found);
+    scanToEnd(baseline);
+    ASSERT_EQ(scanner.candidateCount(), baseline.candidateCount());
+    for (uint16_t i = 0; i < baseline.candidateCount(); ++i) {
+      EXPECT_EQ(scanner.candidate(i)->glyphCount, baseline.candidate(i)->glyphCount);
+      EXPECT_EQ(scanner.candidate(i)->matchedBytes, baseline.candidate(i)->matchedBytes);
+    }
+  }
+}
+TEST(MangaPageTextSourceTest, LongJapaneseRunRetainsGlyphPrefixWhileLatinSuffixIsDiscarded) {
+  std::string text;
+  for (int i = 0; i < 1100; ++i) text += "猫";
+  auto bytes = mangaOcrFixture({{text}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_TRUE(source.truncated);
+  EXPECT_EQ(source.glyphCount, kMangaLookupMaxGlyphs);
+  text = "猫" + std::string(1100, 'x');
+  bytes = mangaOcrFixture({{text}});
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_TRUE(source.truncated);
+  EXPECT_EQ(source.glyphCount, 1);
+}
+TEST(MangaPageTextSourceTest, AllocationFailureRetriesBoundedArrayWithVisibleTruncation) {
+  std::string text;
+  for (int i = 0; i < 500; ++i) text += "猫";
+  auto bytes = mangaOcrFixture({{text}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  dict_memory_test::reset();
+  dict_memory_test::rejectedRequest = 1;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_EQ(source.glyphCount, 256);
+  EXPECT_TRUE(source.truncated);
+  EXPECT_EQ(dict_memory_test::requestCount, 2u);
+  dict_memory_test::reset();
+}
+TEST(MangaPageTextSourceTest, SeparatesUnicodeSpacesControlsLinesAndBlocksWithoutChangingSavedOrder) {
+  auto bytes = mangaOcrFixture({{"one\xc2\xa0two\xe3\x80\x80three\tfour\nfive", "six"}, {"seven"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  char out[64];
+  size_t written;
+  const std::array<std::string, 7> words{"one", "two", "three", "four", "five", "six", "seven"};
+  for (uint16_t i = 0; i < words.size(); ++i) {
+    ASSERT_TRUE(copyMangaLookupClipping(page, -1, {i, i, 0, uint16_t(words[i].size())}, out, sizeof(out), written));
+    EXPECT_EQ(std::string(out, written), words[i]);
+  }
+  EXPECT_FALSE(copyMangaLookupClipping(page, -1, {2, 3, 0, 4}, out, sizeof(out), written));
+  EXPECT_FALSE(copyMangaLookupClipping(page, -1, {4, 5, 0, 3}, out, sizeof(out), written));
+  EXPECT_FALSE(copyMangaLookupClipping(page, -1, {0, 0, 0, 3}, out, 3, written));
+  EXPECT_EQ(written, 0u);
+  EXPECT_EQ(out[0], 0);
+}
+TEST(MangaPageTextSourceTest, AcceptsFourByteUtf8AndHashesParagraphChanges) {
+  const std::string astral = "\xf0\xa0\x80\x80";
+  auto bytes = mangaOcrFixture({{astral + "猫"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_EQ(source.view().glyphs[0].codepoint, 0x20000u);
+  char out[16];
+  size_t written;
+  ASSERT_TRUE(copyMangaLookupClipping(page, -1, {0, 0, 4, 7}, out, sizeof(out), written));
+  EXPECT_EQ(std::string(out, written), "猫");
+  bytes = mangaOcrFixture({{"cat dog"}});
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  const auto spaceHash = source.contentHash;
+  bytes = mangaOcrFixture({{"cat\ndog"}});
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_NE(source.contentHash, spaceHash);
+  bytes = mangaOcrFixture({{"cat", "dog"}});
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_NE(source.contentHash, spaceHash);
+}
+TEST(MangaPageTextSourceTest, EmptyInvalidScopeAndInvalidGeometryNeverPublishOldStorage) {
+  auto bytes = mangaOcrFixture({{"cat"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, mangaGeometry(), source), DictionaryStatus::Found);
+  EXPECT_EQ(buildMangaLookupTextSource(page, 1, mangaGeometry(), source), DictionaryStatus::ReadError);
+  EXPECT_EQ(source.glyphCount, 0);
+  auto g = mangaGeometry();
+  g.layout.screenWidth = 0;
+  EXPECT_EQ(buildMangaLookupTextSource(page, -1, g, source), DictionaryStatus::ReadError);
+  EXPECT_EQ(source.glyphCount, 0);
+  EXPECT_EQ(buildMangaLookupTextSource({}, -1, mangaGeometry(), source), DictionaryStatus::NotFound);
+  EXPECT_EQ(source.glyphCount, 0);
+  EXPECT_FALSE(source.truncated);
+}
+
+TEST_F(JapaneseDictionaryTest, MangaSmokeFixtureNeedsStarDictCaseInsensitiveIndexOrdering) {
+  // Exact original generic smoke ordering. "This" precedes "text" in byte
+  // order but sorts after it under StarDict's case-insensitive comparator.
+  writeStarDict({{"Alignment", "definition"}, {"Reader", "definition"}, {"This", "definition"},
+                 {"paragraph", "definition"}, {"text", "definition"}, {"the", "definition"}});
+  std::filesystem::remove(resolve("/dictionaries/en/dict-data.idx.oft"));
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"en", nullptr}), DictionaryStatus::Found);
+  DictionaryResult result;
+  EXPECT_EQ(engine.lookup({"Reader"}, result), DictionaryStatus::Found);
+  EXPECT_EQ(engine.lookup({"text"}, result), DictionaryStatus::NotFound);
+  auto bytes = mangaOcrFixture({{"Reader text"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, mangaGeometry(), source), DictionaryStatus::Found);
+  PageWordScanner scanner;
+  ASSERT_EQ(scanner.begin(source.view(), engine.backendKind(),
+      {&engine, [](void* p, const DictionaryQuery& q, DictionaryProbeResult& r) {
+        return static_cast<DictionaryEngine*>(p)->probe(q, r);
+      }}), DictionaryStatus::Found);
+  scanToEnd(scanner);
+  ASSERT_EQ(scanner.candidateCount(), 2);
+  const auto* second = scanner.candidate(1);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(second->firstGlyph, 7);
+  EXPECT_EQ(second->glyphCount, 4);
+  EXPECT_EQ(second->firstPageWord, 1);
+  std::string query;
+  for (int i = 0; i < second->glyphCount; ++i) query += static_cast<char>(source.view().glyphs[second->firstGlyph + i].codepoint);
+  EXPECT_EQ(query, "text");
+  engine.close();
+  // Rewrite ONLY record order, preserving definition offsets and bytes.
+  const std::pair<const char*, int> ordered[] = {{"Alignment", 0}, {"paragraph", 3}, {"Reader", 1},
+                                                {"text", 4}, {"the", 5}, {"This", 2}};
+  std::vector<uint8_t> index;
+  for (const auto& [word, original] : ordered) {
+    index.insert(index.end(), word, word + std::strlen(word) + 1);
+    appendBe32(index, original * 10); appendBe32(index, 10);
+  }
+  writeBytes(resolve("/dictionaries/en/dict-data.idx"), index);
+  Dictionary::setLookupDictPathOverride("/dictionaries/en/dict-data");
+  ASSERT_EQ(engine.open({"en", nullptr}), DictionaryStatus::Found);
+  EXPECT_EQ(engine.lookup({query}, result), DictionaryStatus::Found);
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityReadsFullIndexAndNoSparseDefinitionPayload) {
+  std::vector<InputRecord> records;
+  for (int i = 0; i < 97; ++i) records.push_back({"word" + std::to_string(1000 + i), "body", 1, 0});
+  auto bytes = writeSource("/dictionaries/jp/vocab", records);
+  std::filesystem::resize_file(resolve("/dictionaries/jp/vocab.dat"), 100 * 1024 * 1024);
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryScanIdentityState state;
+  ASSERT_EQ(engine.beginScanIdentity(state), DictionaryScanIdentityStatus::Pending);
+  EXPECT_EQ(state.digest(), 0u);
+  while (state.status() == DictionaryScanIdentityStatus::Pending) engine.stepScanIdentity(state, 256);
+  ASSERT_EQ(state.status(), DictionaryScanIdentityStatus::Ready);
+  const auto original = state.digest();
+  engine.close();
+  bytes.first[48 * sizeof(DictIndexRecord) + 38] ^= 1;
+  writeBytes(resolve("/dictionaries/jp/vocab.idx"), bytes.first);
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  engine.beginScanIdentity(state);
+  while (state.status() == DictionaryScanIdentityStatus::Pending) engine.stepScanIdentity(state, 256);
+  EXPECT_NE(state.digest(), original);
+}
+
+#include "DictionaryScanIdentityPolicy.h"
+TEST(DictionaryScanIdentityPolicyTest, PendingWorkYieldsOnlyWhenWorkerAndFirstDefinitionPermit) {
+  DictionaryScanIdentityPolicy policy;
+  EXPECT_TRUE(policy.eligible(DictionaryScanIdentityStatus::Pending, true, false, false, false, false, false, false));
+  policy.progressiveStarted();
+  EXPECT_FALSE(policy.canLoad());
+  EXPECT_FALSE(policy.eligible(DictionaryScanIdentityStatus::Pending, true, false, false, false, false, false, false));
+  EXPECT_TRUE(policy.eligible(DictionaryScanIdentityStatus::Pending, true, false, false, false, true, false, false));
+  EXPECT_FALSE(policy.eligible(DictionaryScanIdentityStatus::Pending, true, false, true, false, true, false, false));
+  EXPECT_FALSE(policy.eligible(DictionaryScanIdentityStatus::Pending, true, false, false, true, true, false, false));
+  EXPECT_FALSE(policy.eligible(DictionaryScanIdentityStatus::Pending, true, false, false, false, true, true, false));
+  EXPECT_FALSE(policy.eligible(DictionaryScanIdentityStatus::Ready, true, false, false, false, true, false, false));
+}
+
+namespace {
+uint64_t finishIdentity(DictionaryEngine& engine, DictionaryScanIdentityState& state) {
+  size_t steps = 0;
+  while (state.status() == DictionaryScanIdentityStatus::Pending && steps++ < 100000)
+    engine.stepScanIdentity(state, 256);
+  EXPECT_EQ(state.status(), DictionaryScanIdentityStatus::Ready);
+  return state.digest();
+}
+DictionaryProbeFn identityProbe(DictionaryEngine& engine) {
+  return {&engine, [](void* context, const DictionaryQuery& query, DictionaryProbeResult& out) {
+            return static_cast<DictionaryEngine*>(context)->probe(query, out);
+          }};
+}
+}  // namespace
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityBoundariesFullReadsAndExistingJapaneseHandles) {
+  for (const int count : {48, 49, 64, 96, 97, 4096}) {
+    SCOPED_TRACE(count);
+    std::vector<InputRecord> records;
+    for (int i = 0; i < count; ++i) records.push_back({"word" + std::to_string(10000 + i), "body", 1, 0});
+    auto bytes = writeSource("/dictionaries/jp/vocab", records, true);
+    std::filesystem::resize_file(resolve("/dictionaries/jp/vocab.dat"), 100 * 1024 * 1024);
+    DictionaryEngine engine;
+    ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+    hal_storage_test::reset();
+    hal_storage_test::rejectDuplicateReaders = true;
+    DictionaryScanIdentityState state;
+    ASSERT_EQ(engine.beginScanIdentity(state), DictionaryScanIdentityStatus::Pending);
+    const auto original = finishIdentity(engine, state);
+    EXPECT_EQ(hal_storage_test::readBytes["/dictionaries/jp/vocab.idx"], bytes.first.size());
+    EXPECT_EQ(hal_storage_test::readBytes["/dictionaries/jp/vocab.dat"], 0u);
+    EXPECT_EQ(hal_storage_test::readBytes["/dictionaries/jp/vocab.spx"], 0u);
+    EXPECT_EQ(hal_storage_test::openCount, 0u);
+    EXPECT_LE(hal_storage_test::maximumReadBytes, 256u);
+    engine.close();
+    for (size_t field : {size_t{0}, size_t{38}, size_t{39}}) {
+      auto edited = bytes.first;
+      edited[(count / 2) * sizeof(DictIndexRecord) + field] ^= 1;
+      writeBytes(resolve("/dictionaries/jp/vocab.idx"), edited);
+      ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+      engine.beginScanIdentity(state);
+      EXPECT_NE(finishIdentity(engine, state), original);
+      engine.close();
+    }
+  }
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentitySurvivesReopenButRehashesNewActivationAndRoutes) {
+  writeVocab({{"猫", "cat", 1, 0}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryScanIdentityState state;
+  engine.beginScanIdentity(state);
+  engine.stepScanIdentity(state, 8);
+  for (unsigned i = 0; i < 3; ++i) {
+    engine.cancel();
+    engine.close();
+    ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+    ASSERT_TRUE(engine.resumeScanIdentity(state));
+  }
+  hal_storage_test::reset();
+  const auto original = finishIdentity(engine, state);
+  EXPECT_EQ(hal_storage_test::readBytes["/dictionaries/jp/vocab.idx"], 32u);
+  engine.close();
+  writeBytes(resolve("/dictionaries/jp/vocab.spx"), {1, 2, 3});
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  hal_storage_test::reset();
+  ASSERT_TRUE(engine.resumeScanIdentity(state));
+  EXPECT_EQ(finishIdentity(engine, state), original);
+  EXPECT_EQ(hal_storage_test::readCount, 0u);
+  engine.beginScanIdentity(state);
+  EXPECT_EQ(finishIdentity(engine, state), original);
+  EXPECT_EQ(hal_storage_test::readBytes["/dictionaries/jp/vocab.idx"], 40u);
+  engine.close();
+  writeSource("/dictionaries/jp/grammar", {{"猫", "grammar", 2, 0}});
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+  engine.beginScanIdentity(state);
+  EXPECT_NE(finishIdentity(engine, state), original);
+  engine.close();
+  std::filesystem::remove(resolve("/dictionaries/jp/grammar.dat"));
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+  engine.beginScanIdentity(state);
+  EXPECT_EQ(finishIdentity(engine, state), original);
+  engine.close();
+  std::filesystem::resize_file(resolve("/dictionaries/jp/vocab.dat"), 4);
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+  engine.beginScanIdentity(state);
+  EXPECT_NE(finishIdentity(engine, state), original);
+  engine.close();
+  writeSource("/dict/vocab", {{"猫", "cat!", 1, 0}});
+  std::filesystem::remove(resolve("/dictionaries/jp/vocab.idx"));
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityCancelsEveryChunkIncludingBeforePublicationAndErrorsNeverTrust) {
+  std::vector<InputRecord> records(20, {"word", "body", 1, 0});
+  writeVocab(records);
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  for (unsigned boundary = 0; boundary <= 4; ++boundary) {
+    DictionaryScanIdentityState state;
+    engine.beginScanIdentity(state);
+    for (unsigned step = 0; step < boundary; ++step) engine.stepScanIdentity(state, 256);
+    EXPECT_EQ(state.status(), DictionaryScanIdentityStatus::Pending);
+    state.cancel();
+    EXPECT_EQ(engine.stepScanIdentity(state, 256), DictionaryScanIdentityStatus::Cancelled);
+    EXPECT_EQ(state.digest(), 0u);
+  }
+  for (bool seekFailure : {false, true}) {
+    DictionaryScanIdentityState state;
+    engine.beginScanIdentity(state);
+    engine.stepScanIdentity(state, 256);
+    if (seekFailure)
+      hal_storage_test::seekFailurePath = "/dictionaries/jp/vocab.idx";
+    else {
+      hal_storage_test::shortReadPath = "/dictionaries/jp/vocab.idx";
+      hal_storage_test::shortReadOffset = 256;
+    }
+    EXPECT_EQ(engine.stepScanIdentity(state, 256), DictionaryScanIdentityStatus::ReadError);
+    EXPECT_EQ(state.digest(), 0u);
+    hal_storage_test::reset();
+    EXPECT_EQ(engine.stepScanIdentity(state, 256), DictionaryScanIdentityStatus::ReadError);
+  }
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityStarFullCanonicalFilesNoBodiesOrAccelerators) {
+  std::vector<std::pair<std::string, std::string>> records;
+  for (int i = 0; i < 300; ++i) records.emplace_back("word" + std::to_string(1000 + i), "body");
+  writeStarDict(records);
+  const std::string base = "/dictionaries/en/dict-data";
+  writeText(resolve(base + ".syn"), std::string(3000, 's'));
+  auto ifo = readBytes(resolve(base + ".ifo"));
+  ifo.insert(ifo.end(), 3000, '#');
+  writeBytes(resolve(base + ".ifo"), ifo);
+  std::filesystem::resize_file(resolve(base + ".dict"), 100 * 1024 * 1024);
+  DictionaryEngine engine;
+  auto open = [&] { return engine.openStarDictOverride({"en", nullptr}, base.c_str()); };
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  hal_storage_test::reset();
+  hal_storage_test::rejectDuplicateReaders = true;
+  DictionaryScanIdentityState state;
+  engine.beginScanIdentity(state);
+  while (state.status() == DictionaryScanIdentityStatus::Pending) {
+    engine.stepScanIdentity(state, 4096);  // The implementation clamps even oversized callers to 256.
+    for (const char* ext : {".idx", ".syn", ".ifo", ".dict"})
+      EXPECT_EQ(hal_storage_test::activeReaders[base + ext], 0u);
+  }
+  ASSERT_EQ(state.status(), DictionaryScanIdentityStatus::Ready);
+  const auto original = state.digest();
+  for (const char* ext : {".idx", ".syn", ".ifo"})
+    EXPECT_EQ(hal_storage_test::readBytes[base + ext], std::filesystem::file_size(resolve(base + ext)));
+  EXPECT_EQ(hal_storage_test::readBytes[base + ".dict"], 0u);
+  EXPECT_LE(hal_storage_test::maximumReadBytes, 256u);
+  engine.close();
+  for (const char* ext : {".qidx", ".idx.oft", ".syn.oft", ".idx.oft.cspt", ".syn.oft.cspt"})
+    writeBytes(resolve(base + ext), {1, 2, 3});
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  hal_storage_test::reset();
+  EXPECT_TRUE(engine.resumeScanIdentity(state));
+  EXPECT_EQ(hal_storage_test::readCount, 0u);
+  engine.beginScanIdentity(state);
+  EXPECT_EQ(finishIdentity(engine, state), original);
+  for (const char* ext : {".qidx", ".idx.oft", ".syn.oft", ".idx.oft.cspt", ".syn.oft.cspt"})
+    EXPECT_EQ(hal_storage_test::readBytes[base + ext], 0u);
+  engine.close();
+  for (const char* ext : {".idx", ".syn", ".ifo"}) {
+    auto bytes = readBytes(resolve(base + ext));
+    bytes[bytes.size() / 2] ^= 1;
+    writeBytes(resolve(base + ext), bytes);
+    ASSERT_EQ(open(), DictionaryStatus::Found);
+    engine.beginScanIdentity(state);
+    EXPECT_NE(finishIdentity(engine, state), original);
+    engine.close();
+    bytes[bytes.size() / 2] ^= 1;
+    writeBytes(resolve(base + ext), bytes);
+  }
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  dict_memory_test::rejectAll = true;
+  EXPECT_EQ(engine.beginScanIdentity(state), DictionaryScanIdentityStatus::OutOfMemory);
+  EXPECT_EQ(state.digest(), 0u);
+  dict_memory_test::reset();
+  hal_storage_test::readOpenFailurePath = base + ".syn";
+  EXPECT_EQ(engine.beginScanIdentity(state), DictionaryScanIdentityStatus::ReadError);
+  EXPECT_EQ(state.digest(), 0u);
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentitySmallSecondActivationActuallyLoadsCacheWithinInitialSlice) {
+  writeVocab({{"猫", "cat", 1, 0}, {"犬", "dog", 1, 0}});
+  writeSource("/dictionaries/jp/grammar", {{"猫", "grammar", 2, 0}});
+  writeSource("/dictionaries/jp/names", {{"犬", "name", 2, 0}});
+  auto glyphs = makeScannerGlyphs(U"猫犬");
+  PageTextSourceView source{glyphs.data(), static_cast<uint16_t>(glyphs.size()), 123};
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryScanIdentityState state;
+  engine.beginScanIdentity(state);
+  const auto digest = finishIdentity(engine, state);
+  PageWordScanner scanner;
+  ASSERT_EQ(scanner.begin(source, engine.backendKind(), identityProbe(engine)), DictionaryStatus::Found);
+  while (!scanner.done()) scanner.stepOne();
+  ASSERT_TRUE(scanner.completedSuccessfully());
+  ASSERT_EQ(scanner.candidateCount(), 2);
+  PageWordScanCache cache;
+  PageWordScanCacheIdentity identity{engine.backendKind(), 0, 0, source.contentHash, digest, source.glyphCount};
+  ASSERT_TRUE(cache.save("/cache/real.bin", identity, scanner, 1));
+  engine.close();
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  engine.beginScanIdentity(state);
+  DictionaryScanIdentityPolicy policy;
+  unsigned steps = 0;
+  for (; steps < policy.kInitialSteps && state.status() == DictionaryScanIdentityStatus::Pending; ++steps)
+    engine.stepScanIdentity(state, policy.kChunkBytes);
+  ASSERT_EQ(state.status(), DictionaryScanIdentityStatus::Ready);
+  EXPECT_LE(steps, 4u);
+  policy.initialFinished();
+  ASSERT_TRUE(policy.canLoad());
+  identity.dictionarySignature = state.digest();
+  PageWordScanCache secondActivation;
+  ASSERT_TRUE(secondActivation.load("/cache/real.bin", identity));
+  EXPECT_EQ(secondActivation.cursor(), 1);
+  EXPECT_EQ(secondActivation.candidateCount(), 2);
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityLargeProgressiveScanKeepsCursorWhenVerificationFinishesLate) {
+  std::vector<InputRecord> records;
+  for (int i = 0; i < 4096; ++i) records.push_back({"word" + std::to_string(10000 + i), "body", 1, 0});
+  records.push_back({"猫", "cat", 1, 0});
+  records.push_back({"犬", "dog", 1, 0});
+  writeVocab(records);
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryScanIdentityState state;
+  engine.beginScanIdentity(state);
+  DictionaryScanIdentityPolicy policy;
+  for (unsigned i = 0; i < policy.kInitialSteps; ++i) engine.stepScanIdentity(state, policy.kChunkBytes);
+  ASSERT_EQ(state.status(), DictionaryScanIdentityStatus::Pending);
+  policy.progressiveStarted();
+  auto glyphs = makeScannerGlyphs(U"猫犬");
+  PageTextSourceView source{glyphs.data(), static_cast<uint16_t>(glyphs.size()), 123};
+  PageWordScanner scanner;
+  ASSERT_EQ(scanner.begin(source, engine.backendKind(), identityProbe(engine)), DictionaryStatus::Found);
+  while (!scanner.done()) scanner.stepOne();
+  ASSERT_EQ(scanner.candidateCount(), 2);
+  DictionaryLookupFlow flow;
+  flow.beginPage(0, 2, true, 1, true);
+  const auto beforeCursor = flow.cursor();
+  const auto first = *scanner.candidate(0);
+  const auto digest = finishIdentity(engine, state);
+  EXPECT_FALSE(policy.canLoad());
+  EXPECT_EQ(flow.cursor(), beforeCursor);
+  EXPECT_EQ(scanner.candidate(0)->firstGlyph, first.firstGlyph);
+  PageWordScanCache cache;
+  PageWordScanCacheIdentity identity{engine.backendKind(), 0, 0, source.contentHash, digest, source.glyphCount};
+  EXPECT_TRUE(cache.save("/cache/large.bin", identity, scanner, flow.cursor()));
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityMoveRevokesMovedFromTrust) {
+  writeVocab({{"猫", "cat", 1, 0}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryScanIdentityState state;
+  engine.beginScanIdentity(state);
+  const auto digest = finishIdentity(engine, state);
+  DictionaryScanIdentityState moved(std::move(state));
+  EXPECT_EQ(moved.digest(), digest);
+  EXPECT_EQ(state.digest(), 0u);
+  EXPECT_NE(state.status(), DictionaryScanIdentityStatus::Ready);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityRouteAllocationFailureDoesNotBreakLookup) {
+  writeStarDict({{"cat", "feline"}});
+  const std::string base = "/dictionaries/en/dict-data";
+  DictionaryEngine engine;
+  dict_memory_test::rejectedBytes = base.size() + 1;
+  ASSERT_EQ(engine.openStarDictOverride({"en", nullptr}, base.c_str()), DictionaryStatus::Found);
+  dict_memory_test::reset();
+  DictionaryScanIdentityState state;
+  EXPECT_EQ(engine.beginScanIdentity(state), DictionaryScanIdentityStatus::OutOfMemory);
+  DictionaryResult result;
+  EXPECT_EQ(engine.lookup({"cat", 0}, result), DictionaryStatus::Found);
+  engine.close();
+  const std::string longBase = "/" + std::string(180, 'a') + "/" + std::string(180, 'b') + "/" + std::string(144, 'c');
+  for (const char* ext : {".ifo", ".idx", ".dict", ".idx.oft"})
+    writeBytes(resolve(longBase + ext), readBytes(resolve(base + ext)));
+  ASSERT_EQ(engine.openStarDictOverride({"en", nullptr}, longBase.c_str()), DictionaryStatus::Found);
+  EXPECT_EQ(engine.beginScanIdentity(state), DictionaryScanIdentityStatus::Unavailable);
+  EXPECT_EQ(engine.lookup({"cat", 0}, result), DictionaryStatus::Found);
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityUnreadableOptionalJapaneseSourceDisablesOnlyCache) {
+  writeVocab({{"猫", "cat", 1, 0}});
+  writeSource("/dictionaries/jp/names", {{"犬", "name", 1, 0}});
+  hal_storage_test::readOpenFailurePath = "/dictionaries/jp/names.idx";
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryScanIdentityState state;
+  EXPECT_EQ(engine.beginScanIdentity(state), DictionaryScanIdentityStatus::ReadError);
+  DictionaryResult result;
+  EXPECT_EQ(engine.lookup({"猫", 0}, result), DictionaryStatus::Found);
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityBodyReplacementKeepsCandidatesButChangesSelectedDefinition) {
+  for (bool japanese : {true, false}) {
+    const std::string base = japanese ? "/dictionaries/jp/vocab" : "/dictionaries/en/dict-data";
+    if (japanese)
+      writeVocab({{"cat", "one", 1, 0}});
+    else
+      writeStarDict({{"cat", "one"}});
+    DictionaryEngine engine;
+    auto open = [&] {
+      return japanese ? engine.open({"ja", nullptr}) : engine.openStarDictOverride({"en", nullptr}, base.c_str());
+    };
+    ASSERT_EQ(open(), DictionaryStatus::Found);
+    DictionaryScanIdentityState state;
+    engine.beginScanIdentity(state);
+    const auto original = finishIdentity(engine, state);
+    DictionaryProbeResult candidate;
+    EXPECT_EQ(engine.probe({"cat", 0}, candidate), DictionaryStatus::Found);
+    EXPECT_EQ(engine.probe({"absent", 0}, candidate), DictionaryStatus::NotFound);
+    // StarDict may create .qidx during those probes; it must not change identity.
+    EXPECT_TRUE(engine.resumeScanIdentity(state));
+    engine.close();
+    writeText(resolve(base + (japanese ? ".dat" : ".dict")), "two");
+    ASSERT_EQ(open(), DictionaryStatus::Found);
+    engine.beginScanIdentity(state);
+    EXPECT_EQ(finishIdentity(engine, state), original);
+    DictionaryResult result;
+    ASSERT_EQ(engine.lookup({"cat", 0}, result), DictionaryStatus::Found);
+    std::string definition;
+    DictionaryDefinitionSink sink{&definition, [](void* context, const DictionaryDefinitionSpan& span) {
+                                    static_cast<std::string*>(context)->append(span.text);
+                                    return true;
+                                  }};
+    EXPECT_EQ(engine.streamDefinition(result.definition, DictionaryDefinitionMode::PlainFallback, sink),
+              DictionaryStatus::Found);
+    EXPECT_EQ(definition, "two");
+  }
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityStarCancellationReadFailureAndRouteChange) {
+  writeStarDict({{"cat", "one"}}, 'm', "kitty", "cat");
+  const std::string base = "/dictionaries/en/dict-data";
+  DictionaryEngine engine;
+  auto open = [&] { return engine.openStarDictOverride({"en", nullptr}, base.c_str()); };
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  DictionaryScanIdentityState state;
+  engine.beginScanIdentity(state);
+  engine.stepScanIdentity(state, 4);
+  engine.cancel();
+  engine.close();
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  ASSERT_TRUE(engine.resumeScanIdentity(state));
+  hal_storage_test::reset();
+  const auto digest = finishIdentity(engine, state);
+  EXPECT_EQ(hal_storage_test::readBytes[base + ".idx"], std::filesystem::file_size(resolve(base + ".idx")) - 4);
+  engine.close();
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  hal_storage_test::reset();
+  EXPECT_TRUE(engine.resumeScanIdentity(state));
+  EXPECT_EQ(finishIdentity(engine, state), digest);
+  EXPECT_EQ(hal_storage_test::readCount, 0u);
+  engine.beginScanIdentity(state);
+  hal_storage_test::shortReadPath = base + ".idx";
+  hal_storage_test::shortReadOffset = 0;
+  EXPECT_EQ(engine.stepScanIdentity(state, 256), DictionaryScanIdentityStatus::ReadError);
+  EXPECT_EQ(state.digest(), 0u);
+  EXPECT_EQ(hal_storage_test::activeReaders[base + ".idx"], 0u);
+  hal_storage_test::reset();
+  engine.beginScanIdentity(state);
+  state.cancel();
+  EXPECT_EQ(engine.stepScanIdentity(state, 256), DictionaryScanIdentityStatus::Cancelled);
+  EXPECT_EQ(state.digest(), 0u);
+  engine.beginScanIdentity(state);
+  finishIdentity(engine, state);
+  engine.close();
+  const std::string other = "/dictionaries/other/dict-data";
+  for (const char* ext : {".idx", ".dict", ".ifo", ".syn"})
+    writeBytes(resolve(other + ext), readBytes(resolve(base + ext)));
+  ASSERT_EQ(engine.openStarDictOverride({"en", nullptr}, other.c_str()), DictionaryStatus::Found);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+  EXPECT_EQ(state.digest(), 0u);
+}
+
+TEST(DictionaryScanIdentityPolicyTest, TerminalAndIneligibleStatesNeverAddHashBusySpinReason) {
+  DictionaryScanIdentityPolicy policy;
+  policy.progressiveStarted();
+  for (auto status : {DictionaryScanIdentityStatus::Ready, DictionaryScanIdentityStatus::Cancelled,
+                      DictionaryScanIdentityStatus::Unavailable, DictionaryScanIdentityStatus::ReadError,
+                      DictionaryScanIdentityStatus::OutOfMemory})
+    EXPECT_FALSE(policy.eligible(status, true, false, false, false, true, false, false));
+  EXPECT_FALSE(policy.eligible(DictionaryScanIdentityStatus::Pending, false, false, false, false, true, false, false));
+  EXPECT_FALSE(policy.eligible(DictionaryScanIdentityStatus::Pending, true, true, false, false, true, false, false));
+  EXPECT_TRUE(policy.eligible(DictionaryScanIdentityStatus::Pending, true, false, false, false, false, false, true));
+  EXPECT_LE(sizeof(DictionaryScanIdentityState), 192u);
+}
+
+namespace {
+DictionaryEngine* identityEngineToCancel = nullptr;
+void cancelIdentityAfterPhysicalRead() {
+  hal_storage_test::afterRead = nullptr;
+  identityEngineToCancel->cancel();
+}
+}  // namespace
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityCancellationDuringReadNeverPublishesLastChunk) {
+  for (bool japanese : {true, false}) {
+    if (japanese)
+      writeVocab({{"cat", "one", 1, 0}});
+    else
+      writeStarDict({{"cat", "one"}});
+    DictionaryEngine engine;
+    ASSERT_EQ(japanese ? engine.open({"ja", nullptr})
+                       : engine.openStarDictOverride({"en", nullptr}, "/dictionaries/en/dict-data"),
+              DictionaryStatus::Found);
+    DictionaryScanIdentityState state;
+    engine.beginScanIdentity(state);
+    identityEngineToCancel = &engine;
+    hal_storage_test::afterRead = cancelIdentityAfterPhysicalRead;
+    EXPECT_EQ(engine.stepScanIdentity(state, 256), DictionaryScanIdentityStatus::Cancelled);
+    EXPECT_EQ(state.digest(), 0u);
+    EXPECT_EQ(hal_storage_test::activeReaders["/dictionaries/en/dict-data.idx"], 0u);
+    identityEngineToCancel = nullptr;
+  }
+}
+
+TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityStarMetadataWidthOptionalSourceAndBodyExtent) {
+  writeStarDict({{"cat", "one"}});
+  const std::string base = "/dictionaries/en/dict-data";
+  DictionaryEngine engine;
+  auto open = [&] { return engine.openStarDictOverride({"en", nullptr}, base.c_str()); };
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  DictionaryScanIdentityState state;
+  engine.beginScanIdentity(state);
+  const auto original = finishIdentity(engine, state);
+  engine.close();
+  auto ifo = readBytes(resolve(base + ".ifo"));
+  const std::string metadata = "idxoffsetbits=64\n";
+  ifo.insert(ifo.end(), metadata.begin(), metadata.end());
+  writeBytes(resolve(base + ".ifo"), ifo);
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+  engine.beginScanIdentity(state);
+  EXPECT_NE(finishIdentity(engine, state), original);
+  engine.close();
+  writeBytes(resolve(base + ".syn"), {'k', 'i', 't', 't', 'y', 0, 0, 0, 0, 0});
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+  engine.beginScanIdentity(state);
+  const auto synonym = finishIdentity(engine, state);
+  engine.close();
+  std::filesystem::resize_file(resolve(base + ".dict"), 100 * 1024 * 1024);
+  ASSERT_EQ(open(), DictionaryStatus::Found);
+  EXPECT_FALSE(engine.resumeScanIdentity(state));
+  hal_storage_test::reset();
+  engine.beginScanIdentity(state);
+  EXPECT_NE(finishIdentity(engine, state), synonym);
+  EXPECT_EQ(hal_storage_test::readBytes[base + ".dict"], 0u);
+}

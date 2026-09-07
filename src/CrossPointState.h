@@ -57,7 +57,7 @@ class CrossPointState : public PersistableStore<CrossPointState> {
 
   bool saveToFile() const;
 
-  bool loadFromFile();
+  bool loadFromFile(bool mutationReload = false);
   static const char* getFilePath() { return "/.crosspoint/state.json"; }
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);

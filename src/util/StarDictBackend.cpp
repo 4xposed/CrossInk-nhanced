@@ -95,6 +95,8 @@ DictionaryStatus StarDictBackend::open(const char* bookCachePath) {
   signature_ = 0;
   open_ = false;
   bookCachePath_ = bookCachePath;
+  resolvedPath_.reset();
+  identityRouteStatus_ = DictionaryScanIdentityStatus::Unavailable;
   cancelled_ = false;
   if (!Dictionary::exists(bookCachePath_)) return DictionaryStatus::Unavailable;
 
@@ -110,6 +112,16 @@ DictionaryStatus StarDictBackend::open(const char* bookCachePath) {
   if (path.empty()) {
     plainBuffer_.reset();
     return DictionaryStatus::Unavailable;
+  }
+  // Bounded route retained once per session; it must outlive open() and cannot
+  // be static across sessions. Identity chunks reuse the existing stream buffer.
+  if (path.size() > kPlainBufferBytes - 6) {
+    LOG_ERR("DICT", "Scan cache disabled: StarDict route exceeds bounded identity buffer");
+  } else if (!resolvedPath_.assign(path)) {
+    LOG_ERR("DICT", "Scan cache disabled: cannot retain StarDict identity route");
+    identityRouteStatus_ = DictionaryScanIdentityStatus::OutOfMemory;
+  } else {
+    identityRouteStatus_ = DictionaryScanIdentityStatus::Pending;
   }
   info_ = Dictionary::readInfo(path.c_str());
   capabilities_.suggestions = true;
@@ -359,6 +371,8 @@ uint64_t StarDictBackend::signature() const { return open_ ? signature_ : 0; }
 void StarDictBackend::cancel() { cancelled_ = true; }
 
 void StarDictBackend::close() {
+  resolvedPath_.reset();
+  identityRouteStatus_ = DictionaryScanIdentityStatus::Unavailable;
   activeSlice_ = DictDefinitionSlice{};
   plainBuffer_.reset();
   htmlRenderer_.reset();
@@ -369,4 +383,104 @@ void StarDictBackend::close() {
   open_ = false;
   cancelled_ = false;
   Dictionary::clearLookupDictPathOverride();
+}
+
+const char* StarDictBackend::scanFilePath(unsigned ordinal) {
+  static constexpr const char* suffixes[] = {".idx", ".syn", ".ifo", ".dict"};
+  if (ordinal >= 4 || !plainBuffer_ || resolvedPath_.empty()) return nullptr;
+  const size_t length = resolvedPath_.view().size();
+  std::memcpy(plainBuffer_.get(), resolvedPath_.c_str(), length);
+  std::strcpy(plainBuffer_.get() + length, suffixes[ordinal]);
+  return plainBuffer_.get();
+}
+
+bool StarDictBackend::scanFileDescriptor(unsigned ordinal, uint64_t& size, bool& present) {
+  const char* path = scanFilePath(ordinal);
+  if (!path) return false;
+  present = Storage.exists(path);
+  size = 0;
+  if (!present) return ordinal == 1;  // Only synonyms are optional canonical input.
+  HalFile file;
+  if (!Storage.openFileForRead("DICT", path, file)) return false;
+  size = file.fileSize64();
+  file.close();
+  // Canonical indexes must be addressable with the firmware HAL seek API.
+  return ordinal == 3 || size <= UINT32_MAX;
+}
+
+DictionaryScanIdentityStatus StarDictBackend::beginScanIdentity(DictionaryScanIdentityState& state) {
+  state.start(2);
+  if (!open_ || cancelled_) return state.fail(DictionaryScanIdentityStatus::Unavailable);
+  if (identityRouteStatus_ != DictionaryScanIdentityStatus::Pending) return state.fail(identityRouteStatus_);
+  const size_t length = resolvedPath_.view().size();
+  // At most 507 bytes, once per activation, retained across backend destruction.
+  state.starPath_ = makeUniqueNoThrow<char[]>(length + 1);
+  if (!state.starPath_) return state.fail(DictionaryScanIdentityStatus::OutOfMemory);
+  std::memcpy(state.starPath_.get(), resolvedPath_.c_str(), length + 1);
+  state.text(state.starPath_.get(), length);
+  state.number(info_.wordcount);
+  state.number(info_.altFormCount);
+  state.number(info_.idxfilesize);
+  state.number(info_.idxoffsetbits);
+  state.text(info_.sametypesequence, std::strlen(info_.sametypesequence));
+  for (unsigned ordinal = 0; ordinal < 4; ++ordinal) {
+    bool present = false;
+    if (!scanFileDescriptor(ordinal, state.sizes_[ordinal], present))
+      return state.fail(DictionaryScanIdentityStatus::ReadError);
+    if (present) state.presentMask_ |= 1u << ordinal;
+    state.number(ordinal);
+    state.number(present);
+    state.number(state.sizes_[ordinal]);
+  }
+  return state.status_;
+}
+
+bool StarDictBackend::resumeScanIdentity(DictionaryScanIdentityState& state) {
+  if (!open_ || cancelled_ || state.backend_ != 2 || !state.starPath_ ||
+      std::strcmp(state.starPath_.get(), resolvedPath_.c_str()) != 0)
+    return false;
+  for (unsigned ordinal = 0; ordinal < 4; ++ordinal) {
+    bool present = false;
+    uint64_t size = 0;
+    if (!scanFileDescriptor(ordinal, size, present) || size != state.sizes_[ordinal] ||
+        present != static_cast<bool>(state.presentMask_ & (1u << ordinal)))
+      return false;
+  }
+  return true;
+}
+
+DictionaryScanIdentityStatus StarDictBackend::stepScanIdentity(DictionaryScanIdentityState& state, size_t byteBudget) {
+  if (state.status_ != DictionaryScanIdentityStatus::Pending) return state.status_;
+  if (!open_ || cancelled_) {
+    state.cancel();
+    return state.status_;
+  }
+  if (state.backend_ != 2 || !state.starPath_ || std::strcmp(state.starPath_.get(), resolvedPath_.c_str()) != 0)
+    return state.fail(DictionaryScanIdentityStatus::Unavailable);
+  while (state.source_ < 3 &&
+         (!(state.presentMask_ & (1u << state.source_)) || state.offset_ == state.sizes_[state.source_])) {
+    ++state.source_;
+    state.offset_ = 0;
+  }
+  if (state.source_ == 3) {
+    state.status_ = DictionaryScanIdentityStatus::Ready;
+    return state.status_;
+  }
+  const size_t bytes =
+      std::min({byteBudget, size_t{256}, static_cast<size_t>(state.sizes_[state.source_] - state.offset_)});
+  if (!bytes) return state.status_;
+  HalFile file;
+  if (!Storage.openFileForRead("DICT", scanFilePath(state.source_), file))
+    return state.fail(DictionaryScanIdentityStatus::ReadError);
+  const bool read = file.fileSize() == state.sizes_[state.source_] && file.seekSet(state.offset_) &&
+                    file.read(plainBuffer_.get(), bytes) == static_cast<int>(bytes);
+  file.close();
+  if (cancelled_) {
+    state.cancel();
+    return state.status_;
+  }
+  if (!read) return state.fail(DictionaryScanIdentityStatus::ReadError);
+  state.bytes(plainBuffer_.get(), bytes);
+  state.offset_ += bytes;
+  return state.status_;
 }

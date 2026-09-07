@@ -45,6 +45,9 @@ struct JpegContext {
 
   PixelCache cache;
   bool caching{false};
+  CooperativeCancellation cancellation{};
+  // JPEGDEC can return success after an aborted draw; keep cancellation sticky.
+  bool cancelled{false};
   uint32_t lastYieldMs{0};
 };
 
@@ -56,7 +59,7 @@ void* jpegOpen(const char* filename, int32_t* size) {
     LOG_ERR("JPG", "OOM: JPEG file handle (%u free, %u max alloc)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     return nullptr;
   }
-  if (!Storage.openFileForRead("JPG", std::string(filename), *f)) {
+  if (!Storage.openFileForRead("JPG", filename, *f)) {
     return nullptr;
   }
   *size = f->size();
@@ -181,7 +184,12 @@ constexpr int32_t FP_MASK = FP_ONE - 1;
 
 int jpegDrawCallback(JPEGDRAW* pDraw) {
   JpegContext* ctx = reinterpret_cast<JpegContext*>(pDraw->pUser);
-  if (!ctx || !ctx->config || !ctx->renderer) return 0;
+  if (!ctx || !ctx->config) return 0;
+
+  if (ctx->cancellation.requested()) {
+    ctx->cancelled = true;
+    return 0;
+  }
 
   ImageToFramebufferDecoder::yieldDuringDecode(ctx->lastYieldMs);
 
@@ -200,7 +208,6 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   const int32_t invScaleFPX = ctx->invScaleFPX;
   const int32_t fineScaleFPY = ctx->fineScaleFPY;
   const int32_t invScaleFPY = ctx->invScaleFPY;
-  GfxRenderer& renderer = *ctx->renderer;
   const int cfgX = ctx->config->x;
   const int cfgY = ctx->config->y;
   const int blockX = pDraw->x;
@@ -230,7 +237,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 
   // Pre-compute orientation and render-mode state once per callback invocation
   DirectPixelWriter pw;
-  pw.init(renderer);
+  if (ctx->renderer) pw.init(*ctx->renderer);
 
   // The cache streams to disk one MCU-row band at a time. Flushing rows below
   // this block (raster order guarantees they are final) repositions the band;
@@ -243,6 +250,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
     if (!ctx->cache.advanceTo(dstYStart)) {
       caching = false;
       ctx->caching = false;
+      if (!ctx->renderer) return 0;
     } else {
       cw.init(ctx->cache.buffer, ctx->cache.bytesPerRow, ctx->cache.bandRows, ctx->cache.originX);
       cacheOriginY = ctx->config->y + ctx->cache.bandStart;
@@ -253,7 +261,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   if (fineScaleFPX == FP_ONE && fineScaleFPY == FP_ONE) {
     for (int dstY = dstYStart; dstY < dstYEnd; dstY++) {
       const int outY = cfgY + dstY;
-      pw.beginRow(outY);
+      if (ctx->renderer) pw.beginRow(outY);
       if (caching) cw.beginRow(outY, cacheOriginY);
       const uint8_t* row = &pixels[(dstY - blockY) * stride];
       for (int dstX = dstXStart; dstX < dstXEnd; dstX++) {
@@ -266,7 +274,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
           dithered = gray / 85;
           if (dithered > 3) dithered = 3;
         }
-        pw.writePixel(outX, dithered);
+        if (ctx->renderer) pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
     }
@@ -287,7 +295,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 
     for (int dstY = dstYStart; dstY < dstYEnd; dstY++) {
       const int outY = cfgY + dstY;
-      pw.beginRow(outY);
+      if (ctx->renderer) pw.beginRow(outY);
       if (caching) cw.beginRow(outY, cacheOriginY);
       const int32_t srcFyFP = dstY * invScaleFPY;
       const int32_t fy = srcFyFP & FP_MASK;
@@ -325,7 +333,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
           dithered = gray / 85;
           if (dithered > 3) dithered = 3;
         }
-        pw.writePixel(outX, dithered);
+        if (ctx->renderer) pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
 
@@ -348,7 +356,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
           dithered = gray / 85;
           if (dithered > 3) dithered = 3;
         }
-        pw.writePixel(outX, dithered);
+        if (ctx->renderer) pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
 
@@ -374,7 +382,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
           dithered = gray / 85;
           if (dithered > 3) dithered = 3;
         }
-        pw.writePixel(outX, dithered);
+        if (ctx->renderer) pw.writePixel(outX, dithered);
         if (caching) cw.writePixel(outX, dithered);
       }
     }
@@ -384,7 +392,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
   // === Nearest-neighbor (downscale: fineScale < 1.0) ===
   for (int dstY = dstYStart; dstY < dstYEnd; dstY++) {
     const int outY = cfgY + dstY;
-    pw.beginRow(outY);
+    if (ctx->renderer) pw.beginRow(outY);
     if (caching) cw.beginRow(outY, cacheOriginY);
     const int32_t srcFyFP = dstY * invScaleFPY;
     int ly = (srcFyFP >> FP_SHIFT) - blockY;
@@ -407,7 +415,7 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
         dithered = gray / 85;
         if (dithered > 3) dithered = 3;
       }
-      pw.writePixel(outX, dithered);
+      if (ctx->renderer) pw.writePixel(outX, dithered);
       if (caching) cw.writePixel(outX, dithered);
     }
   }
@@ -417,9 +425,9 @@ int jpegDrawCallback(JPEGDRAW* pDraw) {
 
 }  // namespace
 
-bool JpegToFramebufferConverter::getDimensionsStatic(const std::string& imagePath, ImageDimensions& out) {
+bool JpegToFramebufferConverter::getDimensionsStatic(const char* imagePath, ImageDimensions& out) {
   HeapObject<JPEGDEC> jpeg;
-  if (!initJpegDecoder(jpeg, imagePath.c_str())) {
+  if (!initJpegDecoder(jpeg, imagePath)) {
     LOG_ERR("JPG", "Failed to allocate JPEG decoder for dimensions");
     return false;
   }
@@ -427,9 +435,9 @@ bool JpegToFramebufferConverter::getDimensionsStatic(const std::string& imagePat
   // JPEGDEC does not close a file when JPEGInit rejects a malformed header,
   // and close() is not idempotent. Keep exactly one close after every attempt.
   const auto closeJpeg = ScopedCleanup{[&jpeg] { jpeg->close(); }};
-  int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, nullptr);
+  int rc = jpeg->open(imagePath, jpegOpen, jpegClose, jpegRead, jpegSeek, nullptr);
   if (rc != 1) {
-    LOG_ERR("JPG", "Failed to open JPEG for dimensions (err=%d): %s", jpeg->getLastError(), imagePath.c_str());
+    LOG_ERR("JPG", "Failed to open JPEG for dimensions (err=%d): %s", jpeg->getLastError(), imagePath);
     return false;
   }
 
@@ -441,24 +449,47 @@ bool JpegToFramebufferConverter::getDimensionsStatic(const std::string& imagePat
 
 bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath, GfxRenderer& renderer,
                                                      const RenderConfig& config) {
+  return decode(imagePath.c_str(), &renderer, config, renderer.getScreenWidth(), renderer.getScreenHeight(), {});
+}
+
+bool JpegToFramebufferConverter::decodeToCache(const char* imagePath, const CacheDecodeConfig& config) {
+  if (config.cancellation.requested()) return false;
+  if (!config.valid()) {
+    LOG_ERR("IMG", "Invalid cache-only geometry or output path");
+    return false;
+  }
+  const bool success =
+      decode(imagePath, nullptr, config.render, config.screenWidth, config.screenHeight, config.cancellation);
+  if (!success && Storage.exists(config.render.cacheOutputPath()) && !Storage.remove(config.render.cacheOutputPath()))
+    LOG_ERR("IMG", "Cannot remove failed cache: %s", config.render.cacheOutputPath());
+  return success;
+}
+
+bool JpegToFramebufferConverter::decode(const char* imagePath, GfxRenderer* renderer, const RenderConfig& config,
+                                        int screenWidth, int screenHeight, CooperativeCancellation cancellation) {
+  if (cancellation.requested()) return false;
   HeapObject<JPEGDEC> jpeg;
-  if (!initJpegDecoder(jpeg, imagePath.c_str())) {
+  if (!initJpegDecoder(jpeg, imagePath)) {
     LOG_ERR("JPG", "Failed to allocate JPEG decoder");
     return false;
   }
 
   JpegContext ctx;
-  ctx.renderer = &renderer;
+  ctx.renderer = renderer;
+  ctx.cancellation = cancellation;
   ctx.config = &config;
-  ctx.screenWidth = renderer.getScreenWidth();
-  ctx.screenHeight = renderer.getScreenHeight();
+  ctx.screenWidth = screenWidth;
+  ctx.screenHeight = screenHeight;
 
   // Keep exactly one close after every attempted open, including malformed
   // JPEGs where JPEGDEC returns from JPEGInit without closing its file handle.
-  const auto closeJpeg = ScopedCleanup{[&jpeg] { jpeg->close(); }};
-  int rc = jpeg->open(imagePath.c_str(), jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
+  // The guard skips a decoder already closed and released after decoding.
+  const auto closeJpeg = ScopedCleanup{[&jpeg] {
+    if (jpeg) jpeg->close();
+  }};
+  int rc = jpeg->open(imagePath, jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDrawCallback);
   if (rc != 1) {
-    LOG_ERR("JPG", "Failed to open JPEG (err=%d): %s", jpeg->getLastError(), imagePath.c_str());
+    LOG_ERR("JPG", "Failed to open JPEG (err=%d): %s", jpeg->getLastError(), imagePath);
     return false;
   }
 
@@ -511,8 +542,7 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   }
 
   if (destWidth <= 0 || destHeight <= 0) {
-    LOG_ERR("JPG", "Degenerate output dimensions %dx%d for %s, skipping render", destWidth, destHeight,
-            imagePath.c_str());
+    LOG_ERR("JPG", "Degenerate output dimensions %dx%d for %s, skipping render", destWidth, destHeight, imagePath);
     return false;
   }
 
@@ -538,34 +568,45 @@ bool JpegToFramebufferConverter::decodeToFramebuffer(const std::string& imagePat
   // Start streaming the pixel cache to disk. The band only needs to hold the
   // tallest single decode block: a JPEGDEC MCU cell is at most 16 scaled-source
   // rows tall, which our fine scale maps to this many output rows.
-  ctx.caching = !config.cachePath.empty();
+  ctx.caching = config.cacheOutputPath()[0] != '\0';
   if (ctx.caching) {
     const int maxBlockDstRows = (int)(((int64_t)16 * ctx.fineScaleFPY) >> FP_SHIFT) + 2;
-    if (!ctx.cache.begin(config.cachePath, destWidth, destHeight, config.x, config.y, maxBlockDstRows)) {
-      LOG_ERR("JPG", "Failed to start cache stream, continuing without caching");
+    if (!ctx.cache.begin(config.cacheOutputPath(), destWidth, destHeight, config.x, config.y, maxBlockDstRows,
+                         cancellation)) {
+      LOG_ERR("JPG", "Failed to start cache stream");
       ctx.caching = false;
     }
+  }
+
+  if (cancellation.requested() || (!renderer && !ctx.caching)) {
+    ctx.cache.abort();
+    return false;
   }
 
   ctx.lastYieldMs = millis();
   const uint32_t decodeStarted = millis();
   rc = jpeg->decode(0, 0, jpegScaleOption);
-  LOG_DBG("JPG", "Decoded %s: ok=%d time=%ums", imagePath.c_str(), rc == 1,
-          static_cast<unsigned>(millis() - decodeStarted));
+  LOG_DBG("JPG", "Decoded %s: ok=%d time=%ums", imagePath, rc == 1, static_cast<unsigned>(millis() - decodeStarted));
 
-  if (rc != 1) {
+  if (rc != 1 || ctx.cancelled || cancellation.requested() || (!renderer && !ctx.caching)) {
     LOG_ERR("JPG", "Decode failed (rc=%d, lastError=%d)", rc, jpeg->getLastError());
-    if (ctx.caching) ctx.cache.abort();
+    ctx.cache.abort();
     return false;
   }
+
+  // Release the decoder before finalizing the cache so its memory is free for
+  // the cache flush; closeJpeg then sees an empty owner and does nothing.
+  jpeg->close();
+  jpeg.reset();
 
   // Finalize the streamed cache file. Note: a flush failure mid-decode clears
   // ctx.caching (the partial file is dropped), so re-read the flag here.
   if (ctx.caching) {
-    ctx.cache.finalize();
+    const bool cached = ctx.cache.finalize();
+    if (!renderer) return cached;
   }
 
-  return true;
+  return renderer != nullptr;
 }
 
 bool JpegToFramebufferConverter::supportsFormat(const std::string& extension) {

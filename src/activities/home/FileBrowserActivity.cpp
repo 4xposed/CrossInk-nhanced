@@ -7,6 +7,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <MangaBook.h>
 #include <Memory.h>
 #include <SdCardFontSystem.h>
 #include <Txt.h>
@@ -37,6 +38,7 @@
 #include "components/icons/listIcons.h"
 #include "components/themes/minimal/MinimalTheme.h"
 #include "fontIds.h"
+#include "util/BookFolderMutation.h"
 #include "util/BookMoveUtils.h"
 
 namespace fui = freeink::ui;
@@ -110,11 +112,6 @@ bool hasHeapForFileEntryAppend(const std::vector<std::string>& files, size_t ent
          ESP.getMaxAllocHeap() >= largestNeeded + FILE_BROWSER_APPEND_MIN_MAX_ALLOC_AFTER_ALLOC;
 }
 
-bool hasFileMetadata(const std::string& path) {
-  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasAnkiDeckExtension(path) ||
-         FsHelpers::hasXtcExtension(path) || FsHelpers::hasTxtExtension(path) || FsHelpers::hasMarkdownExtension(path);
-}
-
 bool isSupportedBrowserFile(std::string_view filename) {
   return FsHelpers::hasEpubExtension(filename) || FsHelpers::hasAnkiDeckExtension(filename) ||
          FsHelpers::hasXtcExtension(filename) || FsHelpers::hasTxtExtension(filename) ||
@@ -169,27 +166,6 @@ bool containsHiddenPathSegment(const std::string& path) {
     segmentStart = segmentEnd + 1;
   }
   return false;
-}
-
-void collectMetadataPathsRecursively(const std::string& dirPath, std::vector<std::string>& paths) {
-  auto dir = Storage.open(dirPath.c_str());
-  if (!dir || !dir.isDirectory()) {
-    LOG_ERR("FileBrowser", "Failed to scan directory metadata before delete: %s", dirPath.c_str());
-    return;
-  }
-
-  char name[256];
-  for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
-    file.getName(name, sizeof(name));
-    const std::string childPath = buildFullPath(dirPath, name);
-    if (file.isDirectory()) {
-      collectMetadataPathsRecursively(childPath, paths);
-    } else if (hasFileMetadata(childPath)) {
-      paths.push_back(childPath);
-    }
-    file.close();
-  }
-  dir.close();
 }
 
 std::string getFileName(std::string filename);
@@ -434,9 +410,9 @@ void FileBrowserActivity::promptDeleteFile(const std::string& fullPath, const st
       return;
     }
 
-    BookActions::clearFileMetadata(fullPath);
-    if (!Storage.remove(fullPath.c_str())) {
-      LOG_ERR("FileBrowser", "Failed to delete file: %s", fullPath.c_str());
+    const auto result = BookFolderMutation::remove(fullPath.c_str());
+    if (result != BookFolderMutation::Result::Complete) {
+      LOG_ERR("FileBrowser", "Delete failed: %s", BookFolderMutation::error(result));
       return;
     }
     ImageFolderIndex::invalidateForPath(fullPath.c_str());
@@ -476,19 +452,13 @@ void FileBrowserActivity::promptDeleteDirectory(const std::string& fullPath, con
       return;
     }
 
-    std::vector<std::string> metadataPaths;
-    collectMetadataPathsRecursively(dirPath, metadataPaths);
-
-    if (!Storage.removeDir(dirPath.c_str())) {
-      LOG_ERR("FileBrowser", "Failed to delete directory: %s", dirPath.c_str());
+    const auto result = BookFolderMutation::remove(dirPath.c_str());
+    if (result != BookFolderMutation::Result::Complete) {
+      LOG_ERR("FileBrowser", "Delete failed: %s", BookFolderMutation::error(result));
       return;
     }
     ImageFolderIndex::invalidateForPath(dirPath.c_str());
     sdFontSystem.markRegistryDirtyForPath(dirPath.c_str());
-
-    for (const auto& metadataPath : metadataPaths) {
-      BookActions::clearFileMetadata(metadataPath);
-    }
 
     const std::string favoritePrefix = dirPath + "/";
     if (!APP_STATE.favoriteSleepImagePath.empty() && APP_STATE.favoriteSleepImagePath.rfind(favoritePrefix, 0) == 0) {
@@ -522,51 +492,93 @@ void FileBrowserActivity::promptDeleteDirectory(const std::string& fullPath, con
 
 void FileBrowserActivity::showDirectoryActionMenu(const std::string& entry, bool ignoreInitialConfirmRelease) {
   const std::string fullPath = normalizeDirectoryPath(buildFullPath(basepath, entry));
+  const bool isManga = manga::MangaBook::isMangaFolder(fullPath.c_str());
   const bool useDefaultFolders = isDefaultSleepFolderPath(fullPath) || isPreferredSleepFolder(fullPath);
-  std::vector<FileBrowserActionActivity::MenuItem> items;
-  items.push_back({useDefaultFolders ? FileBrowserAction::ClearSleepFolder : FileBrowserAction::SetSleepFolder,
-                   useDefaultFolders ? StrId::STR_USE_DEFAULT_SLEEP_FOLDERS : StrId::STR_SET_AS_SLEEP_FOLDER});
-  items.push_back({FileBrowserAction::Delete, StrId::STR_DELETE});
+  std::vector<FileBrowserActionActivity::MenuItem> items =
+      isManga ? BookActions::buildBookActionItems(fullPath, false)
+              : std::vector<FileBrowserActionActivity::MenuItem>{
+                    {useDefaultFolders ? FileBrowserAction::ClearSleepFolder : FileBrowserAction::SetSleepFolder,
+                     useDefaultFolders ? StrId::STR_USE_DEFAULT_SLEEP_FOLDERS : StrId::STR_SET_AS_SLEEP_FOLDER},
+                    {FileBrowserAction::Delete, StrId::STR_DELETE}};
 
-  startActivityForResult(std::make_unique<FileBrowserActionActivity>(renderer, mappedInput, getFileName(entry),
-                                                                     std::move(items), ignoreInitialConfirmRelease),
-                         [this, fullPath, entry](const ActivityResult& result) {
-                           longPressConfirmHandled = false;
-                           if (result.isCancelled) {
-                             return;
-                           }
+  startActivityForResult(
+      std::make_unique<FileBrowserActionActivity>(renderer, mappedInput, getFileName(entry), std::move(items),
+                                                  ignoreInitialConfirmRelease),
+      [this, fullPath, entry](const ActivityResult& result) {
+        longPressConfirmHandled = false;
+        if (result.isCancelled) {
+          return;
+        }
 
-                           const auto action =
-                               static_cast<FileBrowserAction>(std::get<FileBrowserActionResult>(result.data).action);
-                           switch (action) {
-                             case FileBrowserAction::Delete:
-                               promptDeleteDirectory(fullPath, entry);
-                               return;
-                             case FileBrowserAction::SetSleepFolder:
-                               setPreferredSleepFolder(fullPath);
-                               return;
-                             case FileBrowserAction::ClearSleepFolder:
-                               clearPreferredSleepFolder();
-                               return;
-                             case FileBrowserAction::DeleteCache:
-                             case FileBrowserAction::DeleteStats:
-                             case FileBrowserAction::ToggleCompleted:
-                             case FileBrowserAction::RemoveFromRecents:
-                             case FileBrowserAction::PinFavorite:
-                             case FileBrowserAction::UnpinFavorite:
-                             case FileBrowserAction::PinBootFavorite:
-                             case FileBrowserAction::UnpinBootFavorite:
-                             case FileBrowserAction::ViewBookmarks:
-                             case FileBrowserAction::ViewClippings:
-                             case FileBrowserAction::DeleteBookmarks:
-                             case FileBrowserAction::DeleteClippings:
-                             case FileBrowserAction::EpubRenderMode:
-                             case FileBrowserAction::ResetReaderSettings:
-                             case FileBrowserAction::SendNearby:
-                             case FileBrowserAction::Rename:
-                               return;
-                           }
-                         });
+        const auto action = static_cast<FileBrowserAction>(std::get<FileBrowserActionResult>(result.data).action);
+        switch (action) {
+          case FileBrowserAction::Delete:
+            promptDeleteDirectory(fullPath, entry);
+            return;
+          case FileBrowserAction::SetSleepFolder:
+            setPreferredSleepFolder(fullPath);
+            return;
+          case FileBrowserAction::ClearSleepFolder:
+            clearPreferredSleepFolder();
+            return;
+          case FileBrowserAction::DeleteCache:
+            if (auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(
+                    renderer, mappedInput, BookActions::confirmationHeading(StrId::STR_DELETE_CACHE),
+                    getFileName(entry))) {
+              startActivityForResult(std::move(confirmation), [this, fullPath](const ActivityResult& result) {
+                if (!result.isCancelled && !BookActions::clearBookCache(fullPath)) {
+                  LOG_ERR("FileBrowser", "Failed to clear manga cache: %s", fullPath.c_str());
+                }
+                requestUpdate();
+              });
+            } else {
+              LOG_ERR("FileBrowser", "Failed to allocate manga cache confirmation");
+            }
+            return;
+          case FileBrowserAction::DeleteStats:
+            if (auto confirmation = makeUniqueNoThrow<ConfirmationActivity>(
+                    renderer, mappedInput, BookActions::confirmationHeading(StrId::STR_DELETE_BOOK_STATS),
+                    getFileName(entry))) {
+              startActivityForResult(std::move(confirmation), [this, fullPath](const ActivityResult& result) {
+                if (!result.isCancelled && !BookActions::deleteBookStats(fullPath)) {
+                  LOG_ERR("FileBrowser", "Failed to delete manga stats: %s", fullPath.c_str());
+                }
+                requestUpdate();
+              });
+            } else {
+              LOG_ERR("FileBrowser", "Failed to allocate manga stats confirmation");
+            }
+            return;
+          case FileBrowserAction::ToggleCompleted:
+            BookActions::startCompletionEdit(
+                *this, renderer, mappedInput, fullPath, getFileName(entry), [this](const ActivityResult& result) {
+                  if (!result.isCancelled) {
+                    const auto* completed = std::get_if<OptionSelectionResult>(&result.data);
+                    if (completed) {
+                      BookActions::drawToast(renderer,
+                                             completed->index ? tr(STR_MARKED_FINISHED) : tr(STR_MARKED_UNFINISHED));
+                      delay(COMPLETED_FEEDBACK_MS);
+                    }
+                  }
+                  requestUpdate();
+                });
+            return;
+          case FileBrowserAction::RemoveFromRecents:
+          case FileBrowserAction::PinFavorite:
+          case FileBrowserAction::UnpinFavorite:
+          case FileBrowserAction::PinBootFavorite:
+          case FileBrowserAction::UnpinBootFavorite:
+          case FileBrowserAction::ViewBookmarks:
+          case FileBrowserAction::ViewClippings:
+          case FileBrowserAction::DeleteBookmarks:
+          case FileBrowserAction::DeleteClippings:
+          case FileBrowserAction::EpubRenderMode:
+          case FileBrowserAction::ResetReaderSettings:
+          case FileBrowserAction::SendNearby:
+          case FileBrowserAction::Rename:
+            return;
+        }
+      });
 }
 
 void FileBrowserActivity::pinSleepFavorite(const std::string& fullPath) {
@@ -768,16 +780,21 @@ void FileBrowserActivity::showFileActionMenu(const std::string& entry, bool igno
                 });
             return;
           case FileBrowserAction::ToggleCompleted:
-            if (BookActions::toggleBookCompleted(fullPath, getFileName(entry), completedFeedbackIsFinished)) {
-              pendingCompletedFeedback = true;
-              completedFeedbackShowTime = millis();
-            }
-            {
-              RenderLock lock(*this);
-              loadFilesLocked();
-              selectorIndex = entryCount() == 0 ? 0 : std::min(selectorIndex, entryCount() - 1);
-            }
-            requestUpdate(true);
+            BookActions::startCompletionEdit(
+                *this, renderer, mappedInput, fullPath, getFileName(entry), [this](const ActivityResult& result) {
+                  const auto* completed = std::get_if<OptionSelectionResult>(&result.data);
+                  if (!result.isCancelled && completed) {
+                    completedFeedbackIsFinished = completed->index != 0;
+                    pendingCompletedFeedback = true;
+                    completedFeedbackShowTime = millis();
+                  }
+                  {
+                    RenderLock lock(*this);
+                    loadFilesLocked();
+                    selectorIndex = entryCount() == 0 ? 0 : std::min(selectorIndex, entryCount() - 1);
+                  }
+                  requestUpdate(true);
+                });
             return;
           case FileBrowserAction::EpubRenderMode: {
             const uint8_t currentIndex =
@@ -1046,6 +1063,14 @@ void FileBrowserActivity::activateSelected() {
     setResult(std::move(res));
     finish();
     return;
+  }
+
+  if (mode == Mode::Books && isDirectory) {
+    const std::string folder = buildFullPath(basepath, entry.substr(0, entry.size() - 1));
+    if (manga::MangaBook::isMangaFolder(folder.c_str())) {
+      onSelectBook(folder);
+      return;
+    }
   }
 
   std::string fullPath;

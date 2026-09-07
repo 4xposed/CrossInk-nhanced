@@ -28,6 +28,12 @@ struct BookmarkedBookEntry {
 
 class BookmarkStore {
  public:
+  // Bounded transport adapter: preserve the current/legacy bytes separately;
+  // rewrite only the embedded path, with no merge or source deletion.
+  static bool stageForFolderMove(const char* source, const char* oldBook, const char* newBook, const char* destination,
+                                 uint8_t* scratch, size_t capacity);
+  static bool folderMutationPath(const char* book, bool legacy, char* out, size_t capacity);
+  static bool deleteForFilePathChecked(const std::string& filePath, const std::string& bookType);
   enum class AddResult : uint8_t {
     Added,
     LimitReached,
@@ -48,7 +54,7 @@ class BookmarkStore {
   static BookmarkStore& getInstance() { return instance; }
 
   // Load bookmarks for a book. Returns true even when no file exists yet (empty store).
-  // bookType must be "epub", "xtc", or "txt" — used to form the cache filename.
+  // bookType must be "epub", "xtc", "txt", or "manga" — used to form the cache filename.
   bool loadForBook(const std::string& filePath, const std::string& title, const std::string& author,
                    const std::string& bookType);
   void unload();
@@ -62,6 +68,8 @@ class BookmarkStore {
 
   // Flush to disk if dirty. Called automatically by add/remove; also call from reader onExit().
   void saveToFile();
+  // Retains dirty state on write, sync, close or removal failure for a later retry.
+  bool saveToFileChecked();
 
   // Remove all bookmarks for the current book and delete its bookmark file.
   void clearAll();
@@ -70,7 +78,7 @@ class BookmarkStore {
   static bool hasAnyBookmarks();
 
   // Delete the bookmark file for a given file path and book type without loading the book.
-  // bookType must be "epub", "xtc", or "txt".
+  // bookType must be "epub", "xtc", "txt", or "manga".
   static void deleteForFilePath(const std::string& filePath, const std::string& bookType);
 
   // Rewrite bookmark storage to follow a file move/rename while preserving existing bookmarks.

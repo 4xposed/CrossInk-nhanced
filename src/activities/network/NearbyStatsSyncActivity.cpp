@@ -92,14 +92,10 @@ constexpr const char* CROSSPOINT_ROOT = "/.crosspoint";
 constexpr const char* GLOBAL_STATS_PATH = "/.crosspoint/global_stats.bin";
 constexpr const char* SYNCED_STATS_DIR = "/.crosspoint/synced_stats";
 constexpr uint8_t ESPNOW_CHANNEL = 1;
-constexpr uint8_t PROTOCOL_VERSION = 1;
-constexpr uint8_t MIN_STATS_BYTES = static_cast<uint8_t>(GlobalReadingStats::MIN_SUPPORTED_FILE_SIZE);
 constexpr uint8_t MAX_STATS_BYTES = static_cast<uint8_t>(GlobalReadingStats::CURRENT_FILE_SIZE);
 constexpr uint8_t PACKET_HEADER_BYTES = 14;
 constexpr uint8_t MAX_DEVICE_NAME_BYTES = static_cast<uint8_t>(CrossPointSettings::MAX_DEVICE_NAME_LENGTH);
 constexpr uint32_t HELLO_INTERVAL_MS = 750;
-constexpr uint32_t STATS_RETRY_INTERVAL_MS = 750;
-constexpr uint32_t SYNC_TIMEOUT_MS = 12000;
 constexpr uint8_t BROADCAST_MAC[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
 NearbyStatsSyncActivity* activeActivity = nullptr;
@@ -137,69 +133,16 @@ std::string syncedStatsPathForDeviceMac(const std::array<uint8_t, 6>& mac) {
   return std::string(SYNCED_STATS_DIR) + "/" + statsFileNameForDeviceMac(mac);
 }
 
-bool isZeroMac(const std::array<uint8_t, 6>& mac) { return mac == std::array<uint8_t, 6>{}; }
-
 bool isValidStatsPayload(const uint8_t* data, const uint8_t size) {
-  return (size == MIN_STATS_BYTES && data[0] == 1) || (size == 17 && data[0] == 2) ||
-         (size == MAX_STATS_BYTES && data[0] == GlobalReadingStats::CURRENT_FILE_VERSION);
+  return validateGlobalReadingStatsSummary(data, size);
 }
 
 bool ensureSyncedStatsDirectory() {
   return Storage.ensureDirectoryExists(CROSSPOINT_ROOT) && Storage.ensureDirectoryExists(SYNCED_STATS_DIR);
 }
 
-bool readSmallFile(const char* path, std::array<uint8_t, MAX_STATS_BYTES>& out, uint8_t& outSize) {
-  outSize = 0;
-  FsFile file;
-  if (!Storage.openFileForRead(LOG_TAG, path, file)) return false;
-  const size_t fileSize = file.fileSize();
-  if (fileSize < MIN_STATS_BYTES || fileSize > MAX_STATS_BYTES) {
-    file.close();
-    return false;
-  }
-
-  const int read = file.read(out.data(), fileSize);
-  file.close();
-  if (read != static_cast<int>(fileSize) || !isValidStatsPayload(out.data(), static_cast<uint8_t>(fileSize)))
-    return false;
-  outSize = static_cast<uint8_t>(fileSize);
-  return true;
-}
-
-bool writeSyncedStatsFile(const std::string& path, const uint8_t* data, const uint8_t size) {
-  if (!isValidStatsPayload(data, size) || !ensureSyncedStatsDirectory()) return false;
-
-  const std::string tmpPath = path + ".part";
-  if (Storage.exists(tmpPath.c_str())) Storage.remove(tmpPath.c_str());
-
-  FsFile file;
-  if (!Storage.openFileForWrite(LOG_TAG, tmpPath, file)) return false;
-  const size_t written = file.write(data, size);
-  if (written != size) {
-    file.close();
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-  file.flush();
-  if (!file.sync()) {
-    file.close();
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-  if (!file.close()) {
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-
-  if (Storage.exists(path.c_str()) && !Storage.remove(path.c_str())) {
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-  if (!Storage.rename(tmpPath.c_str(), path.c_str())) {
-    Storage.remove(tmpPath.c_str());
-    return false;
-  }
-  return true;
+bool readSmallFile(const char* path, std::array<uint8_t, MAX_STATS_BYTES>& out, uint8_t& size) {
+  return readGlobalReadingStatsSummary(path, out.data(), size);
 }
 
 void onEspNowReceive(const esp_now_recv_info_t* info, const uint8_t* data, int length) {
@@ -323,7 +266,10 @@ bool NearbyStatsSyncActivity::prepareLocalStats() {
   }
 
   // Ensure a valid local stats payload exists before exchanging stats.
-  GlobalReadingStats::load().save();
+  if (!GlobalReadingStats::load().save()) {
+    setError("local stats save failed");
+    return false;
+  }
 
   if (!readSmallFile(GLOBAL_STATS_PATH, localStats_, localStatsSize_)) {
     setError("local stats unavailable");
@@ -335,18 +281,14 @@ bool NearbyStatsSyncActivity::prepareLocalStats() {
 }
 
 void NearbyStatsSyncActivity::startSync() {
+  protocol_.start(millis());
   errorMessage_.clear();
   peerSeen_ = false;
-  peerStatsSaved_ = false;
-  localStatsSent_ = false;
-  localStatsAcked_ = false;
   peerSourceMac_ = {};
   peerDeviceMac_ = {};
   peerId_.clear();
   peerName_.clear();
-  syncStartedMs_ = millis();
   lastHelloMs_ = 0;
-  lastStatsSendMs_ = 0;
 
   if (!prepareLocalStats()) return;
 
@@ -355,50 +297,17 @@ void NearbyStatsSyncActivity::startSync() {
 }
 
 void NearbyStatsSyncActivity::enqueueEspNowPacket(const uint8_t* sourceMac, const uint8_t* data, const int length) {
-  if (!eventMutex_ || !sourceMac || !data || length < PACKET_HEADER_BYTES) return;
-  if (data[0] != 'C' || data[1] != 'I' || data[2] != 'S' || data[3] != 'S') return;
-  if (data[4] != PROTOCOL_VERSION) return;
-
+  if (!eventMutex_ || length < 0) return;
   SyncEvent event;
-  const PacketType packetType = static_cast<PacketType>(data[5]);
-  event.type = packetType;
-  event.statsSize = data[6];
-  std::copy(sourceMac, sourceMac + event.sourceMac.size(), event.sourceMac.begin());
-  std::copy(data + 8, data + 14, event.deviceMac.begin());
-
-  const int payloadLength = length - PACKET_HEADER_BYTES;
-  const int expectedLength = PACKET_HEADER_BYTES + (event.type == PacketType::STATS ? event.statsSize : 0);
-  if (packetType != PacketType::HELLO && packetType != PacketType::STATS && packetType != PacketType::ACK &&
-      packetType != PacketType::NAME)
+  if (!nearby_stats::decode(sourceMac, data, static_cast<size_t>(length), event) || event.deviceMac == localDeviceMac_)
     return;
-  if (event.deviceMac == localDeviceMac_) return;
-  if (packetType == PacketType::STATS) {
-    if (length != expectedLength || event.statsSize > event.stats.size() ||
-        !isValidStatsPayload(data + PACKET_HEADER_BYTES, event.statsSize)) {
-      event.type = PacketType::INVALID_STATS;
-      event.statsSize = 0;
-    } else {
-      std::copy(data + PACKET_HEADER_BYTES, data + PACKET_HEADER_BYTES + event.statsSize, event.stats.begin());
-    }
-  } else if (packetType == PacketType::NAME) {
-    if (event.statsSize < CrossPointSettings::MIN_DEVICE_NAME_LENGTH || event.statsSize > MAX_DEVICE_NAME_BYTES ||
-        payloadLength != event.statsSize) {
-      return;
-    }
-    memcpy(event.deviceName.data(), data + PACKET_HEADER_BYTES, event.statsSize);
-    event.deviceName[event.statsSize] = '\0';
-  } else if (length != expectedLength) {
-    return;
-  } else if (packetType == PacketType::HELLO || packetType == PacketType::ACK) {
-    if (event.statsSize != 0) return;
-  }
 
   if (xSemaphoreTake(eventMutex_, 0) != pdTRUE) return;
   for (uint8_t offset = 0; offset < eventCount_; ++offset) {
     const uint8_t eventIndex = static_cast<uint8_t>((eventHead_ + offset) % MAX_SYNC_EVENTS);
     SyncEvent& queuedEvent = events_[eventIndex];
     if (queuedEvent.type == event.type && queuedEvent.sourceMac == event.sourceMac &&
-        queuedEvent.deviceMac == event.deviceMac) {
+        queuedEvent.deviceMac == event.deviceMac && queuedEvent.capability == event.capability) {
       queuedEvent = event;
       xSemaphoreGive(eventMutex_);
       return;
@@ -440,6 +349,7 @@ void NearbyStatsSyncActivity::processEvents() {
     }
 
     if (hasOverflow) {
+      protocol_.overflow();
       setError("sync event queue overflow");
       return;
     }
@@ -448,70 +358,64 @@ void NearbyStatsSyncActivity::processEvents() {
   }
 }
 
+nearby_stats::Session::Callbacks NearbyStatsSyncActivity::protocolCallbacks() {
+  return {this,
+          [](void* context, PacketType type) {
+            auto& activity = *static_cast<NearbyStatsSyncActivity*>(context);
+            activity.peerSourceMac_ = activity.protocol_.sourceMac;
+            activity.peerDeviceMac_ = activity.protocol_.deviceMac;
+            return activity.sendPacket(type, activity.peerSourceMac_.data());
+          },
+          [](void*, const SyncEvent& event) {
+            return ensureSyncedStatsDirectory() &&
+                   nearby_stats::publishSummary(syncedStatsPathForDeviceMac(event.deviceMac).c_str(),
+                                                event.stats.data(), event.statsSize);
+          }};
+}
+void NearbyStatsSyncActivity::applyProtocolState() {
+  peerSeen_ = protocol_.peerSeen;
+  peerSourceMac_ = protocol_.sourceMac;
+  peerDeviceMac_ = protocol_.deviceMac;
+  using S = nearby_stats::Session::State;
+  switch (protocol_.state) {
+    case S::Discovering:
+      break;
+    case S::Syncing:
+      setState(State::SYNCING);
+      break;
+    case S::Synced:
+      setState(State::SYNCED);
+      break;
+    case S::VersionMismatch:
+      setError(tr(STR_NEARBY_STATS_VERSION_MISMATCH));
+      break;
+    case S::StorageError:
+      setError("could not save stats");
+      break;
+    case S::Timeout:
+      setError(peerSeen_ ? "stats sync timed out" : "no reader found");
+      break;
+    case S::Overflow:
+      setError("sync event queue overflow");
+      break;
+  }
+}
 void NearbyStatsSyncActivity::handleEvent(const SyncEvent& event) {
   if (state_ == State::ERROR) return;
-
-  if (event.type == PacketType::ACK) {
-    if (state_ != State::SYNCING || !localStatsSent_ || event.deviceMac != peerDeviceMac_) return;
-    localStatsAcked_ = true;
-    return;
+  if (state_ != State::DISCOVERING && state_ != State::SYNCING &&
+      !(state_ == State::SYNCED && event.type == PacketType::STATS && event.deviceMac == peerDeviceMac_)) {
+    if (event.type == PacketType::ACK || event.type == PacketType::NAME) return;
+    protocol_.start(millis());
+    if (!prepareLocalStats()) return;
   }
-
-  if (event.type == PacketType::NAME) {
-    if (event.deviceMac == peerDeviceMac_ || isZeroMac(peerDeviceMac_)) {
-      peerSourceMac_ = event.sourceMac;
-      peerDeviceMac_ = event.deviceMac;
-      peerId_ = bytesToHex(peerDeviceMac_.data(), peerDeviceMac_.size());
+  protocol_.receive(event, millis(), protocolCallbacks());
+  applyProtocolState();
+  if (event.deviceMac == peerDeviceMac_ && event.sourceMac == peerSourceMac_) {
+    peerId_ = bytesToHex(peerDeviceMac_.data(), peerDeviceMac_.size());
+    if (event.type == PacketType::NAME) {
       peerName_ = event.deviceName.data();
       requestUpdate();
     }
-    return;
-  }
-
-  const bool startingPassiveSync = state_ != State::DISCOVERING && state_ != State::SYNCING;
-  if (startingPassiveSync) {
-    errorMessage_.clear();
-    peerStatsSaved_ = false;
-    localStatsSent_ = false;
-    localStatsAcked_ = false;
-    localStatsReady_ = false;
-    syncStartedMs_ = millis();
-    lastHelloMs_ = syncStartedMs_;
-    lastStatsSendMs_ = 0;
-  }
-
-  peerSeen_ = true;
-  if (event.deviceMac != peerDeviceMac_) {
-    peerName_.clear();
-  }
-  peerSourceMac_ = event.sourceMac;
-  peerDeviceMac_ = event.deviceMac;
-  peerId_ = bytesToHex(peerDeviceMac_.data(), peerDeviceMac_.size());
-  addPeer(peerSourceMac_.data());
-
-  if (!localStatsReady_ && !prepareLocalStats()) return;
-  if (state_ == State::READY || state_ == State::DISCOVERING || state_ == State::SYNCED) setState(State::SYNCING);
-
-  if (event.type == PacketType::INVALID_STATS) {
-    setError(tr(STR_NEARBY_STATS_VERSION_MISMATCH));
-    return;
-  }
-
-  if (event.type == PacketType::HELLO) {
-    sendDeviceName(peerSourceMac_.data());
-    sendLocalStats();
-    return;
-  }
-
-  if (event.type == PacketType::STATS) {
-    if (!writeSyncedStatsFile(syncedStatsPathForDeviceMac(peerDeviceMac_), event.stats.data(), event.statsSize)) {
-      setError("could not save stats");
-      return;
-    }
-    peerStatsSaved_ = true;
-    sendAck(peerSourceMac_.data());
-    if (!localStatsSent_) sendLocalStats();
-    return;
   }
 }
 
@@ -533,31 +437,20 @@ bool NearbyStatsSyncActivity::sendPacket(const PacketType type, const uint8_t* p
   if (!addPeer(peerMac)) return false;
 
   std::array<uint8_t, PACKET_HEADER_BYTES + MAX_STATS_BYTES> packet = {};
-  packet[0] = 'C';
-  packet[1] = 'I';
-  packet[2] = 'S';
-  packet[3] = 'S';
-  packet[4] = PROTOCOL_VERSION;
-  packet[5] = static_cast<uint8_t>(type);
-  packet[7] = 0;
-  std::copy(localDeviceMac_.begin(), localDeviceMac_.end(), packet.begin() + 8);
-
-  size_t length = PACKET_HEADER_BYTES;
+  const uint8_t* payload = nullptr;
+  uint8_t payloadSize = 0;
   if (type == PacketType::STATS) {
-    packet[6] = localStatsSize_;
     if (!localStatsReady_ || !isValidStatsPayload(localStats_.data(), localStatsSize_)) return false;
-    std::copy(localStats_.begin(), localStats_.begin() + localStatsSize_, packet.begin() + PACKET_HEADER_BYTES);
-    length += localStatsSize_;
+    payload = localStats_.data();
+    payloadSize = localStatsSize_;
   } else if (type == PacketType::NAME) {
     const char* name = SETTINGS.getEffectiveDeviceName();
-    const size_t nameLength = std::min(std::strlen(name), static_cast<size_t>(MAX_DEVICE_NAME_BYTES));
-    if (nameLength < CrossPointSettings::MIN_DEVICE_NAME_LENGTH) return false;
-    packet[6] = static_cast<uint8_t>(nameLength);
-    memcpy(packet.data() + PACKET_HEADER_BYTES, name, nameLength);
-    length += nameLength;
-  } else {
-    packet[6] = 0;
+    payload = reinterpret_cast<const uint8_t*>(name);
+    payloadSize = static_cast<uint8_t>(std::min(std::strlen(name), static_cast<size_t>(MAX_DEVICE_NAME_BYTES)));
   }
+  const size_t length = nearby_stats::encode(type, localDeviceMac_.data(), GlobalReadingStats::CURRENT_FILE_VERSION,
+                                             payload, payloadSize, packet.data());
+  if (!length) return false;
 
   const esp_err_t result = esp_now_send(peerMac, packet.data(), length);
   if (result != ESP_OK) {
@@ -572,18 +465,6 @@ bool NearbyStatsSyncActivity::sendHello() {
   return sendPacket(PacketType::HELLO, BROADCAST_MAC);
 }
 
-bool NearbyStatsSyncActivity::sendDeviceName(const uint8_t* peerMac) { return sendPacket(PacketType::NAME, peerMac); }
-
-bool NearbyStatsSyncActivity::sendLocalStats() {
-  if (!peerSeen_) return false;
-  sendDeviceName(peerSourceMac_.data());
-  lastStatsSendMs_ = millis();
-  localStatsSent_ = sendPacket(PacketType::STATS, peerSourceMac_.data());
-  return localStatsSent_;
-}
-
-bool NearbyStatsSyncActivity::sendAck(const uint8_t* peerMac) { return sendPacket(PacketType::ACK, peerMac); }
-
 void NearbyStatsSyncActivity::exitViaBack() {
   mappedInput.suppressNextBackRelease();
   finish();
@@ -591,26 +472,10 @@ void NearbyStatsSyncActivity::exitViaBack() {
 
 void NearbyStatsSyncActivity::updateSyncProgress() {
   if (state_ != State::DISCOVERING && state_ != State::SYNCING) return;
-
   const uint32_t now = millis();
-  if (now - syncStartedMs_ > SYNC_TIMEOUT_MS) {
-    setError(peerSeen_ ? "stats sync timed out" : "no reader found");
-    return;
-  }
-
-  if (peerStatsSaved_ && localStatsAcked_) {
-    setState(State::SYNCED);
-    return;
-  }
-
-  if (!peerSeen_ && now - lastHelloMs_ >= HELLO_INTERVAL_MS) {
-    sendHello();
-    return;
-  }
-
-  if (peerSeen_ && localStatsReady_ && !localStatsAcked_ && now - lastStatsSendMs_ >= STATS_RETRY_INTERVAL_MS) {
-    sendLocalStats();
-  }
+  protocol_.tick(now, protocolCallbacks());
+  applyProtocolState();
+  if (!protocol_.terminal() && !protocol_.peerSeen && now - lastHelloMs_ >= HELLO_INTERVAL_MS) sendHello();
 }
 
 void NearbyStatsSyncActivity::setState(const State state) {
@@ -658,7 +523,7 @@ void NearbyStatsSyncActivity::render(RenderLock&&) {
       primary = tr(STR_NEARBY_STATS_SYNCING);
       detailPrimary = std::string(I18N.get(peerName_.empty() ? StrId::STR_SYSTEM_DEVICE : StrId::STR_DEVICE_NAME)) +
                       ": " + (peerName_.empty() ? peerId_ : peerName_);
-      if (!isZeroMac(peerDeviceMac_)) {
+      if (peerDeviceMac_ != std::array<uint8_t, 6>{}) {
         detailSecondary = std::string(tr(STR_FILENAME)) + ": " + statsFileNameForDeviceMac(peerDeviceMac_);
       }
       break;
@@ -666,7 +531,7 @@ void NearbyStatsSyncActivity::render(RenderLock&&) {
       primary = tr(STR_NEARBY_STATS_SYNCED);
       detailPrimary = std::string(I18N.get(peerName_.empty() ? StrId::STR_SYSTEM_DEVICE : StrId::STR_DEVICE_NAME)) +
                       ": " + (peerName_.empty() ? peerId_ : peerName_);
-      if (!isZeroMac(peerDeviceMac_)) {
+      if (peerDeviceMac_ != std::array<uint8_t, 6>{}) {
         detailSecondary = std::string(tr(STR_FILENAME)) + ": " + statsFileNameForDeviceMac(peerDeviceMac_);
       }
       break;

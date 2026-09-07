@@ -113,6 +113,11 @@ class OptionPopup {
   // after their selection callback returns.
   void skipPostSelectionUpdate() { skipPostSelectionUpdate_ = true; }
 
+#ifdef SIMULATOR
+  // Read-only comparison of the actual rendered title; no borrowed string escapes.
+  bool simulatorTitleIs(const char* expected) const { return active && expected && title == expected; }
+#endif
+
   bool handleInput(MappedInputManager& input, const std::function<void()>& requestUpdate) {
     if (!active) return false;
 
@@ -284,6 +289,18 @@ class OptionPopup {
   }
 
   bool isActive() const { return active; }
+#ifdef SIMULATOR
+  bool simulatorOptionCenter(const GfxRenderer& renderer, const int index, int& x, int& y) const {
+    if (!active) return false;
+    const auto& hitLayout = getLayout(renderer);
+    const int visible = index - hitLayout.firstOptionIndex;
+    if (visible < 0 || visible >= static_cast<int>(hitLayout.options.size())) return false;
+    const auto& option = hitLayout.options[visible];
+    x = option.x + option.width / 2;
+    y = option.y + option.height / 2;
+    return true;
+  }
+#endif
 
  private:
   struct Layout {

@@ -6,6 +6,9 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <MangaBook.h>
+
+#include "MangaReaderActivity.h"
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -223,6 +226,18 @@ void ReaderActivity::onEnter() {
 
   if (initialBookPath.empty()) {
     goToLibrary();  // Start from root when entering via Browse
+    return;
+  }
+
+  if (manga::MangaBook::isMangaFolder(initialBookPath.c_str())) {
+    auto activity = makeUniqueNoThrow<MangaReaderActivity>(renderer, mappedInput, initialBookPath);
+    if (!activity) {
+      LOG_ERR("READER", "Cannot allocate manga reader");
+      onGoBack();
+      return;
+    }
+    currentBookPath = initialBookPath;
+    activityManager.replaceActivity(std::move(activity));
     return;
   }
 

@@ -1512,3 +1512,27 @@ inline std::vector<SettingInfo> buildSystemGlobalStatsSettingsList(const std::ve
   settings.push_back(SettingInfo::Action(StrId::STR_RESET_ALL_TIME_STATS, SettingAction::ResetGlobalStats));
   return settings;
 }
+
+// Raster manga consumes these input controls. Reuse catalog values/builders,
+// omitting font/chapter gestures and child actions that its reader cannot handle.
+inline std::vector<SettingInfo> buildMangaReaderSettingsList(const std::vector<SettingInfo>& catalog,
+                                                             const bool touch) {
+  std::vector<SettingInfo> settings;
+  settings.reserve(8);
+  if (touch) {
+    addSettingByName(settings, catalog, StrId::STR_DISABLE_TOUCHSCREEN);
+    addSettingByName(settings, catalog, StrId::STR_TOUCH_READER_CONTROLS);
+    const auto taps = buildControlsTapsGesturesSettingsList(catalog);
+    addSettingByName(settings, taps, StrId::STR_PAGE_TURN);
+  }
+  settings.push_back(SettingInfo::SectionHeader(StrId::STR_SIDE_BUTTONS));
+  const auto side = buildControlsSideButtonSettingsList(catalog);
+  addSettingByName(settings, side, StrId::STR_SIDE_BTN_LAYOUT);
+  addSettingByKey(settings, side, "sideButtonOrientationAware");
+  if (!touch) {
+    settings.push_back(SettingInfo::SectionHeader(StrId::STR_FRONT_BUTTONS));
+    const auto front = buildControlsFrontButtonSettingsList(catalog);
+    addSettingByKey(settings, front, "frontButtonOrientationAware");
+  }
+  return settings;
+}

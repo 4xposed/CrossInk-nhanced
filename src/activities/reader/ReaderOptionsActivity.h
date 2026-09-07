@@ -16,14 +16,20 @@
 #include "util/ButtonNavigator.h"
 #include "util/DictionaryRegistry.h"
 
+enum class ReaderSettingsScope { Book, Manga };
+
 class ReaderOptionsActivity final : public Activity {
  public:
+#ifdef SIMULATOR
+  const std::vector<SettingInfo>& simulatorSettings() const { return settings; }
+#endif
   using SaveSettingsCallback = void (*)(void* ctx);
   using SaveGlobalSettingsCallback = void (*)(void* ctx);
   using GlobalSettingsEditCallback = void (*)(void* ctx);
   using DictionaryFontChangedCallback = void (*)(void* ctx, const char* familyName, uint8_t pointSize);
 
  private:
+  ReaderSettingsScope settingsScope = ReaderSettingsScope::Book;
   ButtonNavigator buttonNavigator;
   int selectedIndex = 0;
   int settingsCount = 0;
@@ -87,6 +93,10 @@ class ReaderOptionsActivity final : public Activity {
   void buildOptionsScreen(UiApp::ScreenType& screen);
 
  public:
+  ReaderOptionsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, ReaderSettingsScope scope)
+      : ReaderOptionsActivity(renderer, mappedInput) {
+    settingsScope = scope;
+  }
   explicit ReaderOptionsActivity(
       GfxRenderer& renderer, MappedInputManager& mappedInput, SaveSettingsCallback saveSettingsCallback = nullptr,
       void* saveSettingsContext = nullptr, SaveGlobalSettingsCallback saveGlobalSettingsCallback = nullptr,

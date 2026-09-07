@@ -1,0 +1,17 @@
+[package]
+name = "crossink-rar"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Standalone bounded RAR extractor for CrossInk manga preparation"
+
+[dependencies]
+anyhow = "1"
+tempfile = "3"
+zip = { version = "8", default-features = false, features = ["deflate", "bzip2", "zstd"] }
+unrar = "0.5"
+
+[profile.release]
+lto = "thin"
+strip = true

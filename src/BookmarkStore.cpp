@@ -216,7 +216,7 @@ BookmarkStore BookmarkStore::instance;
 
 bool BookmarkStore::loadForBook(const std::string& filePath, const std::string& title, const std::string& author,
                                 const std::string& bookType) {
-  if (bookType != "epub" && bookType != "xtc" && bookType != "txt") {
+  if (bookType != "epub" && bookType != "xtc" && bookType != "txt" && bookType != "manga") {
     LOG_ERR("BKS", "Unknown book type: %s", bookType.c_str());
     return false;
   }
@@ -389,14 +389,23 @@ bool BookmarkStore::hasBookmarkForPage(uint16_t spineIndex, float pageProgress, 
   });
 }
 
-void BookmarkStore::saveToFile() {
-  if (!dirty || storeFilePath.empty()) return;
-  if (bookmarks.empty()) {
-    if (Storage.exists(storeFilePath.c_str())) Storage.remove(storeFilePath.c_str());
-    dirty = false;
-    return;
+void BookmarkStore::saveToFile() { (void)saveToFileChecked(); }
+
+bool BookmarkStore::saveToFileChecked() {
+  if (!dirty) return true;
+  if (storeFilePath.empty()) {
+    LOG_ERR("BKS", "Cannot save dirty bookmarks without a book path");
+    return false;
   }
-  if (writeToFile()) dirty = false;
+  if (bookmarks.empty()) {
+    if (Storage.exists(storeFilePath.c_str()) && !Storage.remove(storeFilePath.c_str())) {
+      LOG_ERR("BKS", "Failed to remove empty bookmark file; keeping pending save");
+      return false;
+    }
+  } else if (!writeToFile())
+    return false;
+  dirty = false;
+  return true;
 }
 
 void BookmarkStore::clearAll() {
@@ -524,54 +533,52 @@ bool BookmarkStore::readFromFile(const std::string& path, std::vector<Bookmark>&
 }
 
 bool BookmarkStore::writeToFile() const {
-  Storage.mkdir(BOOKMARKS_DIR);
-
+  if (!Storage.ensureDirectoryExists(BOOKMARKS_DIR)) {
+    LOG_ERR("BKS", "Cannot prepare bookmark directory");
+    return false;
+  }
   FsFile f;
   if (!Storage.openFileForWrite("BKS", storeFilePath, f)) {
     LOG_ERR("BKS", "Failed to open bookmark file for write");
     return false;
   }
-
   const uint16_t count = static_cast<uint16_t>(bookmarks.size());
-  serialization::writePod(f, VERSION);
-  serialization::writePod(f, count);
-  serialization::writeString(f, bookTitle);
-  serialization::writeString(f, bookAuthor);
-  serialization::writeString(f, bookFilePath);
-
+  bool written = serialization::tryWritePod(f, VERSION) && serialization::tryWritePod(f, count) &&
+                 serialization::tryWriteString(f, bookTitle) && serialization::tryWriteString(f, bookAuthor) &&
+                 serialization::tryWriteString(f, bookFilePath);
   for (const auto& bm : bookmarks) {
-    serialization::writePod(f, bm.spineIndex);
-    serialization::writePod(f, bm.progress);
-    serialization::writePod(f, bm.timestamp);
-    f.write(reinterpret_cast<const uint8_t*>(bm.chapterTitle), sizeof(bm.chapterTitle));
-    serialization::writePod(f, bm.paragraphIndex);
-    f.write(reinterpret_cast<const uint8_t*>(bm.snippet), sizeof(bm.snippet));
+    if (!written) break;
+    written = serialization::tryWritePod(f, bm.spineIndex) && serialization::tryWritePod(f, bm.progress) &&
+              serialization::tryWritePod(f, bm.timestamp) &&
+              f.write(reinterpret_cast<const uint8_t*>(bm.chapterTitle), sizeof(bm.chapterTitle)) ==
+                  sizeof(bm.chapterTitle) &&
+              serialization::tryWritePod(f, bm.paragraphIndex) &&
+              f.write(reinterpret_cast<const uint8_t*>(bm.snippet), sizeof(bm.snippet)) == sizeof(bm.snippet);
   }
-
-  f.close();
+  const bool synced = written && f.sync();
+  const bool closed = f.close();
+  if (!synced || !closed) {
+    LOG_ERR("BKS", "Bookmark write did not complete; keeping pending save");
+    return false;
+  }
   return true;
 }
 
 void BookmarkStore::deleteForFilePath(const std::string& filePath, const std::string& bookType) {
+  (void)deleteForFilePathChecked(filePath, bookType);
+}
+bool BookmarkStore::deleteForFilePathChecked(const std::string& filePath, const std::string& bookType) {
   const std::string currentPath = currentStoreFilePathForBook(filePath, bookType);
   const std::string legacyPath = legacyStoreFilePathForBook(filePath, bookType);
-  bool deletedAny = false;
-
-  if (Storage.exists(currentPath.c_str())) {
-    deletedAny = deleteBookmarkStorePath(currentPath, "canonical") || deletedAny;
-  }
-  if (legacyPath != currentPath && Storage.exists(legacyPath.c_str())) {
-    deletedAny = deleteBookmarkStorePath(legacyPath, "legacy") || deletedAny;
-  }
-
-  if (deletedAny) {
-  }
+  const bool current = deleteBookmarkStorePath(currentPath, "canonical");
+  const bool legacy = legacyPath == currentPath || deleteBookmarkStorePath(legacyPath, "legacy");
+  return current && legacy;
 }
 
 bool BookmarkStore::migrateForFilePath(const std::string& oldFilePath, const std::string& newFilePath,
                                        const std::string& title, const std::string& author,
                                        const std::string& bookType) {
-  if (bookType != "epub" && bookType != "xtc" && bookType != "txt") {
+  if (bookType != "epub" && bookType != "xtc" && bookType != "txt" && bookType != "manga") {
     LOG_ERR("BKS", "Unknown book type for bookmark migration: %s", bookType.c_str());
     return false;
   }

@@ -1,10 +1,11 @@
 #pragma once
 
+#include <CooperativeCancellation.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <stdint.h>
 
-#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -26,6 +27,8 @@
 // to contiguous, non-overlapping destination row ranges, so once a block whose
 // top row is Y arrives, every output row < Y is final and is flushed to disk.
 struct PixelCache {
+  std::unique_ptr<uint8_t[]> ownedBuffer;
+  CooperativeCancellation cancellation{};
   uint8_t* buffer;   // band buffer: (bandRows + 1) rows; last row kept zeroed
   uint8_t* zeroRow;  // points at the spare zeroed row, for gap/clip fill
   int width;
@@ -38,6 +41,7 @@ struct PixelCache {
   int flushedRows;  // image-local rows already written to file
   HalFile file;
   std::string cachePathStr;
+  const char* borrowedCachePath = nullptr;
   bool ok;
 
   PixelCache()
@@ -60,7 +64,16 @@ struct PixelCache {
 
   // Open the cache file, write the header, and allocate a band buffer big enough
   // to hold the tallest single decode block (maxBlockDstRows output rows).
-  bool begin(const std::string& cachePath, int w, int h, int ox, int oy, int maxBlockDstRows) {
+  bool begin(const std::string& cachePath, int w, int h, int ox, int oy, int maxBlockDstRows,
+             CooperativeCancellation cancel = {}) {
+    cachePathStr = cachePath;
+    return begin(cachePathStr.c_str(), w, h, ox, oy, maxBlockDstRows, cancel);
+  }
+  // The caller retains this path through finalize()/abort().
+  bool begin(const char* cachePath, int w, int h, int ox, int oy, int maxBlockDstRows,
+             CooperativeCancellation cancel = {}) {
+    cancellation = cancel;
+    if (cancellation.requested() || w <= 0 || h <= 0 || w > 65535 || h > 65535) return false;
     width = w;
     height = h;
     originX = ox;
@@ -88,26 +101,27 @@ struct PixelCache {
     bandRows = wantRows;
 
     const size_t bufSize = (size_t)(bandRows + 1) * bytesPerRow;  // +1 spare zero row
-    buffer = (uint8_t*)malloc(bufSize);
+    // Job-scoped band exceeds the task stack; bounded to 24 KiB plus one packed row.
+    ownedBuffer = makeUniqueNoThrow<uint8_t[]>(bufSize);
+    buffer = ownedBuffer.get();
     if (!buffer) {
       LOG_ERR("IMG", "OOM cache band: %u bytes", (unsigned)bufSize);
       return false;
     }
-    memset(buffer, 0, bufSize);
     zeroRow = buffer + (size_t)bandRows * bytesPerRow;
 
+    borrowedCachePath = cachePath;
     if (!Storage.openFileForWrite("IMG", cachePath, file)) {
-      LOG_ERR("IMG", "Failed to open cache file for writing: %s", cachePath.c_str());
-      free(buffer);
+      LOG_ERR("IMG", "Failed to open cache file for writing: %s", cachePath);
+      ownedBuffer.reset();
       buffer = nullptr;
+      abort();
       return false;
     }
-    cachePathStr = cachePath;
-
     uint16_t w16 = (uint16_t)w;
     uint16_t h16 = (uint16_t)h;
     if (file.write(&w16, 2) != 2 || file.write(&h16, 2) != 2) {
-      LOG_ERR("IMG", "Failed to write cache header: %s", cachePath.c_str());
+      LOG_ERR("IMG", "Failed to write cache header: %s", cachePath);
       abort();
       return false;
     }
@@ -120,11 +134,18 @@ struct PixelCache {
   // reposition the band to start at newTopRow. Returns false if a write failed,
   // in which case the caller must stop caching for the rest of the decode.
   bool advanceTo(int newTopRow) {
-    if (!ok) return false;
+    if (!ok || cancellation.requested()) {
+      ok = false;
+      return false;
+    }
     if (newTopRow <= bandStart) return true;
     if (newTopRow > height) newTopRow = height;
 
     for (int r = bandStart; r < newTopRow; ++r) {
+      if (cancellation.requested()) {
+        abort();
+        return false;
+      }
       const int idx = r - bandStart;
       const uint8_t* rowPtr = (idx < bandRows) ? (buffer + (size_t)idx * bytesPerRow) : zeroRow;
       if (file.write(rowPtr, (size_t)bytesPerRow) != (size_t)bytesPerRow) {
@@ -147,6 +168,10 @@ struct PixelCache {
       return false;
     }
     for (int r = flushedRows; r < height; ++r) {
+      if (cancellation.requested()) {
+        abort();
+        return false;
+      }
       const int idx = r - bandStart;
       const uint8_t* rowPtr = (idx >= 0 && idx < bandRows) ? (buffer + (size_t)idx * bytesPerRow) : zeroRow;
       if (file.write(rowPtr, (size_t)bytesPerRow) != (size_t)bytesPerRow) {
@@ -155,16 +180,23 @@ struct PixelCache {
         return false;
       }
     }
-    file.close();
+    const bool synced = file.sync();
+    const bool closed = file.close();
+    if (!synced || !closed || cancellation.requested()) {
+      LOG_ERR("IMG", "Cache finalization failed: %s", borrowedCachePath);
+      abort();
+      return false;
+    }
     ok = false;  // file handed off; nothing left to clean up
     return true;
   }
 
   // Drop a partial/failed cache so a later decode re-creates it cleanly.
   void abort() {
-    if (file.isOpen()) file.close();
-    if (!cachePathStr.empty()) {
-      Storage.remove(cachePathStr.c_str());
+    if (file.isOpen() && !file.close()) LOG_ERR("IMG", "Cannot close partial cache");
+    if (borrowedCachePath && borrowedCachePath[0] != '\0') {
+      if (Storage.exists(borrowedCachePath) && !Storage.remove(borrowedCachePath))
+        LOG_ERR("IMG", "Cannot remove partial cache: %s", borrowedCachePath);
     }
     ok = false;
   }
@@ -175,10 +207,6 @@ struct PixelCache {
       // mid-stream write failed (advanceTo() cleared ok but left the file open).
       // Drop the partial cache so we leave no corrupt file behind.
       abort();
-    }
-    if (buffer) {
-      free(buffer);
-      buffer = nullptr;
     }
   }
 };

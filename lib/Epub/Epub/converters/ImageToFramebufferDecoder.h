@@ -1,4 +1,5 @@
 #pragma once
+#include <CooperativeCancellation.h>
 #include <HalStorage.h>
 
 #include <cstdint>
@@ -19,7 +20,27 @@ struct RenderConfig {
   bool useDithering = true;
   bool performanceMode = false;
   bool useExactDimensions = false;  // If true, use maxWidth/maxHeight as exact output size (no recalculation)
-  std::string cachePath;            // If non-empty, decoder will write pixel cache to this path
+  // Optional borrowed output path, valid until synchronous decode returns.
+  // Cache-only workers use this to avoid an infallible std::string allocation.
+  const char* cachePathOverride = nullptr;
+  const char* cacheOutputPath() const { return cachePathOverride ? cachePathOverride : cachePath.c_str(); }
+  std::string cachePath;  // If non-empty, decoder will write pixel cache to this path
+};
+
+// Explicit screen coordinates preserve the foreground dither origin and scaling.
+// The cache path is temporary output owned exclusively by the caller.
+struct CacheDecodeConfig {
+  RenderConfig render;
+  int screenWidth = 0;
+  int screenHeight = 0;
+  CooperativeCancellation cancellation{};
+
+  bool valid() const {
+    return render.useExactDimensions && render.cacheOutputPath()[0] != '\0' && screenWidth > 0 && screenHeight > 0 &&
+           screenWidth <= 2048 && screenHeight <= 2048 && render.x >= 0 && render.y >= 0 && render.x < screenWidth &&
+           render.y < screenHeight && render.maxWidth > 0 && render.maxHeight > 0 &&
+           render.maxWidth <= screenWidth - render.x && render.maxHeight <= screenHeight - render.y;
+  }
 };
 
 class ImageToFramebufferDecoder {
@@ -27,6 +48,11 @@ class ImageToFramebufferDecoder {
   virtual ~ImageToFramebufferDecoder() = default;
 
   virtual bool decodeToFramebuffer(const std::string& imagePath, GfxRenderer& renderer, const RenderConfig& config) = 0;
+
+  // Returns true only after complete, checked cache output; never accesses a renderer.
+  virtual bool decodeToCache(const std::string&, const CacheDecodeConfig&) { return false; }
+  virtual bool decodeToCache(const char*, const CacheDecodeConfig&) { return false; }
+  virtual bool getDimensionsForCache(const char*, ImageDimensions&) const { return false; }
 
   virtual bool getDimensions(const std::string& imagePath, ImageDimensions& dims) const = 0;
 

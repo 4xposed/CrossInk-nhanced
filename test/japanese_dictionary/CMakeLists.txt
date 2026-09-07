@@ -2,6 +2,9 @@ find_package(EXPAT REQUIRED)
 
 add_executable(JapaneseDictionaryTest
   JapaneseDictionaryTest.cpp
+  ${REPO_ROOT}/src/activities/reader/MangaPageTextSource.cpp
+  ${REPO_ROOT}/lib/MangaPanel/MangaFormat.cpp
+  ${REPO_ROOT}/lib/MangaPanel/MangaImageGeometry.cpp
   ${REPO_ROOT}/lib/Dict/Deinflector.cpp
   ${REPO_ROOT}/lib/Dict/DictIndex.cpp
   ${REPO_ROOT}/lib/Dict/WordLookup.cpp
@@ -25,6 +28,7 @@ add_executable(JapaneseDictionaryTest
 target_include_directories(JapaneseDictionaryTest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
   ${REPO_ROOT}/lib/Dict
+  ${REPO_ROOT}/lib/MangaPanel
   ${REPO_ROOT}/lib/DictHtmlRenderer
   ${REPO_ROOT}/lib/Epub
   ${REPO_ROOT}/lib/Utf8

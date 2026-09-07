@@ -1,11 +1,10 @@
+#include "ReadingStatsSave.h"
 /**
  * XtcReaderActivity.cpp
  *
  * XTC ebook reader activity implementation
  * Displays pre-rendered XTC pages on e-ink display
  */
-
-#include "XtcReaderActivity.h"
 
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
@@ -23,6 +22,7 @@
 #include "QuickActions.h"
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
+#include "XtcReaderActivity.h"
 #include "XtcReaderChapterSelectionActivity.h"
 #include "XtcReaderMenuActivity.h"
 #include "activities/boot_sleep/SleepCoverAssets.h"
@@ -735,11 +735,17 @@ void XtcReaderActivity::commitReadingStats() {
 
   recordCurrentPageReadingTime("reader_exit");
   const uint32_t elapsedSecs = sessionReadingSeconds;
+  ReadingLanguageSpan languageSpan;
+  languageSpan.localStart = hasSessionStartLocalDateTime ? sessionStartLocalDateTime : ReadingStatsDateTime{};
+  languageSpan.seconds = elapsedSecs >= 10 ? elapsedSecs : 0;
+  normalizeReadingLanguage(std::string_view{}, languageSpan.normalizedTag);
   if (elapsedSecs >= 60) {
     stats.sessionCount++;
     globalStats.totalSessions++;
   }
   if (elapsedSecs >= 10) {
+    addReadingLanguageSeconds(stats.languageTotals, languageSpan.normalizedTag, elapsedSecs);
+    addReadingLanguageSeconds(globalStats.languageTotals, languageSpan.normalizedTag, elapsedSecs);
     stats.totalReadingSeconds += elapsedSecs;
     globalStats.totalReadingSeconds += elapsedSecs;
     if (hasSessionStartLocalDateTime) {
@@ -750,8 +756,7 @@ void XtcReaderActivity::commitReadingStats() {
       stats.startDate = sessionStartLocalDateTime.date;
     }
   }
-  stats.save(xtc->getCachePath());
-  globalStats.save();
+  saveReadingStatsWithRetry(xtc->getCachePath(), stats, globalStats, &languageSpan);
 }
 
 void XtcReaderActivity::resetCurrentBookStatsAfterDelete() {
@@ -779,8 +784,7 @@ void XtcReaderActivity::setBookCompleted(const bool isCompleted) {
     globalStats.completedBooks--;
   }
 
-  stats.save(xtc->getCachePath());
-  globalStats.save();
+  saveReadingStatsWithRetry(xtc->getCachePath(), stats, globalStats);
 }
 
 float XtcReaderActivity::getCurrentBookProgressPercent() const {
@@ -827,10 +831,10 @@ std::unique_ptr<Activity> XtcReaderActivity::createFrontlightReadingStatsActivit
   if (hasSyncedStats) {
     return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(),
                                                 displayStats, getCurrentBookProgressPercent(), false, 0, globalStats,
-                                                GlobalReadingStats::loadAggregated(globalStats));
+                                                GlobalReadingStats::loadAggregated(globalStats), false, &stats);
   }
   return makeUniqueNoThrow<BookStatsActivity>(renderer, mappedInput, xtc->getTitle(), xtc->getCachePath(), displayStats,
-                                              getCurrentBookProgressPercent(), false, 0, globalStats);
+                                              getCurrentBookProgressPercent(), false, 0, globalStats, false, &stats);
 }
 
 void XtcReaderActivity::onFrontlightPanelClosed() {

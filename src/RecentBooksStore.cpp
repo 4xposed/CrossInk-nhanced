@@ -1,17 +1,22 @@
 #include "RecentBooksStore.h"
 
-#include <Epub.h>
 #include <AnkiDeck.h>
-
+#include <Epub.h>
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <MangaBook.h>
+#include <MangaCover.h>
 #include <Serialization.h>
+#include <Utf8.h>
 #include <Xtc.h>
 
 #include <algorithm>
 #include <iterator>
 #include <utility>
+
+#include "util/BookFolderMutation.h"
+#include "util/BookMutationJsonAllocator.h"
 
 namespace {
 constexpr uint8_t RECENT_BOOKS_FILE_VERSION = 3;
@@ -63,6 +68,7 @@ bool RecentBooksStore::saveToFile() const {
 
 void RecentBooksStore::addOrUpdateBook(const std::string& path, const std::string& title, const std::string& author,
                                        const std::string& coverBmpPath, const RecentBook::CoverState coverState) {
+  if (BookFolderMutation::storesFrozen()) return;
   ensureLoaded();
 
   // No-op write suppression adapted from Sichroteph/YACP commit
@@ -98,6 +104,7 @@ void RecentBooksStore::addOrUpdateBook(const std::string& path, const std::strin
 
 bool RecentBooksStore::updateBook(const std::string& path, const std::string& title, const std::string& author,
                                   const std::string& coverBmpPath, const RecentBook::CoverState coverState) {
+  if (BookFolderMutation::storesFrozen()) return false;
   ensureLoaded();
 
   auto it =
@@ -119,6 +126,7 @@ bool RecentBooksStore::updateBook(const std::string& path, const std::string& ti
 }
 
 bool RecentBooksStore::removeByPath(const std::string& path) {
+  if (BookFolderMutation::storesFrozen()) return false;
   ensureLoaded();
 
   auto it =
@@ -135,6 +143,7 @@ bool RecentBooksStore::removeByPath(const std::string& path) {
 
 bool RecentBooksStore::updatePath(const std::string& oldPath, const std::string& newPath,
                                   const std::string& oldCachePath, const std::string& newCachePath) {
+  if (BookFolderMutation::storesFrozen()) return;
   ensureLoaded();
 
   auto it = std::find_if(recentBooks.begin(), recentBooks.end(),
@@ -144,7 +153,10 @@ bool RecentBooksStore::updatePath(const std::string& oldPath, const std::string&
   }
   const RecentBook original = *it;
   it->path = newPath;
-  if (!oldCachePath.empty() && !it->coverBmpPath.empty() && it->coverBmpPath.rfind(oldCachePath, 0) == 0) {
+  if (!oldCachePath.empty() && !it->coverBmpPath.empty() &&
+      (it->coverBmpPath == oldCachePath ||
+       (it->coverBmpPath.size() > oldCachePath.size() && it->coverBmpPath.rfind(oldCachePath, 0) == 0 &&
+        it->coverBmpPath[oldCachePath.size()] == '/'))) {
     it->coverBmpPath = newCachePath + it->coverBmpPath.substr(oldCachePath.size());
   }
   if (!saveToFile()) {
@@ -158,6 +170,7 @@ bool RecentBooksStore::updatePath(const std::string& oldPath, const std::string&
 bool RecentBooksStore::isMissing(const RecentBook& book) { return !Storage.exists(book.path.c_str()); }
 
 bool RecentBooksStore::pruneMissing() {
+  if (BookFolderMutation::storesFrozen()) return false;
   ensureLoaded();
 
   const size_t before = recentBooks.size();
@@ -170,6 +183,19 @@ RecentBook RecentBooksStore::getDataFromBook(std::string path) const {
   const size_t lastSlash = path.find_last_of('/');
   if (lastSlash != std::string::npos) {
     lastBookFileName = path.substr(lastSlash + 1);
+  }
+
+  if (manga::MangaBook::isMangaFolder(path.c_str())) {
+    manga::MangaBook book;
+    if (book.open(path.c_str(), manga::OpenMode::Metadata)) {
+      // Portable fields can each be 64 KiB; library labels need only a bounded UTF-8 prefix.
+      const auto label = [](std::string_view value) {
+        const int bytes = utf8SafeTruncateBuffer(value.data(), static_cast<int>(std::min<size_t>(value.size(), 127)));
+        return bytes > 0 ? std::string(value.data(), static_cast<size_t>(bytes)) : std::string{};
+      };
+      return RecentBook{path, label(book.title()), label(book.author()), manga::thumbnailTemplatePath(path)};
+    }
+    return RecentBook{path, lastBookFileName, "", manga::thumbnailTemplatePath(path)};
   }
 
   // If epub, try to load the metadata for title/author and cover.
@@ -196,7 +222,21 @@ RecentBook RecentBooksStore::getDataFromBook(std::string path) const {
   return RecentBook{path, "", "", ""};
 }
 
-bool RecentBooksStore::loadFromFile() {
+bool RecentBooksStore::saveToFile() const {
+  if (BookFolderMutation::storesFrozen()) return false;
+  return PersistableStore<RecentBooksStore>::saveToFile();
+}
+
+bool RecentBooksStore::loadFromFile(bool mutationReload) {
+  if (!mutationReload && BookFolderMutation::storesFrozen()) return false;
+  if (mutationReload) {
+    std::lock_guard<std::mutex> lock(storeMutex);
+    bookmutation::BoundedJsonAllocator allocator;
+    JsonDocument document(&allocator);
+    if (!bookmutation::readBoundedOwnerJson(getFilePath(), document)) return false;
+    loadAttempted_ = true;
+    return fromJson(document.as<JsonVariantConst>());
+  }
   const bool hasStoreFile = Storage.exists(getFilePath());
   if (PersistableStore<RecentBooksStore>::loadFromFile()) {
     return true;

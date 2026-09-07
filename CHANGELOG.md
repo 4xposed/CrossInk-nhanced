@@ -1,3 +1,59 @@
+## [Unreleased]
+
+### Added
+
+- Native Rust manga OCR using ONNX models, with resumable results and a comparison command for upstream Mokuro output.
+- Manga conversion profiles for Xteink X3, X4, and X4 Pro, with device-sized panels and reusable original-resolution OCR.
+
+- Rust manga converter for CBZ/CBR archives, with original-resolution Mokuro panel OCR and X4-sized images; the reader now opens its indexed book folders.
+- Manga reader menus now include applicable input settings, automatic page turning, screenshots, safe cache clearing, and offline OCR QR codes on buttons and touch screens.
+- Manga pages show oriented page/panel counters, and configured dictionary shortcuts open OCR for the current view.
+
+- Reading statistics now retain language totals for books and devices, with local daily history, legacy Unknown migration, and compatible Nearby summary exchange.
+
+- Host manga converter for Matcha-compatible indexed books, with optional OCR and offline conversion tests.
+- Manga storage support for nested indexed folders, metadata, chapters, and current or legacy image layouts.
+- Look up manga OCR with the shared dictionary, save selected text to clippings, revisit lookup history, and read stored translations offline from the reader menu.
+
+- Open indexed manga folders from Books and read pages or panels, with saved position, panel preferences, chapters, and bookmarks.
+- Manga covers, progress, and reading statistics in Home and Recent Books, with cache clearing that preserves reading state.
+- Grayscale manga rendering with validated pixel caches and consistent framing when reopening pages or panels.
+
+### Changed
+
+- Native manga OCR precomputes repetition exclusions once per beam, avoiding repeated history scans for every vocabulary token.
+
+- Native manga OCR reuses encoder-state buffers while decoding text, reducing repeated allocations and copies.
+
+- Manga conversion keeps ONNX Runtime behind a replaceable inference adapter, with runtime-specific OCR cache identities.
+
+- Manga reading prepares useful upcoming panels and pages during idle time, with cancellable warming that yields to navigation and screen changes.
+
+- Built-in fonts share identical lookup tables to leave more firmware space while preserving all fonts and their appearance.
+
+### Fixed
+
+- Relative ONNX runtime paths now identify the same library for OCR caching and inference; conflicting external initialization is reported explicitly.
+
+- Sparse and mixed-format manga pages retain their original page numbers, keeping overviews aligned with panels and OCR.
+- Leaving file transfer or entering sleep safely closes incomplete uploads so navigation cannot stall.
+- Manga deletion from both Recent Books layouts now uses recoverable metadata cleanup, including matching resume paths.
+- Library completion changes retain failed saves for explicit retry without toggling the book twice or changing global counts repeatedly.
+- Expired sleep-cover work uses its fallback without restarting manga source discovery.
+
+- Manga cache clearing retains failed statistics saves for retry without counting successful writes twice; screenshots report storage and page-render failures.
+
+- Firmware folder moves retain manga progress, bookmarks, reading statistics and dictionary choices, with restart recovery; recursive deletion cleans metadata only for confirmed missing books.
+
+- Statistics saves preserve valid backups on storage errors and retry failed book/device writes independently.
+
+- Manga cover generation cancels when navigating or sleeping, preserves existing covers on storage or memory failure, and accepts correctly proportioned thumbnails.
+
+- Manga and EPUB word-scan caches verify complete dictionary indexes before reuse, so same-size dictionary replacements cannot restore stale candidates.
+
+- Failed image decoding closes source files and discards incomplete pixel caches so reading can recover cleanly.
+- Newly converted manga OCR rectangles use the crop origin and width/height fields correctly, improving placement of text lookup highlights in compatible readers.
+
 ## [v1.6.0] - 2026-09-21
 
 ### Added

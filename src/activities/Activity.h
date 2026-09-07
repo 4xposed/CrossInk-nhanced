@@ -39,6 +39,14 @@ class Activity {
   virtual ~Activity() = default;
   virtual void onEnter();
   virtual void onExit();
+  // Called on main BEFORE RenderLock: overrides may only change lock-free atomic state.
+  virtual void requestBackgroundCancellation() {}
+  // Called with RenderLock before Push/Replace/Pop or pre-sleep persistence.
+  // False keeps the transition pending while background file owners drain.
+  virtual bool prepareToSuspend() { return true; }
+  // Permanent persistence failures cancel a transition; background owners keep retrying.
+  virtual bool cancelSuspensionOnFailure() const { return false; }
+  virtual void onResume() {}
   virtual void loop() {}
 
   virtual void render(RenderLock&&) {}

@@ -36,3 +36,8 @@ void renderNoRtcCombinedStatsPage(GfxRenderer& renderer, const MappedInputManage
 
 void renderEditBookDatesPage(GfxRenderer& renderer, const MappedInputManager* mappedInput, const std::string& bookTitle,
                              const BookReadingStats& stats, int selectedField, bool showButtonHints);
+
+int readingLanguageRowCount(const ReadingLanguageTotals&);
+int readingLanguageRowsPerPage(const GfxRenderer&);
+void renderReadingLanguagesPage(GfxRenderer&, const MappedInputManager*, const char* scope,
+                                const ReadingLanguageTotals&, int offset, bool showMore);

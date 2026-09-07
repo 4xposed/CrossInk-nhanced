@@ -102,34 +102,17 @@ bool chooseBackupName(const bool manual, char* out, const size_t outLen) {
   return nextIncrementingBackupName(out, outLen);
 }
 
-bool readStatsFile(std::array<uint8_t, GlobalReadingStats::CURRENT_FILE_SIZE>& buffer, size_t& outSize) {
-  outSize = 0;
-
-  FsFile file;
-  if (!Storage.openFileForRead(LOG_TAG, GLOBAL_STATS_PATH, file)) {
-    LOG_ERR(LOG_TAG, "Could not open stats file for backup: %s", GLOBAL_STATS_PATH);
+bool writeBackupFile(const char* path) {
+  FsFile source;
+  ReadingLanguageFileInfo info;
+  if (!Storage.openFileForRead(LOG_TAG, GLOBAL_STATS_PATH, source)) return false;
+  bool valid = inspectReadingLanguageFile(source, false, ReadingStatsParseMode::Local, info);
+  if (!source.close()) valid = false;
+  if (!valid) {
+    LOG_ERR(LOG_TAG, "Cannot back up invalid stats");
     return false;
   }
-
-  const size_t fileSize = file.fileSize();
-  if (fileSize < GlobalReadingStats::MIN_SUPPORTED_FILE_SIZE || fileSize > buffer.size()) {
-    LOG_ERR(LOG_TAG, "Stats file has unsupported size for backup: %u bytes", static_cast<unsigned>(fileSize));
-    file.close();
-    return false;
-  }
-
-  const int read = file.read(buffer.data(), fileSize);
-  file.close();
-  if (read != static_cast<int>(fileSize)) {
-    LOG_ERR(LOG_TAG, "Failed to read stats file for backup: %d/%u bytes", read, static_cast<unsigned>(fileSize));
-    return false;
-  }
-
-  outSize = fileSize;
-  return true;
-}
-
-bool writeBackupFile(const char* path, const uint8_t* data, const size_t size) {
+  const size_t size = info.size;
   const std::string tmpPath = std::string(path) + ".tmp";
   if (Storage.exists(tmpPath.c_str()) && !Storage.remove(tmpPath.c_str())) {
     LOG_ERR(LOG_TAG, "Could not remove stale backup temp file: %s", tmpPath.c_str());
@@ -142,10 +125,22 @@ bool writeBackupFile(const char* path, const uint8_t* data, const size_t size) {
     return false;
   }
 
-  const size_t written = file.write(data, size);
-  if (written != size) {
-    LOG_ERR(LOG_TAG, "Short write for backup temp file %s: %u/%u bytes", tmpPath.c_str(),
-            static_cast<unsigned>(written), static_cast<unsigned>(size));
+  if (!Storage.openFileForRead(LOG_TAG, GLOBAL_STATS_PATH, source)) {
+    file.close();
+    Storage.remove(tmpPath.c_str());
+    return false;
+  }
+  uint8_t chunk[64];
+  size_t copied = 0;
+  bool ok = source.fileSize64() == size;
+  while (ok && copied < size) {
+    const size_t n = std::min(size - copied, sizeof(chunk));
+    ok = source.read(chunk, n) == static_cast<int>(n) && file.write(chunk, n) == n;
+    copied += n;
+  }
+  if (!source.close()) ok = false;
+  if (!ok || file.position() != size) {
+    LOG_ERR(LOG_TAG, "Failed streaming stats backup");
     file.close();
     Storage.remove(tmpPath.c_str());
     return false;
@@ -165,17 +160,22 @@ bool writeBackupFile(const char* path, const uint8_t* data, const size_t size) {
     return false;
   }
 
-  if (Storage.exists(path) && !Storage.remove(path)) {
-    LOG_ERR(LOG_TAG, "Could not replace backup file: %s", path);
+  const std::string oldPath = std::string(path) + ".bak";
+  const bool hadOld = Storage.exists(path);
+  if (hadOld && ((Storage.exists(oldPath.c_str()) && !Storage.remove(oldPath.c_str())) ||
+                 !Storage.rename(path, oldPath.c_str()))) {
+    LOG_ERR(LOG_TAG, "Could not retain prior backup");
     Storage.remove(tmpPath.c_str());
     return false;
   }
-
   if (!Storage.rename(tmpPath.c_str(), path)) {
     LOG_ERR(LOG_TAG, "Could not publish backup file: %s", path);
+    if (hadOld && !Storage.rename(oldPath.c_str(), path))
+      LOG_ERR(LOG_TAG, "Backup recovery retained: %s", oldPath.c_str());
     Storage.remove(tmpPath.c_str());
     return false;
   }
+  if (hadOld && !Storage.remove(oldPath.c_str())) LOG_ERR(LOG_TAG, "Backup published; old backup cleanup failed");
 
   return true;
 }
@@ -183,27 +183,31 @@ bool writeBackupFile(const char* path, const uint8_t* data, const size_t size) {
 // Identical automatic-backup suppression adapted from Sichroteph/YACP commit
 // 20af8aee8d3e1d560456753b08d1f52e5488621f (MIT). The fixed 64-byte chunk
 // keeps the comparison well below the C3's local-stack budget.
-bool backupFileMatches(const char* path, const uint8_t* expected, const size_t expectedSize) {
+bool backupFileMatches(const char* path) {
   FsFile file;
-  if (!Storage.openFileForRead(LOG_TAG, path, file) || file.fileSize() != expectedSize) {
-    if (file) file.close();
+  FsFile source;
+  if (!Storage.openFileForRead(LOG_TAG, path, file)) return false;
+  if (!Storage.openFileForRead(LOG_TAG, GLOBAL_STATS_PATH, source)) {
+    file.close();
     return false;
   }
-
+  const size_t expectedSize = source.fileSize();
+  bool matches = file.fileSize() == expectedSize;
   uint8_t chunk[64];
+  uint8_t expected[64];
   size_t offset = 0;
-  while (offset < expectedSize) {
+  while (matches && offset < expectedSize) {
     const size_t requested = std::min(sizeof(chunk), expectedSize - offset);
-    const int read = file.read(chunk, requested);
-    if (read != static_cast<int>(requested) || memcmp(chunk, expected + offset, requested) != 0) {
-      file.close();
-      return false;
-    }
+    matches = file.read(chunk, requested) == static_cast<int>(requested) &&
+              source.read(expected, requested) == static_cast<int>(requested) &&
+              memcmp(chunk, expected, requested) == 0;
     offset += requested;
   }
-  file.close();
-  return true;
+  if (!file.close()) matches = false;
+  if (!source.close()) matches = false;
+  return matches;
 }
+
 }  // namespace
 
 bool backupGlobalStats(const bool manual, char* outFileName, const size_t outFileNameLen) {
@@ -218,10 +222,6 @@ bool backupGlobalStats(const bool manual, char* outFileName, const size_t outFil
     return false;
   }
 
-  std::array<uint8_t, GlobalReadingStats::CURRENT_FILE_SIZE> data{};
-  size_t dataSize = 0;
-  if (!readStatsFile(data, dataSize)) return false;
-
   char backupPath[128];
   const int pathWritten = snprintf(backupPath, sizeof(backupPath), "%s/%s", BACKUP_DIR, fileName);
   if (pathWritten <= 0 || static_cast<size_t>(pathWritten) >= sizeof(backupPath)) {
@@ -229,7 +229,7 @@ bool backupGlobalStats(const bool manual, char* outFileName, const size_t outFil
     return false;
   }
 
-  if (!manual && Storage.exists(backupPath) && backupFileMatches(backupPath, data.data(), dataSize)) {
+  if (!manual && Storage.exists(backupPath) && backupFileMatches(backupPath)) {
     if (outFileName != nullptr && outFileNameLen > 0) {
       copyString(fileName, outFileName, outFileNameLen);
     }
@@ -237,7 +237,7 @@ bool backupGlobalStats(const bool manual, char* outFileName, const size_t outFil
     return true;
   }
 
-  if (!writeBackupFile(backupPath, data.data(), dataSize)) return false;
+  if (!writeBackupFile(backupPath)) return false;
   pruneBackups(DEFAULT_BACKUP_KEEP_COUNT);
 
   if (outFileName != nullptr && outFileNameLen > 0) {

@@ -103,6 +103,7 @@ class HalFile : public Print {
   // SdFat returns an invalid child for both clean end-of-directory and a
   // failed directory read. Preserve which case ended the latest iteration.
   bool iterationFailed_ = false;
+  bool enumerationFailed_ = false;
 
   explicit HalFile(ImplPtr impl);
   static void* allocateImplStorage();
@@ -134,11 +135,16 @@ class HalFile : public Print {
   size_t write(const uint8_t* buf, size_t count) override { return write(static_cast<const void*>(buf), count); }
   size_t write(uint8_t b) override;
   bool sync();
+  bool truncate(uint64_t length);
   bool rename(const char* newPath);
   bool isDirectory() const;
   void rewindDirectory();
   bool close();
   HalFile openNextFile();
+  // Strict scans distinguish clean EOF from I/O, corrupt entries and wrapper OOM.
+  // Failure is sticky for this handle; retry by closing and reopening the directory.
+  HalFile openNextFileChecked();
+  bool enumerationFailed() const { return enumerationFailed_; }
   bool allocationFailed() const { return allocationFailed_; }
   bool iterationFailed() const { return iterationFailed_; }
   bool isOpen() const;

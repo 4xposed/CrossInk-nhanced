@@ -16,6 +16,7 @@
 #include "CrossPointSettings.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookFolderMutation.h"
 
 #if defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO && !ARDUINO_USB_MODE && !defined(SIMULATOR)
 #define CROSSINK_USB_RX_OVERFLOW_ENABLED
@@ -247,7 +248,12 @@ bool readNormalizedPath(char* output, size_t outputSize) {
   return readPath(rawPath, sizeof(rawPath)) && normalizeSerialPath(rawPath, output, outputSize);
 }
 
-bool ensureFileTransferAllowed() {
+bool ensureFileTransferAllowed(bool mutation = false) {
+  if (mutation && fileTransferAllowed && BookFolderMutation::storesFrozen()) BookFolderMutation::retryPendingMutation();
+  if (BookFolderMutation::storesFrozen()) {
+    writeLine("ERR:metadata_recovery_pending\n");
+    return false;
+  }
   if (fileTransferAllowed) return true;
   writeLine("ERR:not_on_home\n");
   return false;
@@ -370,7 +376,7 @@ void handleList() {
 void handleMkdir() {
   char path[PATH_BUFFER_SIZE];
   if (!readNormalizedPath(path, sizeof(path))) return;
-  if (!ensureFileTransferAllowed()) return;
+  if (!ensureFileTransferAllowed(true)) return;
   if (isProtectedPath(path)) {
     writeLine("ERR:protected_path\n");
     return;
@@ -433,7 +439,7 @@ void handleWrite() {
   }
 #endif
 
-  if (!ensureFileTransferAllowed()) return;
+  if (!ensureFileTransferAllowed(true)) return;
   if (strcmp(path, "/") == 0 || isProtectedPath(path)) {
     writeLine("ERR:protected_path\n");
     return;
@@ -585,7 +591,7 @@ void handleWrite() {
 void handleRemove() {
   char path[PATH_BUFFER_SIZE];
   if (!readNormalizedPath(path, sizeof(path))) return;
-  if (!ensureFileTransferAllowed()) return;
+  if (!ensureFileTransferAllowed(true)) return;
   if (strcmp(path, "/") == 0 || isProtectedPath(path)) {
     writeLine("ERR:protected_path\n");
     return;
@@ -596,12 +602,15 @@ void handleRemove() {
   }
 
   sdFontSystem.markRegistryDirtyForPath(path);
-  if (removeRecursive(path)) {
+  const auto result = BookFolderMutation::remove(path, REMOVE_RECURSIVE_MAX_DEPTH);
+  if (result == BookFolderMutation::Result::Complete) {
     ImageFolderIndex::invalidateForPath(path);
     sdFontSystem.markRegistryDirtyForPath(path);
     writeLine("OK\n");
   } else {
-    writeLine("ERR:remove_failed\n");
+    writeLine("ERR:");
+    writeLine(BookFolderMutation::error(result));
+    writeLine("\n");
   }
 }
 
@@ -610,7 +619,7 @@ void handleRename() {
   char dst[PATH_BUFFER_SIZE];
   if (!readNormalizedPath(src, sizeof(src))) return;
   if (!readNormalizedPath(dst, sizeof(dst))) return;
-  if (!ensureFileTransferAllowed()) return;
+  if (!ensureFileTransferAllowed(true)) return;
 
   if (strcmp(src, "/") == 0 || strcmp(dst, "/") == 0 || isProtectedPath(src) || isProtectedPath(dst)) {
     writeLine("ERR:protected_path\n");
@@ -631,6 +640,26 @@ void handleRename() {
     return;
   }
 
+  bool directory = false;
+  if (!isDirectory(src, directory)) {
+    writeLine("ERR:open_failed\n");
+    return;
+  }
+  if (directory) {
+    const auto result = BookFolderMutation::move(src, dst);
+    if (result == BookFolderMutation::Result::Complete) {
+      ImageFolderIndex::invalidateForPath(src);
+      ImageFolderIndex::invalidateForPath(dst);
+      writeLine("OK\n");
+      return;
+    }
+    if (result != BookFolderMutation::Result::NotManga) {
+      writeLine("ERR:");
+      writeLine(BookFolderMutation::error(result));
+      writeLine("\n");
+      return;
+    }
+  }
   if (Storage.rename(src, dst)) {
     clearCachesForPath(src);
     clearCachesForPath(dst);

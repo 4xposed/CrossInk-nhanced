@@ -1,0 +1,91 @@
+name: Manga desktop tool
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'tools/crossink-manga/**'
+      - '.github/workflows/manga-tool.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  models:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tools/crossink-manga
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.14'
+      - name: Export models once (development Python only)
+        run: >-
+          uv run --python 3.11 --with mokuro==0.2.5 --with manga-ocr==0.1.16
+          --with torch==2.14.0 --with transformers==5.16.1
+          --with onnx==1.22.0 --with onnxruntime==1.29.0
+          python dev/prepare_bundle_assets.py --output models-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-ocr-models
+          path: tools/crossink-manga/models-build/
+          compression-level: 0
+
+  build:
+    needs: models
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            ort: '1.29.0'
+          - os: windows-2022
+            ort: '1.29.0'
+          - os: macos-15
+            ort: '1.29.0'
+          - os: macos-15-intel
+            ort: '1.23.2'
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: tools/crossink-manga
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.14'
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-ocr-models
+          path: tools/crossink-manga/models-build
+      - name: Check and test
+        run: |
+          cargo +stable fmt --check
+          cargo +stable test --locked
+          cargo +stable clippy --locked --all-targets -- -D warnings
+          cargo +stable test --locked --manifest-path rar-helper/Cargo.toml
+          cargo +stable clippy --locked --manifest-path rar-helper/Cargo.toml --all-targets -- -D warnings
+      - name: Build executables and gather corresponding source
+        run: |
+          cargo +stable build --release --locked
+          CARGO_TARGET_DIR="$PWD/target" cargo +stable build --release --locked --manifest-path rar-helper/Cargo.toml
+          cargo +stable vendor --locked --sync rar-helper/Cargo.toml vendor > vendor-config.txt
+      - name: Locate architecture-specific inference runtime
+        run: uv run --python 3.11 --with onnxruntime==${{ matrix.ort }} python dev/runtime_environment.py
+      - name: Package native executable, models, runtime and source
+        env:
+          ARTIFACT_PLATFORM: ${{ runner.os }}-${{ runner.arch }}
+          NATIVE_MODELS_DIR: models-build
+        run: python3 package.py
+      - name: Verify extracted native bundle without Python on PATH
+        run: python3 dev/test_bundle.py dist/*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crossink-manga-${{ runner.os }}-${{ runner.arch }}
+          path: tools/crossink-manga/dist/*.zip
+          compression-level: 0

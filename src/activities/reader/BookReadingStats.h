@@ -3,9 +3,10 @@
 #include <cstdint>
 #include <string>
 
+#include "ReadingLanguageStats.h"
 #include "ReadingStatsUtils.h"
 
-// Per-book reading statistics, persisted to cachePath/stats_v5.bin.
+// Per-book reading statistics, persisted to cachePath/stats_v6.bin.
 struct BookReadingStats {
   uint16_t sessionCount = 0;              // Total times this book was opened
   uint32_t totalReadingSeconds = 0;       // Accumulated reading time in seconds
@@ -21,17 +22,23 @@ struct BookReadingStats {
   std::array<uint32_t, READING_TIME_BUCKET_COUNT> timeOfDaySeconds{};
   std::array<uint32_t, READING_DAY_OF_WEEK_COUNT> dayOfWeekSeconds{};
 
-  // Loads stats from cachePath/stats_v5.bin, with fallback reads from the
-  // previous versioned filename and legacy cachePath/stats.bin. Returns
-  // default-constructed stats if no compatible file exists.
+  ReadingLanguageTotals languageTotals;
+  // A failed read must not turn existing durable data into a writable empty snapshot.
+  bool persistenceWritable = true;
+  static constexpr uint8_t CURRENT_FILE_VERSION = 6;
+  static constexpr size_t SUMMARY_FILE_SIZE = 137;
+  static constexpr size_t MAX_LOCAL_FILE_SIZE = 26429;
+
+  // Loads stats from cachePath/stats_v6.bin, with fallback reads from the
+  // v5/v4 filenames and legacy cachePath/stats.bin. Failed reads return a
+  // non-writable value; missing files return a writable fresh value.
   static BookReadingStats load(const std::string& cachePath);
 
-  // Saves stats to cachePath/stats_v5.bin through recoverable .tmp/.bak files.
-  void save(const std::string& cachePath) const;
+  // Saves stats to cachePath/stats_v6.bin.
+  bool save(const std::string& cachePath, const ReadingLanguageSpan* span = nullptr) const;
 
-  // Deletes cachePath/stats_v5.bin, its transaction files, the previous
-  // versioned filename, and legacy cachePath/stats.bin. Missing files are
-  // treated as success.
+  // Deletes v6/v5/v4, legacy stats.bin, and their temp/recovery files.
+  // Missing files are treated as success.
   static bool remove(const std::string& cachePath);
 
   // Updates the running reading pace with one forward page dwell sample.

@@ -67,11 +67,11 @@ void ScreenshotUtil::buildFilename(const ScreenshotInfo& info, char* buf, size_t
   }
 }
 
-void ScreenshotUtil::takeScreenshot(GfxRenderer& renderer) {
+bool ScreenshotUtil::takeScreenshot(GfxRenderer& renderer) {
   const uint8_t* fb = renderer.getFrameBuffer();
   if (!fb) {
     LOG_ERR("SCR", "Framebuffer not available");
-    return;
+    return false;
   }
 
   ScreenshotInfo info = activityManager.getScreenshotInfo();
@@ -83,7 +83,7 @@ void ScreenshotUtil::takeScreenshot(GfxRenderer& renderer) {
     LOG_DBG("SCR", "Screenshot saved to %s", filename);
   } else {
     LOG_ERR("SCR", "Failed to save screenshot");
-    return;
+    return false;
   }
 
   // Invert only the border so feedback never depends on allocating a second
@@ -106,6 +106,7 @@ void ScreenshotUtil::takeScreenshot(GfxRenderer& renderer) {
   delay(1000);
   invertBorder();
   renderer.displayBuffer(HalDisplay::RefreshMode::HALF_REFRESH);
+  return true;
 }
 
 bool ScreenshotUtil::saveFramebufferAsBmp(const char* filename, const uint8_t* framebuffer, int width, int height) {
@@ -182,10 +183,11 @@ bool ScreenshotUtil::saveFramebufferAsBmp(const char* filename, const uint8_t* f
     memset(rowBuffer, 0, rowSizePadded);  // Clear the buffer for the next row
   }
 
-  // Explicitly close() file before calling Storage.remove()
-  file.close();
+  // A late SD close failure is a failed screenshot too; do not report success.
+  const bool closed = file.close();
 
-  if (write_error) {
+  if (write_error || !closed) {
+    LOG_ERR("SCR", "Screenshot write or close failed");
     Storage.remove(filename);
     return false;
   }

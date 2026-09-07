@@ -1,0 +1,141 @@
+--- a/src/HalStorage.h
++++ b/src/HalStorage.h
+@@ -76,6 +76,8 @@
+   friend class HalStorage;
+   class Impl;
+   std::unique_ptr<Impl> impl;
++  bool enumerationFailed_ = false;
++  bool allocationFailed_ = false;
+   explicit HalFile(std::unique_ptr<Impl> impl);
+ 
+ public:
+@@ -103,13 +105,15 @@
+   size_t write(const uint8_t *buf, size_t count) override;
+   size_t write(uint8_t b) override;
+   bool sync();
++  bool truncate(uint64_t size);
+   bool rename(const char *newPath);
+   bool isDirectory() const;
+   void rewindDirectory();
+   bool close();
+   HalFile openNextFile();
+-  // The host filesystem does not model the device wrapper-allocation failure.
+-  bool allocationFailed() const { return false; }
++  HalFile openNextFileChecked();
++  bool enumerationFailed() const { return enumerationFailed_; }
++  bool allocationFailed() const { return allocationFailed_; }
+   bool isOpen() const;
+   operator bool() const;
+ };
+--- a/src/HalStorage.cpp
++++ b/src/HalStorage.cpp
+@@ -10,6 +10,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <limits>
++#include <new>
+ #include <sstream>
+ #include <vector>
+ 
+@@ -118,21 +119,16 @@
+   bool isOpen() const { return fd >= 0 || dir != nullptr; }
+ };
+ 
+-HalFile::HalFile() : impl(new Impl()) {}
+-HalFile::~HalFile() {
+-  if (impl && impl->fd >= 0) {
+-    ::close(impl->fd);
+-    impl->fd = -1;
+-  }
+-}
+-HalFile::HalFile(HalFile &&other) : impl(std::move(other.impl)) {}
++HalFile::HalFile() : impl(new (std::nothrow) Impl()) { allocationFailed_ = !impl; }
++HalFile::~HalFile() { close(); }
++HalFile::HalFile(HalFile &&other) { *this = std::move(other); }
+ HalFile &HalFile::operator=(HalFile &&other) {
+   if (this != &other) {
+-    if (impl && impl->fd >= 0) {
+-      ::close(impl->fd);
+-      impl->fd = -1;
+-    }
++    close();
+     impl = std::move(other.impl);
++    enumerationFailed_ = other.enumerationFailed_;
++    allocationFailed_ = other.allocationFailed_;
++    other.enumerationFailed_ = other.allocationFailed_ = false;
+   }
+   return *this;
+ }
+@@ -179,6 +175,10 @@
+     return false;
+   return lseek(impl->fd, static_cast<off_t>(pos), SEEK_SET) >= 0;
+ }
++bool HalFile::truncate(uint64_t size) {
++  return impl && impl->fd >= 0 && size <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()) &&
++         ftruncate(impl->fd, static_cast<off_t>(size)) == 0;
++}
+ bool HalFile::seekCur(int64_t offset) {
+   if (!impl || impl->fd < 0)
+     return false;
+@@ -247,17 +247,33 @@
+     rewinddir(impl->dir);
+ }
+ bool HalFile::close() {
+-  if (!impl)
+-    return true;
+-  if (impl->dir) {
+-    closedir(impl->dir);
+-    impl->dir = nullptr;
+-  }
+-  if (impl->fd >= 0) {
+-    ::close(impl->fd);
+-    impl->fd = -1;
+-  }
+-  return true;
++  enumerationFailed_ = allocationFailed_ = false;
++  if (!impl) return true;
++  bool ok = true;
++  if (impl->dir) { ok = closedir(impl->dir) == 0; impl->dir = nullptr; }
++  if (impl->fd >= 0) { ok = (::close(impl->fd) == 0) && ok; impl->fd = -1; }
++  return ok;
++}
++HalFile HalFile::openNextFileChecked() {
++  if (enumerationFailed_ || !impl || !impl->dir) {
++    enumerationFailed_ = true; return HalFile();
++  }
++  while (true) {
++    // Clear immediately before each call: stat/open can leave stale errno.
++    errno = 0;
++    struct dirent *entry = readdir(impl->dir);
++    if (!entry) { enumerationFailed_ = errno != 0; return HalFile(); }
++    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
++    std::string path = impl->path + "/" + entry->d_name;
++    HalFile child;
++    if (!child.impl) { allocationFailed_ = enumerationFailed_ = true; return child; }
++    struct stat st;
++    if (stat(path.c_str(), &st) != 0 ||
++        !(S_ISDIR(st.st_mode) ? child.impl->openAsDir(path.c_str()) : child.impl->open(path.c_str(), O_RDONLY))) {
++      enumerationFailed_ = true; return HalFile();
++    }
++    return child;
++  }
+ }
+ HalFile HalFile::openNextFile() {
+   if (!impl || !impl->dir)
+@@ -275,6 +291,7 @@
+     childFsPath += entry->d_name;
+ 
+     HalFile child;
++    if (!child.impl) { allocationFailed_ = true; return child; }
+     struct stat st;
+     if (stat(childFsPath.c_str(), &st) != 0)
+       continue;
+@@ -297,7 +314,7 @@
+ HalFile HalStorage::open(const char *path, const oflag_t oflag) {
+   std::string full = resolveStoragePath(path);
+   HalFile f;
+-  if (full.empty()) {
++  if (full.empty() || !f.impl) {
+     return f;
+   }
+   if ((oflag & O_CREAT) != 0) {

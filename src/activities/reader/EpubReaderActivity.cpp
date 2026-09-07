@@ -55,6 +55,7 @@
 #include "QrDisplayActivity.h"
 #include "QuickActions.h"
 #include "ReaderUtils.h"
+#include "ReadingStatsSave.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
@@ -2310,11 +2311,18 @@ void EpubReaderActivity::onExit() {
     // Sessions under 1 minute don't count toward session count or reading time.
     // Sessions under 10 seconds don't add to reading time.
     const uint32_t elapsedSecs = sessionReadingSeconds;
+    ReadingLanguageSpan languageSpan;
+    languageSpan.localStart = hasSessionStartLocalDateTime ? sessionStartLocalDateTime : ReadingStatsDateTime{};
+    languageSpan.seconds = elapsedSecs >= 10 ? elapsedSecs : 0;
+    normalizeReadingLanguage(epub ? std::string_view(epub->getLanguage()) : std::string_view{},
+                             languageSpan.normalizedTag);
     if (elapsedSecs >= 60) {
       stats.sessionCount++;
       globalStats.totalSessions++;
     }
     if (elapsedSecs >= 10) {
+      addReadingLanguageSeconds(stats.languageTotals, languageSpan.normalizedTag, elapsedSecs);
+      addReadingLanguageSeconds(globalStats.languageTotals, languageSpan.normalizedTag, elapsedSecs);
       stats.totalReadingSeconds += elapsedSecs;
       globalStats.totalReadingSeconds += elapsedSecs;
       if (hasSessionStartLocalDateTime) {
@@ -2328,9 +2336,8 @@ void EpubReaderActivity::onExit() {
     if (epub) {
       recoverStoredPaceFromSession("reader_exit");
       refreshCachedTimeLeftEstimate();
-      stats.save(epub->getCachePath());
     }
-    globalStats.save();
+    saveReadingStatsWithRetry(epub ? epub->getCachePath() : std::string{}, stats, globalStats, &languageSpan);
   }
 
   // Leaving mid-footnote loses the in-RAM return stack on deep sleep; persist the
@@ -2759,8 +2766,7 @@ void EpubReaderActivity::loop() {
         [this](const ActivityResult& result) {
           resumeReadingPaceTimer("completion_prompt_return");
           if (!result.isCancelled) {
-            setBookCompleted(true);
-            showCompletedFeedback(true);
+            if (setBookCompleted(true)) showCompletedFeedback(true);
           }
           requestUpdate();
         });
@@ -3896,24 +3902,23 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           hasSyncedStats ? GlobalReadingStats::loadAggregated(globalStats) : GlobalReadingStats{};
       pauseReadingPaceTimer("book_stats");
       if (hasSyncedStats) {
-        startActivityForResult(
-            std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(), epub->getCachePath(),
-                                                displayStats, getCurrentBookProgressPercent(), hasEstimatedTimeLeft,
-                                                estimatedTimeLeftSeconds, globalStats, displayAllDevicesStats),
-            [this, returnToReaderMenu](const ActivityResult&) { handleBookStatsReturn(returnToReaderMenu); });
+        startActivityForResult(std::make_unique<BookStatsActivity>(
+                                   renderer, mappedInput, epub->getTitle(), epub->getCachePath(), displayStats,
+                                   getCurrentBookProgressPercent(), hasEstimatedTimeLeft, estimatedTimeLeftSeconds,
+                                   globalStats, displayAllDevicesStats, false, &stats),
+                               [this, returnToReaderMenu](const ActivityResult&) { handleBookStatsReturn(returnToReaderMenu); });
       } else {
         startActivityForResult(
             std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(), epub->getCachePath(),
                                                 displayStats, getCurrentBookProgressPercent(), hasEstimatedTimeLeft,
-                                                estimatedTimeLeftSeconds, globalStats),
+                                                estimatedTimeLeftSeconds, globalStats, false, &stats),
             [this, returnToReaderMenu](const ActivityResult&) { handleBookStatsReturn(returnToReaderMenu); });
       }
       break;
     }
     case EpubReaderMenuActivity::MenuAction::TOGGLE_COMPLETED: {
       const bool markCompleted = !stats.isCompleted;
-      setBookCompleted(markCompleted);
-      showCompletedFeedback(markCompleted);
+      if (setBookCompleted(markCompleted)) showCompletedFeedback(markCompleted);
       requestUpdate();
       break;
     }
@@ -4728,8 +4733,7 @@ void EpubReaderActivity::executeReaderQuickAction(CrossPointSettings::LONG_PRESS
       break;
     case CrossPointSettings::LONG_MENU_MARK_FINISHED: {
       const bool newCompleted = !stats.isCompleted;
-      setBookCompleted(newCompleted);
-      showCompletedFeedback(newCompleted);
+      if (setBookCompleted(newCompleted)) showCompletedFeedback(newCompleted);
     }
       requestUpdate();
       break;
@@ -5228,18 +5232,29 @@ void EpubReaderActivity::suppressPowerShortcutRelease() {
   mappedInput.suppressNextPowerConfirmRelease();
 }
 
-void EpubReaderActivity::setBookCompleted(bool isCompleted) {
-  if (stats.isCompleted == isCompleted) {
-    return;
-  }
-
-  stats.isCompleted = isCompleted;
-  if (isCompleted && !stats.finishedDateManual) {
-    ReadingStatsDateTime now;
-    if (getCurrentLocalReadingStatsDateTime(now)) {
-      stats.finishedDate = now.date;
+bool EpubReaderActivity::setBookCompleted(bool isCompleted) {
+  if (stats.isCompleted == isCompleted && completionBookSaved && completionGlobalSaved) return true;
+  if (stats.isCompleted != isCompleted) {
+    completionBookSaved = completionGlobalSaved = false;
+    stats.isCompleted = isCompleted;
+    if (isCompleted && !stats.finishedDateManual) {
+      ReadingStatsDateTime now;
+      if (getCurrentLocalReadingStatsDateTime(now)) {
+        stats.finishedDate = now.date;
+      }
+    }
+    if (isCompleted) {
+      globalStats.completedBooks++;
+    } else if (globalStats.completedBooks > 0) {
+      globalStats.completedBooks--;
     }
   }
+  refreshCachedTimeLeftEstimate();
+  const auto saved = saveReadingStatsWithRetry(epub->getCachePath(), stats, globalStats, nullptr,
+                                               {completionBookSaved, completionGlobalSaved});
+  completionBookSaved = saved.book;
+  completionGlobalSaved = saved.global;
+  if (!saved.complete()) return false;
   if (isCompleted) {
     completionPromptShown = true;
     if (SETTINGS.removeReadBooksFromRecents) {
@@ -5255,15 +5270,7 @@ void EpubReaderActivity::setBookCompleted(bool isCompleted) {
     recentsEntryRemoved = false;
     pendingReadFolderMove = false;
   }
-  if (isCompleted) {
-    globalStats.completedBooks++;
-  } else if (globalStats.completedBooks > 0) {
-    globalStats.completedBooks--;
-  }
-
-  refreshCachedTimeLeftEstimate();
-  stats.save(epub->getCachePath());
-  globalStats.save();
+  return true;
 }
 
 void EpubReaderActivity::showCompletedFeedback(bool isCompleted) {

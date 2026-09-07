@@ -371,3 +371,32 @@ void DictionaryEngine::close() {
   cancelled_ = false;
   currentEpoch_ = 0;
 }
+
+DictionaryScanIdentityStatus DictionaryEngine::beginScanIdentity(DictionaryScanIdentityState& state) {
+  if (!opened_ || cancelled_) return state.fail(DictionaryScanIdentityStatus::Unavailable);
+#ifdef CROSSINK_DICT_TESTING
+  if (useTestFunctions_) return state.fail(DictionaryScanIdentityStatus::Unavailable);
+#endif
+  return backendKind_ == DictionaryBackendKind::Japanese ? japaneseBackend_.beginScanIdentity(state)
+                                                         : starDictBackend_.beginScanIdentity(state);
+}
+DictionaryScanIdentityStatus DictionaryEngine::stepScanIdentity(DictionaryScanIdentityState& state, size_t budget) {
+  if (!opened_ || cancelled_) {
+    state.cancel();
+    return state.status();
+  }
+  auto status = backendKind_ == DictionaryBackendKind::Japanese ? japaneseBackend_.stepScanIdentity(state, budget)
+                                                                : starDictBackend_.stepScanIdentity(state, budget);
+  if (cancelled_) {
+    state.cancel();
+    return state.status();
+  }
+  return status;
+}
+bool DictionaryEngine::resumeScanIdentity(DictionaryScanIdentityState& state) {
+  const bool matching = opened_ && !cancelled_ &&
+                        (backendKind_ == DictionaryBackendKind::Japanese ? japaneseBackend_.resumeScanIdentity(state)
+                                                                         : starDictBackend_.resumeScanIdentity(state));
+  if (!matching) state.fail(DictionaryScanIdentityStatus::Unavailable);
+  return matching;
+}

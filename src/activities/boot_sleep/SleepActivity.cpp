@@ -10,6 +10,8 @@
 #include <HalGPIO.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <MangaBook.h>
+#include <MangaCover.h>
 #include <PNGdec.h>
 #include <Xtc.h>
 
@@ -258,6 +260,9 @@ std::string bookStatsCachePathFor(const std::string& path) {
   if (FsHelpers::hasXtcExtension(path)) {
     return Xtc(path, "/.crosspoint").getCachePath();
   }
+  if (manga::MangaBook::isMangaFolder(path.c_str())) {
+    return manga::cachePath(path);
+  }
   return {};
 }
 
@@ -501,6 +506,7 @@ bool selectRandomSleepImage(SleepImageMode mode, SleepImageSelection& selection,
 }  // namespace
 
 void SleepActivity::onEnter() {
+  mangaCoverBudget.begin([](void*) { return static_cast<uint32_t>(millis()); }, nullptr);
   Activity::onEnter();
   const bool renderQuickResume =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -780,9 +786,25 @@ void SleepActivity::renderCoverSleepScreen() const {
   const bool absolute = renderer.supportsAbsoluteGrayscale() &&
                         SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
   bool cropped = SETTINGS.sleepScreenCoverMode == CrossPointSettings::SLEEP_SCREEN_COVER_MODE::CROP;
-  std::string coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, absolute);
-  if (coverBmpPath.empty() && SleepCoverAssets::prepareFullCoverForPath(path, cropped, &renderer, absolute)) {
-    coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, absolute);
+  const auto coverCancellation = mangaCoverBudget.cancellation();
+  if (coverCancellation.requested()) {
+    mangaCoverDiagnostics.result = manga::ThumbnailResult::Cancelled;
+    logMangaCoverAttempt(false);
+    return (this->*renderNoCoverSleepScreen)();
+  }
+  const bool isManga = manga::MangaBook::isMangaFolder(path.c_str());
+  std::string coverBmpPath;
+  if (isManga) {
+    // Preparation returns a validated/published path. Cancellation falls back
+    // directly to the default screen, never reopening the source to guess it.
+    SleepCoverAssets::prepareFullCoverForPath(path, cropped, &renderer, coverCancellation, &mangaCoverDiagnostics,
+                                              &coverBmpPath, absolute);
+  } else {
+    coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, &renderer, {}, absolute);
+  }
+  if (isManga) logMangaCoverAttempt(!coverBmpPath.empty());
+  if (!isManga && coverBmpPath.empty() && SleepCoverAssets::prepareFullCoverForPath(path, cropped, &renderer, {}, nullptr, nullptr, absolute)) {
+    coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, &renderer, {}, absolute);
   }
   if (coverBmpPath.empty()) {
     return (this->*renderNoCoverSleepScreen)();
@@ -840,8 +862,12 @@ void SleepActivity::renderMinimalSleepScreen() const {
   }
 
   RecentBook book = recentBookForPath(path);
+  const auto coverCancellation = mangaCoverBudget.cancellation();
+  const bool isManga = manga::MangaBook::isMangaFolder(path.c_str());
+  if (isManga) SleepCoverAssets::prepareMinimalCoverForPath(path, &renderer, coverCancellation, &mangaCoverDiagnostics);
   book.coverBmpPath = SleepCoverAssets::cachedMinimalCoverPathFor(path);
-  if (book.coverBmpPath.empty() && SleepCoverAssets::prepareMinimalCoverForPath(path, &renderer)) {
+  if (isManga) logMangaCoverAttempt(!book.coverBmpPath.empty());
+  if (!isManga && book.coverBmpPath.empty() && SleepCoverAssets::prepareMinimalCoverForPath(path, &renderer)) {
     book.coverBmpPath = SleepCoverAssets::cachedMinimalCoverPathFor(path);
   }
 
@@ -859,8 +885,12 @@ void SleepActivity::renderMinimalStatsSleepScreen() const {
   }
 
   RecentBook book = recentBookForPath(path);
+  const auto coverCancellation = mangaCoverBudget.cancellation();
+  const bool isManga = manga::MangaBook::isMangaFolder(path.c_str());
+  if (isManga) SleepCoverAssets::prepareMinimalCoverForPath(path, &renderer, coverCancellation, &mangaCoverDiagnostics);
   book.coverBmpPath = SleepCoverAssets::cachedMinimalCoverPathFor(path);
-  if (book.coverBmpPath.empty() && SleepCoverAssets::prepareMinimalCoverForPath(path, &renderer)) {
+  if (isManga) logMangaCoverAttempt(!book.coverBmpPath.empty());
+  if (!isManga && book.coverBmpPath.empty() && SleepCoverAssets::prepareMinimalCoverForPath(path, &renderer)) {
     book.coverBmpPath = SleepCoverAssets::cachedMinimalCoverPathFor(path);
   }
 
@@ -880,9 +910,14 @@ void SleepActivity::renderDashboardSleepScreen() const {
   }
 
   RecentBook book = recentBookForPath(path);
+  const auto coverCancellation = mangaCoverBudget.cancellation();
+  const bool isManga = manga::MangaBook::isMangaFolder(path.c_str());
   const std::string fallbackCoverPath = book.coverBmpPath;
+  if (isManga)
+    SleepCoverAssets::prepareDashboardCoverForPath(path, &renderer, coverCancellation, &mangaCoverDiagnostics);
   book.coverBmpPath = SleepCoverAssets::cachedDashboardCoverPathFor(path);
-  if (book.coverBmpPath.empty() && SleepCoverAssets::prepareDashboardCoverForPath(path, &renderer)) {
+  if (isManga) logMangaCoverAttempt(!book.coverBmpPath.empty());
+  if (!isManga && book.coverBmpPath.empty() && SleepCoverAssets::prepareDashboardCoverForPath(path, &renderer)) {
     book.coverBmpPath = SleepCoverAssets::cachedDashboardCoverPathFor(path);
   }
   if (book.coverBmpPath.empty()) {
@@ -1241,4 +1276,30 @@ void SleepActivity::renderOverlaySleepScreen() const {
   renderer.displayGrayBuffer(TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);
   renderer.setRenderMode(GfxRenderer::BW);
   renderer.restoreBwBuffer();
+}
+
+void SleepActivity::logMangaCoverAttempt(const bool cachedFallback) const {
+  const char* result = "Failed";
+  switch (mangaCoverDiagnostics.result) {
+    case manga::ThumbnailResult::Cached:
+      result = "Cached";
+      break;
+    case manga::ThumbnailResult::Published:
+      result = "Published";
+      break;
+    case manga::ThumbnailResult::Cancelled:
+      result = "Cancelled";
+      break;
+    case manga::ThumbnailResult::Failed:
+      break;
+  }
+  LOG_INF("SLP",
+          "Manga cover policy=%u elapsed=%u max_poll_gap=%u stage=%d source=%s %dx%d target=%dx%d result=%s "
+          "cache_hit=%d cancelled=%d fallback=%s",
+          unsigned(CROSSINK_SLEEP_COVER_GENERATION_BUDGET_MS), unsigned(mangaCoverBudget.elapsed()),
+          unsigned(mangaCoverBudget.maximumPollGap()), static_cast<int>(mangaCoverDiagnostics.stage),
+          mangaCoverDiagnostics.sourceType, mangaCoverDiagnostics.sourceDimensions.width,
+          mangaCoverDiagnostics.sourceDimensions.height, mangaCoverDiagnostics.width, mangaCoverDiagnostics.height,
+          result, mangaCoverDiagnostics.result == manga::ThumbnailResult::Cached, mangaCoverBudget.cancelled(),
+          cachedFallback ? "cached-cover" : "no-cover");
 }

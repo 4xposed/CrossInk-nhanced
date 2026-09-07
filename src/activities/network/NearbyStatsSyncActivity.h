@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 
+#include "NearbyStatsProtocol.h"
 #include "activities/Activity.h"
 #include "activities/ScreenTransitionRefresh.h"
 #include "activities/reader/GlobalReadingStats.h"
@@ -29,16 +30,11 @@ class NearbyStatsSyncActivity final : public Activity {
   void enqueueEspNowPacket(const uint8_t* sourceMac, const uint8_t* data, int length);
 
  private:
-  enum class PacketType : uint8_t { HELLO = 1, STATS = 2, ACK = 3, NAME = 4, INVALID_STATS = 0xFF };
-
-  struct SyncEvent {
-    PacketType type = PacketType::HELLO;
-    std::array<uint8_t, 6> sourceMac = {};
-    std::array<uint8_t, 6> deviceMac = {};
-    std::array<uint8_t, GlobalReadingStats::CURRENT_FILE_SIZE> stats = {};
-    std::array<char, 21> deviceName = {};
-    uint8_t statsSize = 0;
-  };
+  using PacketType = nearby_stats::PacketType;
+  using SyncEvent = nearby_stats::Event;
+  nearby_stats::Session protocol_;
+  nearby_stats::Session::Callbacks protocolCallbacks();
+  void applyProtocolState();
   static constexpr size_t MAX_SYNC_EVENTS = 8;
 
   State state_ = State::STARTING;
@@ -51,9 +47,6 @@ class NearbyStatsSyncActivity final : public Activity {
   bool espNowStarted_ = false;
   bool localStatsReady_ = false;
   bool peerSeen_ = false;
-  bool peerStatsSaved_ = false;
-  bool localStatsSent_ = false;
-  bool localStatsAcked_ = false;
 
   std::array<uint8_t, 6> localDeviceMac_ = {};
   std::array<uint8_t, 6> peerSourceMac_ = {};
@@ -61,9 +54,7 @@ class NearbyStatsSyncActivity final : public Activity {
   std::array<uint8_t, GlobalReadingStats::CURRENT_FILE_SIZE> localStats_ = {};
   uint8_t localStatsSize_ = 0;
 
-  uint32_t syncStartedMs_ = 0;
   uint32_t lastHelloMs_ = 0;
-  uint32_t lastStatsSendMs_ = 0;
   std::string peerId_;
   std::string peerName_;
   std::string errorMessage_;
@@ -76,9 +67,6 @@ class NearbyStatsSyncActivity final : public Activity {
   void handleEvent(const SyncEvent& event);
   bool sendPacket(PacketType type, const uint8_t* peerMac);
   bool sendHello();
-  bool sendDeviceName(const uint8_t* peerMac);
-  bool sendLocalStats();
-  bool sendAck(const uint8_t* peerMac);
   bool addPeer(const uint8_t* peerMac);
   void exitViaBack();
   void updateSyncProgress();

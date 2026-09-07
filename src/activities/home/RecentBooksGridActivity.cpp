@@ -8,6 +8,9 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <MangaBook.h>
+#include <MangaCover.h>
+#include <Memory.h>
 #include <Xtc.h>
 
 #include <algorithm>
@@ -17,6 +20,7 @@
 #include "BookActions.h"
 #include "CrossPointSettings.h"
 #include "FileBrowserActionActivity.h"
+#include "MangaCoverInput.h"
 #include "MappedInputManager.h"
 #include "RecentBookProgress.h"
 #include "RecentBooksStore.h"
@@ -28,8 +32,13 @@
 #include "components/UITheme.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
+#include "util/BookFolderMutation.h"
 
 namespace {
+bool isMangaRecentBook(const RecentBook& book) {
+  return book.coverBmpPath.rfind("/.crosspoint/manga_", 0) == 0 || manga::MangaBook::isMangaFolder(book.path.c_str());
+}
+
 constexpr int kCoverCornerRadius = 2;
 constexpr int kGridColumns = 3;
 constexpr int kTitleStripHeight = 32;
@@ -153,6 +162,8 @@ bool hasThumbnailPlaceholder(const std::string& coverBmpPath) {
 }
 
 bool needsCoverThumbGeneration(const RecentBook& book, const std::string& thumbPath) {
+  // Manga's identity sidecar validates warm thumbnails inside generateThumbnail.
+  if (isMangaRecentBook(book)) return true;
   if (thumbPath.empty() || !Storage.exists(thumbPath.c_str())) {
     return true;
   }
@@ -190,6 +201,9 @@ void calculateCoverFillCrop(const Bitmap& bitmap, float& cropX, float& cropY) {
 }
 
 std::string getReusableCoverPath(const RecentBook& book) {
+  if (isMangaRecentBook(book)) {
+    return manga::thumbnailTemplatePath(book.path);
+  }
   if (FsHelpers::hasEpubExtension(book.path)) {
     return Epub(book.path, "/.crosspoint").getThumbBmpPath();
   }
@@ -200,7 +214,8 @@ std::string getReusableCoverPath(const RecentBook& book) {
 }
 
 void ensureReusableCoverPath(RecentBook& book) {
-  if (book.coverState == RecentBook::CoverState::Missing || hasThumbnailPlaceholder(book.coverBmpPath)) {
+  if (!isMangaRecentBook(book) &&
+      (book.coverState == RecentBook::CoverState::Missing || hasThumbnailPlaceholder(book.coverBmpPath))) {
     return;
   }
 
@@ -210,11 +225,14 @@ void ensureReusableCoverPath(RecentBook& book) {
   }
 
   book.coverBmpPath = reusablePath;
+  if (isMangaRecentBook(book)) book.coverState = RecentBook::CoverState::Unknown;
   updateRecentBookCover(book);
 }
 }  // namespace
 
 void RecentBooksGridActivity::loadRecentBooks() {
+  coverAttempts.fill({});
+  coverWork.authorizeIntent();
   recentBooks.clear();
   const auto& books = RECENT_BOOKS.getBooks();
   recentBooks.reserve(std::min(books.size(), static_cast<size_t>(MAX_GRID_BOOKS)));
@@ -237,10 +255,17 @@ void RecentBooksGridActivity::ensureProgressLoaded(const int index) {
 }
 
 void RecentBooksGridActivity::loadPageCovers(int pageStart) {
+  manga::ThumbnailDiagnostics coverDiagnostics;
+  auto batch = coverWork.batch();
+  if (batch.cancelled()) return;
+  coverWork.active = true;
+  const ScopedCleanup finishCoverWork{[&] { coverWork.active = false; }};
+
   const int pageEnd = std::min(pageStart + BOOKS_PER_PAGE, static_cast<int>(recentBooks.size()));
 
   bool needsGeneration = false;
   for (int i = pageStart; i < pageEnd; ++i) {
+    if (batch.cancelled()) return;
     RecentBook& book = recentBooks[i].book;
     ensureReusableCoverPath(book);
     if (book.coverBmpPath.empty()) {
@@ -263,6 +288,7 @@ void RecentBooksGridActivity::loadPageCovers(int pageStart) {
   int processedCount = 0;
 
   for (int i = pageStart; i < pageEnd; ++i) {
+    if (batch.cancelled()) return;
     RecentBook& book = recentBooks[i].book;
     if (book.coverBmpPath.empty()) {
       processedCount++;
@@ -270,7 +296,24 @@ void RecentBooksGridActivity::loadPageCovers(int pageStart) {
     }
     const std::string coverPath = UITheme::getCoverThumbPath(book.coverBmpPath, COVER_WIDTH, COVER_HEIGHT);
     if (needsCoverThumbGeneration(book, coverPath)) {
-      if (FsHelpers::hasEpubExtension(book.path)) {
+      if (isMangaRecentBook(book)) {
+        if (coverAttempts[i].attempted) continue;
+        coverAttempts[i].attempted = true;
+        manga::MangaBook mangaBook;
+        if (mangaBook.open(book.path.c_str(), manga::OpenMode::Cover)) {
+          const bool coverMissing = !Storage.exists(coverPath.c_str());
+          if (coverMissing && !showingLoading) {
+            showingLoading = true;
+            popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+          }
+          if (coverMissing) GUI.fillPopupProgress(renderer, popupRect, 10 + (processedCount * 90) / totalToProcess);
+          // A false result is transient: retain Unknown so the next visit retries.
+          manga::generateThumbnailControlled(mangaBook, book.path, COVER_WIDTH, COVER_HEIGHT, batch.cancellation(),
+                                             &coverDiagnostics);
+          coverAttempts[i].record(COVER_WIDTH, COVER_HEIGHT, coverDiagnostics);
+          if (batch.cancelled()) return;
+        }
+      } else if (FsHelpers::hasEpubExtension(book.path)) {
         Epub epub(book.path, "/.crosspoint");
         if (epub.load(true, true, Epub::XLocationLoadMode::Skip)) {
           if (!showingLoading) {
@@ -321,6 +364,8 @@ void RecentBooksGridActivity::onEnter() {
 }
 
 void RecentBooksGridActivity::onExit() {
+  if (coverWork.active) LOG_ERR("MCV", "Cover owner exited before draining");
+  coverAttempts.fill({});
   Activity::onExit();
   recentBooks.clear();
 }
@@ -359,6 +404,7 @@ int RecentBooksGridActivity::bookIndexFromPoint(const int x, const int y) {
 }
 
 void RecentBooksGridActivity::loop() {
+  MangaCoverInput coverInput(coverWork, mappedInput);
   if (pendingCacheDeletedFeedback && millis() - cacheDeletedFeedbackShowTime >= kActionFeedbackMs) {
     pendingCacheDeletedFeedback = false;
     requestUpdate();
@@ -485,13 +531,23 @@ void RecentBooksGridActivity::promptDeleteBook(const RecentBook& book) {
       return;
     }
 
-    BookActions::clearFileMetadata(path);
-    if (!Storage.remove(path.c_str())) {
-      LOG_ERR("RBGA", "Failed to delete file: %s", path.c_str());
-      return;
+    if (manga::MangaBook::isMangaFolder(path.c_str())) {
+      const auto result = BookFolderMutation::remove(path.c_str());
+      if (result != BookFolderMutation::Result::Complete) {
+        LOG_ERR("RBGA", "Delete failed: %s", BookFolderMutation::error(result));
+        BookActions::drawToast(renderer, result == BookFolderMutation::Result::RecoveryPending
+                                             ? tr(STR_METADATA_RECOVERY_PENDING)
+                                             : tr(STR_ERROR_GENERAL_FAILURE));
+        return;
+      }
+    } else {
+      if (!Storage.remove(path.c_str())) {
+        LOG_ERR("RBGA", "Failed to delete book: %s", path.c_str());
+        return;
+      }
+      BookActions::clearFileMetadata(path);
+      RECENT_BOOKS.removeByPath(path);
     }
-
-    RECENT_BOOKS.removeByPath(path);
     reloadAfterBookAction();
   };
 
@@ -593,15 +649,20 @@ void RecentBooksGridActivity::showBookActionMenu(const int bookIndex, const bool
                   reloadAfterBookAction();
                 });
             return;
-          case FileBrowserAction::ToggleCompleted: {
-            bool completed = false;
-            if (BookActions::toggleBookCompleted(book.path, book.title, completed)) {
-              BookActions::drawToast(renderer, completed ? tr(STR_MARKED_FINISHED) : tr(STR_MARKED_UNFINISHED));
-              delay(1000);
-            }
-            reloadAfterBookAction();
+          case FileBrowserAction::ToggleCompleted:
+            BookActions::startCompletionEdit(
+                *this, renderer, mappedInput, book.path, book.title, [this](const ActivityResult& result) {
+                  if (!result.isCancelled) {
+                    const auto* completed = std::get_if<OptionSelectionResult>(&result.data);
+                    if (completed) {
+                      BookActions::drawToast(renderer,
+                                             completed->index ? tr(STR_MARKED_FINISHED) : tr(STR_MARKED_UNFINISHED));
+                      delay(1000);
+                    }
+                  }
+                  reloadAfterBookAction();
+                });
             return;
-          }
           case FileBrowserAction::EpubRenderMode: {
             const uint8_t currentIndex =
                 BookActions::epubRenderModeDisplayIndex(EpubReaderActivity::loadBookRenderMode(book.path));

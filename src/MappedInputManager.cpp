@@ -309,6 +309,9 @@ bool MappedInputManager::wasScreenTapped(int& x, int& y) const {
       simulatorTouch.longPressFired = false;
       return false;
     }
+    // Synthetic swipes must exclude taps, as the hardware release classifier
+    // does. Reuse the injected swipe decision rather than adding another slop.
+    if (wasSwipe() != SwipeDir::None) return false;
     x = simulatorTouch.startX;
     y = simulatorTouch.startY;
     rememberTouchHeldTime();
@@ -1102,6 +1105,12 @@ void MappedInputManager::simulatorInjectRelease(Button button) {
   simulatorPressed[idx] = false;
   simulatorReleased[idx] = true;
   simulatorHeld[idx] = false;
+  // A popup can select on press and suppress the matching release before it
+  // opens a child activity. Injected events must honor that hardware contract.
+  if (button == Button::Confirm && suppressConfirmRelease) {
+    suppressConfirmRelease = false;
+    simulatorReleased[idx] = false;
+  }
 }
 
 void MappedInputManager::simulatorClearInputFrame() {

@@ -1,0 +1,1 @@
+`native-smoke.png` is a synthetic two-panel page generated for CrossInk testing. Its repeated Japanese sentence is “猫が好きです。” It is not extracted from the user's manga. Bundle tests use it to exercise native detector and recognizer loading/inference; recognition accuracy is measured separately against the user's local CBZ.

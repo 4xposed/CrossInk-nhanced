@@ -551,6 +551,7 @@ bool makeKey(std::string_view headword, char* key) {
 }  // namespace
 
 struct DictIndex::Impl {
+  bool identityReadError = false;
   SourceState vocab;
   SourceState grammar;
   SourceState names;
@@ -591,16 +592,20 @@ JapaneseDictStatus DictIndex::open() {
     status = openSource(impl_->grammar, *grammarPath, DICT_GRAMMAR);
     if (status == JapaneseDictStatus::Found)
       availableSources_ |= DICT_GRAMMAR;
-    else
+    else {
+      impl_->identityReadError = status == JapaneseDictStatus::ReadError;
       impl_->grammar.close();
+    }
   }
   const PathPair* namesPath = resolvePath(NAMES_PATHS);
   if (namesPath) {
     status = openSource(impl_->names, *namesPath, DICT_NAMES);
     if (status == JapaneseDictStatus::Found)
       availableSources_ |= DICT_NAMES;
-    else
+    else {
+      impl_->identityReadError = impl_->identityReadError || status == JapaneseDictStatus::ReadError;
       impl_->names.close();
+    }
   }
 
   for (SourceState* source : {&impl_->vocab, &impl_->grammar, &impl_->names}) {
@@ -739,4 +744,66 @@ void DictIndex::close() {
   }
   availableSources_ = 0;
   signature_ = 0;
+}
+
+DictionaryScanIdentityStatus DictIndex::beginScanIdentity(DictionaryScanIdentityState& state) {
+  state.start(1);
+  if (!impl_ || !availableSources_) return state.fail(DictionaryScanIdentityStatus::Unavailable);
+  if (impl_->identityReadError) return state.fail(DictionaryScanIdentityStatus::ReadError);
+  unsigned ordinal = 0;
+  for (SourceState* source : {&impl_->vocab, &impl_->grammar, &impl_->names}) {
+    state.number(1u << ordinal);
+    state.number(source->available);
+    if (source->available) {
+      if (source->idxFile.fileSize64() > UINT32_MAX) return state.fail(DictionaryScanIdentityStatus::Unavailable);
+      state.presentMask_ |= 1u << ordinal;
+      state.japanesePaths_[ordinal] = source->idxPath;
+      state.sizes_[ordinal] = source->idxSize;
+      state.dataSizes_[ordinal] = source->datFile.fileSize64();
+      state.text(source->idxPath, std::strlen(source->idxPath));
+      state.text(source->datPath, std::strlen(source->datPath));
+      state.number(source->idxSize);
+      state.number(state.dataSizes_[ordinal]);
+    }
+    ++ordinal;
+  }
+  return state.status_;
+}
+
+bool DictIndex::resumeScanIdentity(DictionaryScanIdentityState& state) {
+  if (!impl_ || impl_->identityReadError || state.backend_ != 1 || state.presentMask_ != availableSources_)
+    return false;
+  unsigned ordinal = 0;
+  for (SourceState* source : {&impl_->vocab, &impl_->grammar, &impl_->names}) {
+    if (source->available &&
+        (state.japanesePaths_[ordinal] != source->idxPath || state.sizes_[ordinal] != source->idxSize ||
+         state.dataSizes_[ordinal] != source->datFile.fileSize64()))
+      return false;
+    ++ordinal;
+  }
+  return true;
+}
+
+DictionaryScanIdentityStatus DictIndex::stepScanIdentity(DictionaryScanIdentityState& state, size_t byteBudget) {
+  if (state.status_ != DictionaryScanIdentityStatus::Pending) return state.status_;
+  if (!resumeScanIdentity(state)) return state.fail(DictionaryScanIdentityStatus::Unavailable);
+  SourceState* sources[] = {&impl_->vocab, &impl_->grammar, &impl_->names};
+  while (state.source_ < 3 &&
+         (!(state.presentMask_ & (1u << state.source_)) || state.offset_ == state.sizes_[state.source_])) {
+    ++state.source_;
+    state.offset_ = 0;
+  }
+  if (state.source_ == 3) {
+    state.status_ = DictionaryScanIdentityStatus::Ready;
+    return state.status_;
+  }
+  const size_t bytes = std::min(
+      {byteBudget, impl_->signatureScratch.size(), static_cast<size_t>(state.sizes_[state.source_] - state.offset_)});
+  if (!bytes) return state.status_;
+  if (!readExact(sources[state.source_]->idxFile, state.offset_, impl_->signatureScratch.data(), bytes))
+    return state.fail(DictionaryScanIdentityStatus::ReadError);
+  state.bytes(impl_->signatureScratch.data(), bytes);
+  state.offset_ += bytes;
+  // Publication is a separate cancellable step, including after the last read.
+  return state.status_;
 }

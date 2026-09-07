@@ -1,10 +1,11 @@
 #include "BookCacheUtils.h"
 
 #include <AnkiDeck.h>
-
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <Logging.h>
+#include <MangaBook.h>
+#include <MangaCover.h>
 #include <Txt.h>
 #include <Xtc.h>
 
@@ -12,6 +13,9 @@
 #include <cstring>
 #include <iterator>
 #include <vector>
+
+#include "BookFolderMutation.h"
+#include "BookMutationStorage.h"
 
 namespace {
 
@@ -65,6 +69,9 @@ std::string getBookCachePath(const std::string& path) {
   }
   if (FsHelpers::hasTxtExtension(path)) {
     return Txt(path, "/.crosspoint").getCachePath();
+  }
+  if (manga::MangaBook::isMangaFolder(path.c_str())) {
+    return manga::cachePath(path);
   }
   return "";
 }
@@ -266,6 +273,10 @@ bool clearBookCacheForPath(const std::string& path) {
   if (FsHelpers::hasTxtExtension(path)) {
     return Txt(path, "/.crosspoint").clearCache();
   }
+  if (manga::MangaBook::isMangaFolder(path.c_str())) {
+    const std::string cachePath = manga::cachePath(path);
+    return !Storage.exists(cachePath.c_str()) || Storage.removeDir(cachePath.c_str());
+  }
   return false;
 }
 
@@ -315,16 +326,22 @@ bool isBookCacheDirectoryName(const char* name) {
   constexpr char ANKI_PREFIX[] = "anki_";
   constexpr char TXT_PREFIX[] = "txt_";
   constexpr char XTC_PREFIX[] = "xtc_";
+  constexpr char MANGA_PREFIX[] = "manga_";
 
   return strncmp(name, EPUB_PREFIX, std::size(EPUB_PREFIX) - 1) == 0 ||
          strncmp(name, ANKI_PREFIX, std::size(ANKI_PREFIX) - 1) == 0 ||
          strncmp(name, TXT_PREFIX, std::size(TXT_PREFIX) - 1) == 0 ||
-         strncmp(name, XTC_PREFIX, std::size(XTC_PREFIX) - 1) == 0;
+         strncmp(name, XTC_PREFIX, std::size(XTC_PREFIX) - 1) == 0 ||
+         strncmp(name, MANGA_PREFIX, std::size(MANGA_PREFIX) - 1) == 0;
 }
 
 void clearBookCache(const std::string& path) { clearBookCachePreservingUserState(path); }
 
 bool clearBookCachePreservingUserState(const std::string& path) {
+  if (BookFolderMutation::storesFrozen()) return false;
+  if (manga::MangaBook::isMangaFolder(path.c_str())) {
+    return bookmutation::clearMangaDisposableCache(manga::cachePath(path));
+  }
   size_t preservedCount = 0;
   const PreservedCacheFile* preservedFiles = preservedFilesForPath(path, preservedCount);
   if (!preservedFiles || preservedCount == 0) {
@@ -360,6 +377,8 @@ bool clearBookCachePreservingUserState(const std::string& path) {
 }
 
 bool clearBookCacheDirectoryPreservingStats(const std::string& cachePath) {
+  if (BookFolderMutation::storesFrozen()) return false;
+  if (cachePath.rfind("/.crosspoint/manga_", 0) == 0) return bookmutation::clearMangaDisposableCache(cachePath);
   return clearCacheDirectoryPreservingFiles(cachePath, CACHE_CLEAR_USER_STATE_FILES,
                                             std::size(CACHE_CLEAR_USER_STATE_FILES), true, "clear_preserve_");
 }

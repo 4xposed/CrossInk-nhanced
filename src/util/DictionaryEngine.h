@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include "DictionaryEngineTypes.h"
+#include "DictionaryScanIdentity.h"
 #include "JapaneseDictionaryBackend.h"
 #include "StarDictBackend.h"
 
@@ -51,6 +52,9 @@ class DictionaryEngine {
   DictionaryBackendKind backendKind() const;
   DictionaryCapabilities capabilities() const;
   uint64_t signature() const;
+  DictionaryScanIdentityStatus beginScanIdentity(DictionaryScanIdentityState& state);
+  DictionaryScanIdentityStatus stepScanIdentity(DictionaryScanIdentityState& state, size_t byteBudget);
+  bool resumeScanIdentity(DictionaryScanIdentityState& state);
   void cancel();
   void close();
 

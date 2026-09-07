@@ -11,6 +11,7 @@
 
 #include "DictionaryDefinitionModel.h"
 #include "DictionaryLookupFlow.h"
+#include "DictionaryScanIdentityPolicy.h"
 #include "EpubLookupRequest.h"
 #include "PageTextSource.h"
 #include "PageWordScanCache.h"
@@ -26,6 +27,7 @@ class EpubReaderWordLookupActivity final : public Activity {
  public:
   EpubReaderWordLookupActivity(GfxRenderer&, MappedInputManager&, std::unique_ptr<Page>, EpubLookupPageRequest);
   EpubReaderWordLookupActivity(GfxRenderer&, MappedInputManager&, std::string directWord, EpubLookupPageRequest);
+  EpubReaderWordLookupActivity(GfxRenderer&, MappedInputManager&, OwnedLookupTextSource, EpubLookupPageRequest);
   ~EpubReaderWordLookupActivity() override;
 
   void onEnter() override;
@@ -33,6 +35,22 @@ class EpubReaderWordLookupActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool skipLoopDelay() override;
+#ifdef SIMULATOR
+  bool simulatorReadyAt(uint16_t cursor, int definitionPage, const char* word = nullptr) const {
+    return externalMode_ && flow_.state() == DictionaryLookupFlowState::Ready && flow_.cursor() == cursor &&
+           flow_.definitionPage() == definitionPage && sourceView().glyphCount > 0 &&
+           (!word || lookupText_.view() == word);
+  }
+  bool simulatorVerifiedScanComplete() const {
+    return scanIdentity_.status() == DictionaryScanIdentityStatus::Ready && !sourceTruncated() &&
+           (cacheLoaded_ || (scanner_.completedSuccessfully() && !scanner_.truncated()));
+  }
+  bool simulatorVerifiedCacheLoaded() const {
+    return cacheLoaded_ && scanIdentity_.status() == DictionaryScanIdentityStatus::Ready;
+  }
+  bool simulatorUnavailable() const { return externalMode_ && flow_.state() == DictionaryLookupFlowState::Unavailable; }
+  void simulatorLogSelection() const;
+#endif
   bool preventAutoSleep() override { return true; }
   bool allowFrontlightPanelGesture() const override { return false; }
   bool blocksGlobalInput() const override { return true; }
@@ -94,6 +112,11 @@ class EpubReaderWordLookupActivity final : public Activity {
   void processWorkerCompletion();
   void processDefinitionCompletion(uint32_t generation);
   void runScanSlice();
+  void refreshScanIdentity();
+  bool identityStepEligible() const;
+  void runIdentityStep();
+  void runInitialIdentitySlice();
+  void tryLoadVerifiedScanCache();
 
   const PageWordCandidate* selectedCandidate() const;
   const PageWordCandidate* candidateAt(uint16_t index) const;
@@ -148,6 +171,12 @@ class EpubReaderWordLookupActivity final : public Activity {
   DictionaryStatus reopenCancelledEngine();
   DictionaryLookupFlowDefinitionEvent definitionEvent(DefinitionBuildState state) const;
 
+  PageTextSourceView sourceView() const { return externalMode_ ? externalSource_.view() : pageSource_.view(); }
+  bool sourceTruncated() const { return externalMode_ ? externalSource_.truncated : pageSource_.truncated(); }
+  bool externalMode_ = false;
+  OwnedLookupTextSource externalSource_;
+  std::string externalScanCachePath_;
+  void (*externalBackgroundRender_)(void*, PageTextSourceView) = nullptr;
   std::unique_ptr<Page> page_;
   std::string directWord_;
   std::string bookLanguage_;
@@ -171,6 +200,9 @@ class EpubReaderWordLookupActivity final : public Activity {
   DictionaryCapabilities capabilities_{};
   DictionaryBackendKind cacheBackend_ = DictionaryBackendKind::StarDict;
   uint64_t cacheDictionarySignature_ = 0;
+  DictionaryScanIdentityState scanIdentity_;
+  DictionaryScanIdentityPolicy identityPolicy_;
+  bool identityStarted_ = false;
   HorizontalPageTextSource pageSource_;
   PageWordScanner scanner_;
   PageWordScanCache scanCache_;

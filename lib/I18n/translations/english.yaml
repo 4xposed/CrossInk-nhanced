@@ -858,3 +858,32 @@ STR_LONG_PRESS_HOME_SHORTCUT: "Long-Press Home"
 STR_DOUBLE_TAP_HOME_SHORTCUT: "Double Tap Home"
 STR_CUSTOM_BOOTSCREEN: "Custom Boot Screen"
 STR_TAP_HIDE_STATUS_BAR: "Tap to Hide Status Bar"
+
+STR_MANGA_PANELS_ONLY: "Hide page overviews"
+STR_MANGA_SHOW_OVERVIEWS: "Show page overviews"
+STR_MANGA_ROTATION_ON: "Enable panel rotation"
+STR_MANGA_ROTATION_OFF: "Disable panel rotation"
+
+STR_MANGA_TRANSLATION: "Translation"
+STR_MANGA_NO_TRANSLATION: "No stored translation for this view"
+STR_MANGA_NO_OCR: "No OCR text for this view"
+STR_LOOKUP_TRUNCATED: "Lookup (partial text)"
+STR_MANGA_CLIP_PAGE: "Page %lu (overview)"
+STR_MANGA_CLIP_PANEL: "Page %lu, panel %d"
+
+STR_STATS_READING_LANGUAGES: "Reading languages"
+STR_STATS_LANGUAGE_UNKNOWN: "Unknown"
+STR_STATS_LANGUAGE_OTHER: "Other languages"
+STR_STATS_LANGUAGE_EMPTY: "No saved reading time"
+
+STR_STATS_SAVE_FAILED: "Save failed. Check SD card and retry."
+
+STR_METADATA_RECOVERY_PENDING: "Book metadata recovery pending. Check SD card and restart."
+STR_METADATA_RECOVERY_RETRY: "Confirm, Back or tap to retry"
+
+STR_MANGA_AUTO_ONE: "1 per minute"
+STR_MANGA_AUTO_THREE: "3 per minute"
+STR_MANGA_AUTO_SIX: "6 per minute"
+STR_MANGA_AUTO_TWELVE: "12 per minute"
+STR_MANGA_PANELS_HINT: "Panels"
+STR_MANGA_SCREENSHOT_FAILED: "Could not save screenshot. Check SD card."

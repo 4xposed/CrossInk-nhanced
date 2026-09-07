@@ -1,3 +1,4 @@
+#include "CheckedDirectoryEof.h"
 #define HAL_STORAGE_IMPL
 #include "HalStorage.h"
 
@@ -285,7 +286,7 @@ HalFile::HalFile(ImplPtr impl) : impl(std::move(impl)) {}
 
 HalFile::~HalFile() { close(); }
 
-HalFile::HalFile(HalFile&&) = default;
+HalFile::HalFile(HalFile&& other) { *this = std::move(other); }
 
 HalFile& HalFile::operator=(HalFile&& other) {
   if (this == &other) return *this;
@@ -295,6 +296,8 @@ HalFile& HalFile::operator=(HalFile&& other) {
   iterationFailed_ = other.iterationFailed_;
   other.allocationFailed_ = false;
   other.iterationFailed_ = false;
+  enumerationFailed_ = other.enumerationFailed_;
+  other.enumerationFailed_ = false;
   return *this;
 }
 
@@ -465,6 +468,7 @@ int HalFile::read() { HAL_FILE_WRAPPED_CALL(read, ); }
 size_t HalFile::write(const void* buf, size_t count) { HAL_FILE_WRAPPED_CALL(write, buf, count); }
 size_t HalFile::write(uint8_t b) { HAL_FILE_WRAPPED_CALL(write, b); }
 bool HalFile::sync() { HAL_FILE_WRAPPED_CALL(sync, ); }
+bool HalFile::truncate(uint64_t length) { HAL_FILE_WRAPPED_CALL(truncate, length); }
 bool HalFile::rename(const char* newPath) { HAL_FILE_WRAPPED_CALL(rename, newPath); }
 bool HalFile::isDirectory() const { HAL_FILE_FORWARD_CALL(isDirectory, ); }  // already thread-safe, no need to wrap
 void HalFile::rewindDirectory() {
@@ -477,13 +481,57 @@ void HalFile::rewindDirectory() {
   // an iteration failure rather than making rewind appear to clear it.
 }
 bool HalFile::close() {
-  if (!impl) return true;
+  if (!impl) {
+    allocationFailed_ = iterationFailed_ = enumerationFailed_ = false;
+    return true;
+  }
   HalStorage::StorageLock lock;
   const bool ok = impl->file.close();
   impl.reset();
   allocationFailed_ = false;
   iterationFailed_ = false;
+  enumerationFailed_ = false;
   return ok;
+}
+HalFile HalFile::openNextFileChecked() {
+  if (enumerationFailed_) return {};
+  if (!impl || !impl->file.isDirectory()) {
+    enumerationFailed_ = true;
+    return {};
+  }
+  HalStorage::StorageLock lock;
+  if (impl->file.getError()) {
+    enumerationFailed_ = true;
+    return {};
+  }
+  const uint64_t start = impl->file.curPosition();
+  auto child = impl->file.openNextFile();
+  if (!child) {
+    const uint64_t end = impl->file.curPosition();
+    const auto probe = checked_directory::plan(start, end, impl->file.getError() != 0);
+    uint8_t entry[32]{};
+    int bytes = -1;
+    bool restored = false;
+    if (probe == checked_directory::Probe::Current)
+      bytes = impl->file.read(entry, sizeof(entry));
+    else if (probe == checked_directory::Probe::LastEntry && impl->file.seekSet(end - sizeof(entry)))
+      bytes = impl->file.read(entry, sizeof(entry));
+    if (probe != checked_directory::Probe::Reject) restored = impl->file.seekSet(end);
+    // SdFat can return false for an LFN error without its read-error bit. Accept
+    // only positive EOF; a full directory ending in skipped entries is ambiguous.
+    const bool clean = checked_directory::clean(probe, bytes, entry[0], restored, impl->file.getError() != 0);
+    enumerationFailed_ = !clean;
+    return {};
+  }
+  void* const storage = allocateImplStorage();
+  ImplPtr childImpl(storage ? ::new (storage) Impl(std::move(child)) : nullptr);
+  if (!childImpl) {
+    allocationFailed_ = enumerationFailed_ = true;
+    LOG_ERR("SD", "OOM during checked directory scan");
+    child.close();
+    return {};
+  }
+  return HalFile(std::move(childImpl));
 }
 HalFile HalFile::openNextFile() {
   allocationFailed_ = false;

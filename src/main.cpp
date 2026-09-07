@@ -18,6 +18,8 @@
 #include <Logging.h>
 #include <Memory.h>
 #include <SPI.h>
+
+#include "util/BookFolderMutation.h"
 #if !defined(SIMULATOR) && !FREEINK_MCU_C3
 #include <XteinkDetect.h>
 #endif
@@ -27,6 +29,7 @@
 #include "AppCapabilities.h"
 
 #ifdef SIMULATOR
+#include <cstdlib>
 using esp_reset_reason_t = int;
 using esp_sleep_wakeup_cause_t = int;
 enum : int {
@@ -359,6 +362,8 @@ using BootResume = SleepWakePolicy::Resume;
 // device back up against the user's sleep gesture. Never cleared:
 // startDeepSleep() does not return, so a set latch only ends at the wakeup reset.
 static bool deepSleepInProgress = false;
+static bool pendingDeepSleep = false;
+static bool pendingDeepSleepFromTimeout = false;
 
 static void restartWithSilentToken() {
 #ifdef SIMULATOR
@@ -1058,6 +1063,17 @@ void mirrorWakeShortPressToNvs() {
 
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout) {
+  // No SD writes or snapshots until the outgoing activity releases its worker.
+  if (!activityManager.prepareToSuspend()) {
+    pendingDeepSleep = activityManager.retrySuspensionAfterFailure();
+    pendingDeepSleepFromTimeout = fromTimeout;
+    if (!pendingDeepSleep) {
+      APP_STATE.quickLockResumePending = false;
+      APP_STATE.quickLockResumeTrigger = static_cast<uint8_t>(QuickLockTrigger::None);
+    }
+    return;
+  }
+  pendingDeepSleep = false;
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
 
@@ -1105,6 +1121,14 @@ void enterDeepSleep(bool fromTimeout) {
   mirrorWakeShortPressToNvs();
   LOG_DBG("MAIN", "Entering deep sleep");
 
+#ifdef SIMULATOR
+  // Integration smoke validates all sleep preparation but cannot resume after
+  // the simulator HAL enters its intentional wait-for-wake loop.
+  if (std::getenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS")) {
+    LOG_INF("SMOKE", "Verified main sleep preparation completed after worker quiescence");
+    return;
+  }
+#endif
   powerManager.startDeepSleep(gpio);
 }
 
@@ -1312,13 +1336,22 @@ void setup() {
 
   SETTINGS.loadFromFile();
   Storage.installDateTimeCallback(&SETTINGS.clockUtcOffsetQ);
+  I18N.setLanguage(static_cast<Language>(SETTINGS.language));
+  const auto mutationRecovery = BookFolderMutation::recoverPending();
+  if (mutationRecovery == BookFolderMutation::Result::RecoveryPending ||
+      mutationRecovery == BookFolderMutation::Result::StorageError) {
+    LOG_ERR("MAIN", "Book metadata recovery pending; preserving journal and stores");
+    setupDisplayAndFonts(isSilentReboot, !isNetworkResume, useReaderRenderStack);
+    activityManager.goToFullScreenMessage(tr(STR_METADATA_RECOVERY_PENDING), EpdFontFamily::BOLD);
+    activityManager.loop();  // Enter exclusive recovery input before the first global loop.
+    return;
+  }
   APP_STATE.loadFromFile();
   mirrorWakeShortPressToNvs();
   // Needs SETTINGS for the clock's UTC offset, so it cannot run any earlier.
   BatteryDiagnosticLog::record(BatteryDiagnosticLog::Event::Wake, BoardConfig::ACTIVE.name,
                                wakeupRouteName(wakeupReason));
   const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
-  I18N.setLanguage(static_cast<Language>(SETTINGS.language));
   // Normal boot store deferral adapted from Sichroteph/YACP commit
   // 20af8aee8d3e1d560456753b08d1f52e5488621f (MIT). Accessors load these
   // stores when Home, reader bookkeeping, or sync actually need them.
@@ -1576,6 +1609,11 @@ void loop() {
   // hardware input frame. A shortcut may open an activity that never queries
   // the originating button, so its one-shot release guard must still expire.
   mappedInputManager.update();
+  if (pendingDeepSleep) {
+    enterDeepSleep(pendingDeepSleepFromTimeout);
+    delay(1);
+    return;
+  }
 #ifdef SIMULATOR
   simulatorHomeKeyInput.update();
 #endif
@@ -1702,14 +1740,18 @@ void loop() {
       return;
     }
     const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
-    if (sleepTimeoutMs > 0 && buttonShortcutController.shouldQuickLockSleep(millis(), sleepTimeoutMs)) {
+    if (sleepTimeoutMs > 0 && !activityManager.preventAutoSleep() &&
+        buttonShortcutController.shouldQuickLockSleep(millis(), sleepTimeoutMs)) {
       LOG_DBG("SLP", "Quick Lock timeout triggered after %lu ms", sleepTimeoutMs);
       APP_STATE.quickLockResumePending = true;
       enterDeepSleep(true);
       // The simulator's deep sleep returns, unlike hardware. Keep its next
       // test loop from treating the marker as a real reboot resume.
 #ifdef SIMULATOR
-      APP_STATE.quickLockResumePending = false;
+      if (!pendingDeepSleep) {
+        APP_STATE.quickLockResumePending = false;
+        APP_STATE.quickLockResumeTrigger = static_cast<uint8_t>(QuickLockTrigger::None);
+      }
 #endif
       lastActivityTime = millis();
     }

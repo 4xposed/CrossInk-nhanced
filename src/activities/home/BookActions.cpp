@@ -7,10 +7,16 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <MangaBook.h>
+#include <MangaCover.h>
+#include <Memory.h>
+#include <Utf8.h>
 #include <Xtc.h>
 
 #include <cstdio>
 
+#include "BookCompletionActivity.h"
+#include "BookCompletionEdit.h"
 #include "BookmarkStore.h"
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -19,16 +25,25 @@
 #include "activities/reader/BookReadingStats.h"
 #include "activities/reader/EpubReaderActivity.h"
 #include "activities/reader/GlobalReadingStats.h"
+#include "activities/reader/MangaProgressStore.h"
+#include "activities/reader/ReadingStatsSave.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookFolderMutation.h"
 #include "util/BookMoveUtils.h"
 
 namespace BookActions {
 namespace {
 
+std::string boundedMetadata(std::string_view value) {
+  const int bytes = utf8SafeTruncateBuffer(value.data(), static_cast<int>(std::min<size_t>(value.size(), 127)));
+  return bytes > 0 ? std::string(value.data(), static_cast<size_t>(bytes)) : std::string{};
+}
+
 bool hasReadingStats(const std::string& path) {
-  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasXtcExtension(path);
+  return FsHelpers::hasEpubExtension(path) || FsHelpers::hasXtcExtension(path) ||
+         manga::MangaBook::isMangaFolder(path.c_str());
 }
 
 std::string bookStatsCachePath(const std::string& path) {
@@ -37,6 +52,9 @@ std::string bookStatsCachePath(const std::string& path) {
   }
   if (FsHelpers::hasXtcExtension(path)) {
     return Xtc(path, "/.crosspoint").getCachePath();
+  }
+  if (manga::MangaBook::isMangaFolder(path.c_str())) {
+    return manga::cachePath(path);
   }
   return "";
 }
@@ -68,7 +86,7 @@ std::vector<FileBrowserActionActivity::MenuItem> buildBookActionItems(const std:
 
 bool hasClearableBookCache(const std::string& path) {
   return FsHelpers::hasEpubExtension(path) || FsHelpers::hasAnkiDeckExtension(path) ||
-         FsHelpers::hasXtcExtension(path);
+         FsHelpers::hasXtcExtension(path) || manga::MangaBook::isMangaFolder(path.c_str());
 }
 
 bool canSendNearby(const std::string& path) {
@@ -78,6 +96,7 @@ bool canSendNearby(const std::string& path) {
 }
 
 void clearFileMetadata(const std::string& fullPath) {
+  if (BookFolderMutation::storesFrozen()) return;
   if (FsHelpers::hasEpubExtension(fullPath)) {
     Epub(fullPath, "/.crosspoint").clearCache();
     BookmarkStore::deleteForFilePath(fullPath, "epub");
@@ -88,18 +107,35 @@ void clearFileMetadata(const std::string& fullPath) {
     BookmarkStore::deleteForFilePath(fullPath, "xtc");
   } else if (FsHelpers::hasTxtExtension(fullPath) || FsHelpers::hasMarkdownExtension(fullPath)) {
     BookmarkStore::deleteForFilePath(fullPath, "txt");
+  } else if (manga::MangaBook::isMangaFolder(fullPath.c_str())) {
+    clearMangaMetadata(fullPath);
   }
 }
 
+bool clearMangaMetadata(const std::string& folderPath) {
+  if (BookFolderMutation::storesFrozen()) return false;
+  bool ok = true;
+  const std::string cachePath = manga::cachePath(folderPath);
+  if (Storage.exists(cachePath.c_str()) && !Storage.removeDir(cachePath.c_str())) {
+    LOG_ERR("BookActions", "Failed to remove manga cache: %s", cachePath.c_str());
+    ok = false;
+  }
+  if (!manga::MangaProgressStore(folderPath).remove()) ok = false;
+  BookmarkStore::deleteForFilePath(folderPath, "manga");
+  return ok;
+}
+
 bool clearBookCache(const std::string& fullPath) {
+  if (BookFolderMutation::storesFrozen()) return false;
   if (FsHelpers::hasEpubExtension(fullPath) || FsHelpers::hasAnkiDeckExtension(fullPath) ||
-      FsHelpers::hasXtcExtension(fullPath)) {
+      FsHelpers::hasXtcExtension(fullPath) || manga::MangaBook::isMangaFolder(fullPath.c_str())) {
     return clearBookCachePreservingUserState(fullPath);
   }
   return false;
 }
 
 bool deleteBookStats(const std::string& fullPath) {
+  if (BookFolderMutation::storesFrozen()) return false;
   const std::string cachePath = bookStatsCachePath(fullPath);
   if (cachePath.empty()) {
     return false;
@@ -108,6 +144,7 @@ bool deleteBookStats(const std::string& fullPath) {
 }
 
 bool resetBookReaderSettings(const std::string& fullPath) {
+  if (BookFolderMutation::storesFrozen()) return false;
   if (!FsHelpers::hasEpubExtension(fullPath)) {
     return false;
   }
@@ -152,55 +189,82 @@ bool isBookCompleted(const std::string& fullPath) {
   return !cachePath.empty() && BookReadingStats::load(cachePath).isCompleted;
 }
 
-bool toggleBookCompleted(const std::string& fullPath, const std::string& displayName, bool& completed) {
+bool toggleBookCompleted(const std::string& fullPath, const std::string& displayName, bool& completed,
+                         CompletionEdit& edit) {
   const bool isEpub = FsHelpers::hasEpubExtension(fullPath);
   const bool isXtc = FsHelpers::hasXtcExtension(fullPath);
-  if (!isEpub && !isXtc) {
+  const bool isManga = manga::MangaBook::isMangaFolder(fullPath.c_str());
+  if (!isEpub && !isXtc && !isManga) {
     return false;
   }
 
-  Epub epub(fullPath, "/.crosspoint");
-  Xtc xtc(fullPath, "/.crosspoint");
-  std::string cachePath;
-  std::string title;
-  std::string author;
-  std::string thumbPath;
-  if (isEpub) {
-    epub.setupCacheDir();
-    cachePath = epub.getCachePath();
-    title = epub.getTitle();
-    author = epub.getAuthor();
-    thumbPath = epub.getThumbBmpPath();
-  } else {
-    if (!xtc.load()) {
+  auto& cachePath = edit.cachePath;
+  auto& title = edit.title;
+  auto& author = edit.author;
+  auto& thumbPath = edit.thumbPath;
+  auto& stats = edit.book;
+  auto& globalStats = edit.global;
+  if (!edit.initialized) {
+    Epub epub(fullPath, "/.crosspoint");
+    Xtc xtc(fullPath, "/.crosspoint");
+    manga::MangaBook mangaBook;
+    if (isEpub) {
+      epub.setupCacheDir();
+      cachePath = epub.getCachePath();
+      title = epub.getTitle();
+      author = epub.getAuthor();
+      thumbPath = epub.getThumbBmpPath();
+    } else if (isXtc) {
+      if (!xtc.load()) {
+        return false;
+      }
+      xtc.setupCacheDir();
+      cachePath = xtc.getCachePath();
+      title = xtc.getTitle();
+      author = xtc.getAuthor();
+      thumbPath = xtc.getThumbBmpPath();
+    } else {
+      if (!mangaBook.open(fullPath.c_str(), manga::OpenMode::Metadata)) {
+        return false;
+      }
+      cachePath = manga::cachePath(fullPath);
+      title = boundedMetadata(mangaBook.title());
+      author = boundedMetadata(mangaBook.author());
+      thumbPath = manga::thumbnailTemplatePath(fullPath);
+      if (!Storage.ensureDirectoryExists("/.crosspoint") || !Storage.ensureDirectoryExists(cachePath.c_str())) {
+        LOG_ERR("BookActions", "Failed to create manga stats cache: %s", cachePath.c_str());
+        return false;
+      }
+    }
+
+    stats = BookReadingStats::load(cachePath);
+    globalStats = GlobalReadingStats::load();
+    if (!stats.persistenceWritable || !globalStats.persistenceWritable) {
+      LOG_ERR("BookActions", "Cannot begin completion edit after a failed stats read");
       return false;
     }
-    xtc.setupCacheDir();
-    cachePath = xtc.getCachePath();
-    title = xtc.getTitle();
-    author = xtc.getAuthor();
-    thumbPath = xtc.getThumbBmpPath();
-  }
-
-  BookReadingStats stats = BookReadingStats::load(cachePath);
-  completed = !stats.isCompleted;
-  stats.isCompleted = completed;
-  if (completed && !stats.finishedDateManual) {
-    ReadingStatsDateTime now;
-    if (getCurrentLocalReadingStatsDateTime(now)) {
-      stats.finishedDate = now.date;
+    completed = !stats.isCompleted;
+    stats.isCompleted = completed;
+    if (completed && !stats.finishedDateManual) {
+      ReadingStatsDateTime now;
+      if (getCurrentLocalReadingStatsDateTime(now)) {
+        stats.finishedDate = now.date;
+      }
     }
-  }
 
-  GlobalReadingStats globalStats = GlobalReadingStats::load();
-  if (completed) {
-    globalStats.completedBooks++;
-  } else if (globalStats.completedBooks > 0) {
-    globalStats.completedBooks--;
-  }
+    if (completed) {
+      globalStats.completedBooks++;
+    } else if (globalStats.completedBooks > 0) {
+      globalStats.completedBooks--;
+    }
 
-  stats.save(cachePath);
-  globalStats.save();
+    edit.initialized = true;
+    edit.persistence.changed();
+  }
+  completed = stats.isCompleted;
+  if (!edit.persistence.persist(cachePath, stats, globalStats)) return false;
+  if (edit.sideEffectsDone) return true;
+  edit.sideEffectsDone = true;
 
   if (SETTINGS.removeReadBooksFromRecents) {
     if (completed) {
@@ -211,7 +275,7 @@ bool toggleBookCompleted(const std::string& fullPath, const std::string& display
   }
 
   if (isEpub && completed && SETTINGS.moveFinishedToReadFolder && fullPath.rfind("/Read/", 0) != 0) {
-    const std::string oldCachePath = epub.getCachePath();
+    const std::string oldCachePath = cachePath;
     const std::string dstPath = BookMoveUtils::buildReadFolderDestination(fullPath);
     LOG_INF("BookActions", "Moving completed epub: %s -> %s", fullPath.c_str(), dstPath.c_str());
     if (!Storage.rename(fullPath.c_str(), dstPath.c_str())) {
@@ -230,6 +294,16 @@ bool toggleBookCompleted(const std::string& fullPath, const std::string& display
   }
 
   return true;
+}
+
+void startCompletionEdit(Activity& owner, GfxRenderer& renderer, MappedInputManager& input, const std::string& fullPath,
+                         const std::string& displayName, ActivityResultHandler handler) {
+  auto activity = makeUniqueNoThrow<BookCompletionActivity>(renderer, input, fullPath, displayName);
+  if (!activity) {
+    LOG_ERR("BookActions", "OOM for completion edit activity");
+    return;
+  }
+  owner.startActivityForResult(std::move(activity), std::move(handler));
 }
 
 void drawToast(const GfxRenderer& renderer, const char* msg) {

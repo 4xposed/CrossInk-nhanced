@@ -36,6 +36,8 @@ struct PngContext {
 
   PixelCache cache;
   bool caching{false};
+  CooperativeCancellation cancellation{};
+  bool cancelled{false};
 
   uint8_t* grayLineBuffer{nullptr};
   uint32_t lastYieldMs{0};
@@ -49,7 +51,7 @@ void* pngOpenWithHandle(const char* filename, int32_t* size) {
     LOG_ERR("PNG", "OOM: PNG file handle (%u free, %u max alloc)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     return nullptr;
   }
-  if (!Storage.openFileForRead("PNG", std::string(filename), *f)) {
+  if (!Storage.openFileForRead("PNG", filename, *f)) {
     return nullptr;
   }
   *size = f->size();
@@ -207,7 +209,12 @@ void convertLineToGray(const uint8_t* pPixels, uint8_t* grayLine, int width, int
 
 int pngDrawCallback(PNGDRAW* pDraw) {
   PngContext* ctx = reinterpret_cast<PngContext*>(pDraw->pUser);
-  if (!ctx || !ctx->config || !ctx->renderer || !ctx->grayLineBuffer) return 0;
+  if (!ctx || !ctx->config || !ctx->grayLineBuffer) return 0;
+
+  if (ctx->cancellation.requested()) {
+    ctx->cancelled = true;
+    return 0;
+  }
 
   ImageToFramebufferDecoder::yieldDuringDecode(ctx->lastYieldMs);
 
@@ -241,14 +248,14 @@ int pngDrawCallback(PNGDRAW* pDraw) {
 
   // Pre-compute orientation and render-mode state once per callback.
   DirectPixelWriter pw;
-  pw.init(*ctx->renderer);
+  if (ctx->renderer) pw.init(*ctx->renderer);
 
   for (int dstY = firstDstY; dstY < endDstY; dstY++) {
     ctx->lastDstY = dstY;
     int outY = ctx->config->y + dstY;
     if (outY >= ctx->screenHeight) continue;
 
-    pw.beginRow(outY);
+    if (ctx->renderer) pw.beginRow(outY);
 
     // The cache streams to disk one row at a time. Flushing rows below this one
     // (PNGdec delivers scanlines top to bottom) repositions the single-row band.
@@ -260,6 +267,7 @@ int pngDrawCallback(PNGDRAW* pDraw) {
       if (!ctx->cache.advanceTo(dstY)) {
         caching = false;
         ctx->caching = false;
+        if (!ctx->renderer) return 0;
       } else {
         cw.init(ctx->cache.buffer, ctx->cache.bytesPerRow, ctx->cache.bandRows, ctx->cache.originX);
         cw.beginRow(outY, ctx->config->y + ctx->cache.bandStart);
@@ -280,7 +288,7 @@ int pngDrawCallback(PNGDRAW* pDraw) {
         } else {
           ditheredGray = quantizeGrayTo4Level(gray);
         }
-        pw.writePixel(outX, ditheredGray);
+        if (ctx->renderer) pw.writePixel(outX, ditheredGray);
         if (caching) cw.writePixel(outX, ditheredGray);
       }
 
@@ -298,23 +306,22 @@ int pngDrawCallback(PNGDRAW* pDraw) {
 
 }  // namespace
 
-bool PngToFramebufferConverter::getDimensionsStatic(const std::string& imagePath, ImageDimensions& out) {
+bool PngToFramebufferConverter::getDimensionsStatic(const char* imagePath, ImageDimensions& out) {
   if (!MemoryBudget::hasHeapForImageDecoder("PNG", "PNG", PNG_DECODER_APPROX_SIZE)) {
     return false;
   }
 
-  PNG* png = new (std::nothrow) PNG();
+  auto png = makeUniqueNoThrow<PNG>();
   if (!png) {
     LOG_ERR("PNG", "Failed to allocate PNG decoder for dimensions");
     return false;
   }
 
-  int rc = png->open(imagePath.c_str(), pngOpenWithHandle, pngCloseWithHandle, pngReadWithHandle, pngSeekWithHandle,
-                     nullptr);
+  int rc = png->open(imagePath, pngOpenWithHandle, pngCloseWithHandle, pngReadWithHandle, pngSeekWithHandle, nullptr);
 
   if (rc != 0) {
     LOG_ERR("PNG", "Failed to open PNG for dimensions: %d", rc);
-    delete png;
+    png->close();
     return false;
   }
 
@@ -322,40 +329,58 @@ bool PngToFramebufferConverter::getDimensionsStatic(const std::string& imagePath
   out.height = png->getHeight();
 
   png->close();
-  delete png;
   return true;
 }
 
 bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath, GfxRenderer& renderer,
                                                     const RenderConfig& config) {
+  return decode(imagePath.c_str(), &renderer, config, renderer.getScreenWidth(), renderer.getScreenHeight(), {});
+}
+
+bool PngToFramebufferConverter::decodeToCache(const char* imagePath, const CacheDecodeConfig& config) {
+  if (config.cancellation.requested()) return false;
+  if (!config.valid()) {
+    LOG_ERR("IMG", "Invalid cache-only geometry or output path");
+    return false;
+  }
+  const bool success =
+      decode(imagePath, nullptr, config.render, config.screenWidth, config.screenHeight, config.cancellation);
+  if (!success && Storage.exists(config.render.cacheOutputPath()) && !Storage.remove(config.render.cacheOutputPath()))
+    LOG_ERR("IMG", "Cannot remove failed cache: %s", config.render.cacheOutputPath());
+  return success;
+}
+
+bool PngToFramebufferConverter::decode(const char* imagePath, GfxRenderer* renderer, const RenderConfig& config,
+                                       int screenWidth, int screenHeight, CooperativeCancellation cancellation) {
+  if (cancellation.requested()) return false;
   if (!MemoryBudget::hasHeapForImageDecoder("PNG", "PNG", PNG_DECODER_APPROX_SIZE)) {
     return false;
   }
 
   // Heap-allocate PNG decoder (~42 KB) - freed at end of function
-  PNG* png = new (std::nothrow) PNG();
+  auto png = makeUniqueNoThrow<PNG>();
   if (!png) {
     LOG_ERR("PNG", "Failed to allocate PNG decoder");
     return false;
   }
 
   PngContext ctx;
-  ctx.renderer = &renderer;
+  ctx.renderer = renderer;
+  ctx.cancellation = cancellation;
   ctx.config = &config;
-  ctx.screenWidth = renderer.getScreenWidth();
-  ctx.screenHeight = renderer.getScreenHeight();
+  ctx.screenWidth = screenWidth;
+  ctx.screenHeight = screenHeight;
 
-  int rc = png->open(imagePath.c_str(), pngOpenWithHandle, pngCloseWithHandle, pngReadWithHandle, pngSeekWithHandle,
+  int rc = png->open(imagePath, pngOpenWithHandle, pngCloseWithHandle, pngReadWithHandle, pngSeekWithHandle,
                      pngDrawCallback);
   if (rc != PNG_SUCCESS) {
     LOG_ERR("PNG", "Failed to open PNG: %d", rc);
-    delete png;
+    png->close();
     return false;
   }
 
   if (!validateImageDimensions(png->getWidth(), png->getHeight(), "PNG")) {
     png->close();
-    delete png;
     return false;
   }
 
@@ -391,15 +416,12 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
         requiredInternal, ctx.srcWidth, pixelType, bitsPerSample, PNG_MAX_BUFFERED_PIXELS);
     LOG_ERR("PNG", "Aborting decode to avoid PNGdec internal buffer overflow");
     png->close();
-    delete png;
     return false;
   }
 
   if (!isSupportedBitDepth(pixelType, bitsPerSample)) {
-    warnUnsupportedFeature(
-        "bit depth (" + std::to_string(bitsPerSample) + "bpp) for pixel type " + std::to_string(pixelType), imagePath);
+    LOG_ERR("PNG", "Unsupported bit depth=%d pixel type=%d: %s", bitsPerSample, pixelType, imagePath);
     png->close();
-    delete png;
     return false;
   }
 
@@ -412,7 +434,6 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
     LOG_ERR("PNG", "Expanded gray row too wide: need %u bytes for width=%d, max=%u", static_cast<unsigned>(grayBufSize),
             ctx.srcWidth, static_cast<unsigned>(MAX_GRAY_LINE_BUFFER_BYTES));
     png->close();
-    delete png;
     return false;
   }
 
@@ -420,7 +441,6 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   if (!grayLineBuffer) {
     LOG_ERR("PNG", "Failed to allocate gray line buffer");
     png->close();
-    delete png;
     return false;
   }
   ctx.grayLineBuffer = grayLineBuffer.get();
@@ -431,12 +451,18 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
   // unlike the old full-image buffer it neither competes with the ~44KB decoder
   // nor forces larger images to skip caching - which previously meant a full
   // re-decode on every one of an image page's ~14 render passes.
-  ctx.caching = !config.cachePath.empty();
+  ctx.caching = config.cacheOutputPath()[0] != '\0';
   if (ctx.caching) {
-    if (!ctx.cache.begin(config.cachePath, ctx.dstWidth, ctx.dstHeight, config.x, config.y, 1)) {
-      LOG_ERR("PNG", "Failed to start cache stream, continuing without caching");
+    if (!ctx.cache.begin(config.cacheOutputPath(), ctx.dstWidth, ctx.dstHeight, config.x, config.y, 1, cancellation)) {
+      LOG_ERR("PNG", "Failed to start cache stream");
       ctx.caching = false;
     }
+  }
+
+  if (cancellation.requested() || (!renderer && !ctx.caching)) {
+    ctx.cache.abort();
+    png->close();
+    return false;
   }
 
   ctx.lastYieldMs = millis();
@@ -444,23 +470,23 @@ bool PngToFramebufferConverter::decodeToFramebuffer(const std::string& imagePath
 
   ctx.grayLineBuffer = nullptr;
 
-  if (rc != PNG_SUCCESS) {
+  if (rc != PNG_SUCCESS || ctx.cancelled || cancellation.requested() || (!renderer && !ctx.caching)) {
     LOG_ERR("PNG", "Decode failed: %d", rc);
-    if (ctx.caching) ctx.cache.abort();
+    ctx.cache.abort();
     png->close();
-    delete png;
     return false;
   }
 
   png->close();
-  delete png;
+  png.reset();
 
   // Finalize the streamed cache (caching may have been cleared on a flush error).
   if (ctx.caching) {
-    ctx.cache.finalize();
+    const bool cached = ctx.cache.finalize();
+    if (!renderer) return cached;
   }
 
-  return true;
+  return renderer != nullptr;
 }
 
 bool PngToFramebufferConverter::supportsFormat(const std::string& extension) {

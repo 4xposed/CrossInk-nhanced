@@ -6,6 +6,7 @@
 #include <utility>
 
 class Page;
+struct PageTextSourceView;
 
 // Reader-menu availability is intentionally cached between menu/shortcut
 // checks. A unified lookup child may change the per-book or global StarDict
@@ -36,6 +37,8 @@ class EpubLookupAvailabilityCache {
 struct EpubLookupPageRequest {
   std::string bookLanguage;
   std::string bookCachePath;
+  // Explicit external-source cache location; persistence awaits verified identity.
+  std::string scanCacheFilePath;
   uint16_t spineIndex = 0;
   uint16_t pageIndex = 0;
   int marginLeft = 0;
@@ -50,6 +53,8 @@ struct EpubLookupPageRequest {
   uint8_t dictionaryFontPointSize = 0;
   void* readerContext = nullptr;
   void (*renderReaderBackground)(void*) = nullptr;
+  // Synchronous borrowed view; never retain it beyond this locked call.
+  void (*renderExternalBackground)(void*, PageTextSourceView) = nullptr;
   std::unique_ptr<Page> (*reloadReaderPage)(void*) = nullptr;
 };
 

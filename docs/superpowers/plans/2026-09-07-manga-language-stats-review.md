@@ -1,0 +1,90 @@
+# Task 10b language statistics review
+
+Date: 2026-09-07. Scope: `.superpowers/sdd/2026-09-06-manga-library-completion-plan/task-10b-brief.md`, its binding language-statistics design and persistence/sync preflights, `2026-09-07-manga-language-stats-report.md`, and `/private/tmp/crossink-manga-stats10b-review.patch`. CodeGraph was used before narrow source reads. Reported tests/builds were not rerun.
+
+## Verdicts
+
+**Specification: FAIL (one High finding).** The persisted formats, streamed calendar rows, recovery/trust rules, reader accounting, UI breakdowns, deterministic aggregation, and Nearby capability/ACK protocol conform on static review. Dirty metadata edits can still be discarded through the global Home path after publication failure, violating an explicit brief requirement.
+
+**Quality: PASS WITH FINDINGS.** The implementation is bounded and well factored around shared codecs and a protocol state machine. One Low cleanup finding leaves duplicated, unused Nearby state after the extraction. The touch-smoke failure reported during review was a simulator input-state issue and is not a production navigation defect.
+
+## Findings
+
+### High — global Home can destroy dirty edits after both retry attempts fail
+
+`ReadingStatsEditState::persist()` correctly retains `dirty` until both book and global targets publish (`src/activities/reader/ReadingStatsSave.cpp:23-28`), and normal Back/Confirm/touch-header exits correctly refuse to leave when `saveStats()` fails (`src/activities/reader/BookStatsActivity.cpp:79-91`, `:290-298`, `:366-443`). That implements the required per-target retry and normal failure behavior.
+
+However, `BookStatsActivity` inherits `Activity::allowGlobalHomeGesture() == true` and does not override `handleHomeGesture()` (`src/activities/Activity.h:79-86`; `src/activities/reader/BookStatsActivity.h:78-83`). `ActivityManager::handleGlobalHomeGesture()` therefore routes a Home key/gesture to `handleHomeButtonBackOrHome()`, which calls `goHome()` without consulting the stats activity (`src/activities/ActivityManager.cpp:329-355`). Replacement invokes `BookStatsActivity::onExit()`, but `onExit()` ignores the `false` result from `saveStats()` and allows destruction (`BookStatsActivity.cpp:284-287`). A dirty date/completion edit is then lost even though one or both required files remain uncommitted.
+
+This contradicts task brief line 39: “Keep metadata-edit dirty state until required writes succeed.” It also contradicts the completion report's claim that a failed metadata edit stays on the stats screen; its stated “forced destruction” exception is not in the binding requirement, and global Home is ordinary user input.
+
+Required fix: make the global Home route participate in the same guarded save transition. A narrow override of `handleHomeGesture()` can call a bool-returning save/exit helper, consume the gesture, and stay in the activity on failure; alternatively disable global Home while edits are dirty and expose visible retry/cancel semantics through existing controls. Do not rely on `onExit()` for a fallible veto because replacement is already committed by then. Add an ActivityManager-level test that makes book or global publication fail through both allowed attempts, dispatches the Home key and touch Home gesture, and proves `BookStatsActivity` plus dirty state remain; after storage recovery, the same action publishes only the failed target and reaches Home.
+
+### Low — extracted Nearby protocol leaves duplicated dead state and methods
+
+The new `nearby_stats::Session` is the authoritative owner of peer/sent/saved/acked/timing state (`src/activities/network/NearbyStatsProtocol.h:25-49`). `NearbyStatsSyncActivity::applyProtocolState()` copies four flags back into `peerStatsSaved_`, `localStatsSent_`, and `localStatsAcked_` (`src/activities/network/NearbyStatsSyncActivity.cpp:381-387`), but those members are never read outside assignment/reset. `syncStartedMs_` and `lastStatsSendMs_` are likewise assigned but not read, and `sendLocalStats()`/`sendAck()` remain declared and defined without callers (`src/activities/network/NearbyStatsSyncActivity.h:50-77`; `NearbyStatsSyncActivity.cpp:283-296`, `:480-488`).
+
+This does not change behavior, but it obscures which state controls success and risks later code reading stale mirrors instead of `Session`. Remove the unused mirrors and wrapper methods in a narrow cleanup, keeping UI-derived peer identity/name fields that are actually rendered.
+
+## Conforming behavior verified
+
+### Format, calendar, slots, and migration
+
+- `ReadingLanguageTotals` is exactly eight 8-byte entries / 64 bytes, with stable `und` and `mul` slots and six validated normalized local slots (`src/activities/reader/ReadingLanguageStats.h:9-20`; `ReadingLanguageStats.cpp:282-318`). Book/global summary tables are exactly 137/223 bytes for v6/v4 and retain exact legacy sizes (`ReadingLanguageStats.cpp:26-30`, `:379-410`). Legacy loads seed lifetime time into Unknown and do not create daily rows (`src/activities/reader/BookReadingStats.cpp:144-228`; `src/activities/reader/GlobalReadingStats.cpp:130-160`).
+- `streamDays()` retains one input and one output 36-byte row, chooses `max(old anchor, span last day)`, bounds the window to 730 days, saturates the selected slot, and patches the final row count (`ReadingLanguageStats.cpp:32-36`, `:62-127`). Null-span writes copy a validated appendix byte-for-byte; span writes refuse to relabel any previously populated slot (`:129-180`). There is no history-sized stack or heap array.
+- Full-file validation rejects oversized, malformed, unordered, out-of-window, extra, truncated, and illegal unassigned-slot data (`ReadingLanguageStats.cpp:379-410`). The local visitor streams rows and performs no render-time SD access (`:456-478`).
+
+### Publication, recovery, and retry trust
+
+- Temp writes are checked through prefix/totals/appendix write, flush, sync, close, full re-open validation, then rename (`ReadingLanguageStats.cpp:147-238`, `:429-454`). Cleanup after a successful promotion is only logged, so committed spans are not falsely retried (`:231-238`). Publication is explicitly per file.
+- Book source discovery checks v6 primary/backup/recovery before exact v5/v4/legacy names, blocks mutation after corrupt current data rather than rolling back into legacy, and marks failed second-pass loads non-writable (`src/activities/reader/BookReadingStats.cpp:67-101`, `:144-177`, `:303-321`). Global load/save applies the equivalent provenance check and sticky newer-format block (`src/activities/reader/GlobalReadingStats.cpp:188-227`, `:291-305`). Reset writes fresh empty local summary/history while retaining recovery provenance.
+- `saveReadingStatsWithRetry()` tracks book and global independently, skips a successful target, and gives each failed target one immediate retry using the same frozen snapshot/span (`src/activities/reader/ReadingStatsSave.cpp:4-21`). EPUB, XTC, and Manga add language seconds at their existing accepted-session commit sites and pass the same calendar span; TXT remains untouched (`src/activities/reader/EpubReaderActivity.cpp:2246-2280`; `src/activities/reader/XtcReaderActivity.cpp:735-750`; `src/activities/reader/MangaReaderActivity.cpp:748-767`).
+
+### UI committed/preview boundary
+
+The reader stats previews copy `BookReadingStats` and add live seconds only to `totalReadingSeconds`; they do not assign uncommitted time wholesale to the current language (`src/activities/reader/EpubReaderActivity.cpp:3643-3659`; `src/activities/reader/XtcReaderActivity.cpp:817-835`). `BookStatsActivity` receives the committed snapshot separately and restores committed total seconds before any date/completion metadata save (`src/activities/reader/BookStatsActivity.cpp:38-71`, `:79-91`). Therefore UI preview totals remain visible without early persistence, and language pages show held committed summaries. Language rendering consumes the activity snapshots, paginates at runtime, and does not read SD in render (`BookStatsActivity.cpp:300-349`, `:485-493`; `src/activities/reader/BookStatsView.cpp:467-650`). Home passes real EPUB/XTC/Manga cache paths (`src/activities/home/HomeActivity.cpp:2324-2362`).
+
+The temporary touch-smoke failure does not reveal a production Back bug. Logs showed Home beneath the pushed stats child and no stats exit before failure. Earlier injected logical Back left suppression armed; the first physical touch Back was consumed before `wasReleased(Back)`. The scoped simulator correction uses the real touch header Back, which `BookStatsActivity` checks first (`BookStatsActivity.cpp:366-373`), and asserts the activity before exit (`src/simulator/SimulatorSmokeTest.cpp:984-1008`). Button Back remains covered. The simulator fixture's default `returnToHomeOnExit=false` still pops to its actual Home parent, so changing that flag is unnecessary.
+
+### Nearby and aggregation
+
+- The packet codec preserves the 14-byte envelope, carries capability in byte 7, validates exact v1-v4 summary sizes, and publishes received summaries through checked temp/write/flush/sync/close/rename (`src/activities/network/NearbyStatsProtocol.cpp:9-81`). `Session` interprets zero as legacy v3, never sends v4 while incompatible, accepts and durably publishes supported old summaries before mismatch, ignores early/spoofed identities, and reaches Synced only after saved plus application ACK (`NearbyStatsProtocol.cpp:83-162`). The Activity advertises v4 on all packet types and its publish callback returns success only from durable `publishSummary()` (`src/activities/network/NearbyStatsSyncActivity.cpp:367-379`, `:445-470`). The stale `isZeroMac` build references found during integration were replaced by direct zero-array comparisons at `NearbyStatsSyncActivity.cpp:548-557`.
+- Aggregation performs a deterministic selection pass for six lexical tags, excludes the exact local-MAC filename, validates summary-only snapshots, then merges numeric and language totals over the same accepted files (`src/activities/reader/GlobalReadingStats.cpp:241-289`). MAC failure returns local only.
+
+## Evidence and items not independently verified
+
+The implementation report records 38/38 focused language/protocol tests, 740/740 broad native tests, and both simulator builds passing. Root additionally reported the button stats/OCR flow and EPUB smoke passing. I did not rerun them, as requested. The corrected touch flow, current firmware builds, ESP-NOW behavior on real updated/legacy peers, SD fault injection, C3/S3 heap and largest-block readings, and target stack high-water marks were still external/in progress during this review and cannot be independently verified here.
+
+The task should not pass its spec gate until the High global-Home dirty-edit path is fixed and tested. The Low Nearby cleanup may be deferred if the final patch remains otherwise frozen.
+
+## Scoped fix-round 1 review
+
+Date: 2026-09-07. Scope was limited to `/private/tmp/crossink-stats10b-fix1-review.patch`, the appended fix report, and the previously reported High finding. Reported 39/39 focused tests were not rerun.
+
+**Prior High: ADDRESSED.** `BookStatsActivity::handleHomeGesture()` now performs the guarded save and consumes Home even on failure, so ActivityManager cannot execute its fallback replacement (`src/activities/reader/BookStatsActivity.cpp:292-305`; `src/activities/ActivityManager.cpp:353-363`). The edit state records a failed attempt without clearing dirty state, resets the failure latch on a new edit, and skips targets already published by a prior partial success (`src/activities/reader/ReadingStatsSave.h:19-29`; `ReadingStatsSave.cpp:23-29`). The translated failure banner is drawn from the held in-memory snapshot on every stats page (`BookStatsActivity.cpp:493-548`). Explicit Back, Confirm, touch-header, or Home retries remain available.
+
+The lifecycle extension also has the correct default behavior. `cancelSuspensionOnFailure()` defaults false, so cover/prefetch owners that return false from `prepareToSuspend()` retain the existing pending-transition drain loop (`src/activities/Activity.h:40-46`; `src/activities/BackgroundSuspension.h:3-16`; `src/activities/ActivityManager.cpp:225-232`). BookStats alone returns true and makes `prepareToSuspend()` a guarded save (`src/activities/reader/BookStatsActivity.h:79-84`); failed push/replace/pop clears the pending transition and child, while failed deep-sleep preparation clears the pending sleep retry (`ActivityManager.cpp:225-232`; `src/main.cpp:908-916`). Its failure latch suppresses ordinary and Quick Lock automatic sleep attempts, preventing an automatic SD retry loop (`BookStatsActivity.h:84`; `main.cpp:1554-1560`, `:1589-1597`).
+
+**New Medium — NOT ADDRESSED: a canceled Quick Lock sleep leaves a stale resume marker.** The Quick Lock timeout path sets `APP_STATE.quickLockResumePending` and `quickLockResumeTrigger` before calling `enterDeepSleep()` (`src/main.cpp:1554-1560`). With the new cancellation policy, `enterDeepSleep()` can return on hardware without sleeping when BookStats persistence fails (`main.cpp:908-914`). Only the simulator build clears `quickLockResumePending` after that return (`:1561-1565`), and it does not clear the trigger. If the user then unlocks and later performs a normal successful sleep, `enterDeepSleep()` persists the stale marker at `main.cpp:928`; the next wake interprets it as a Quick Lock resume at `:1244-1251` and can restore a lock the user already cleared.
+
+Clear both Quick Lock resume fields when the Quick Lock timeout call returns because suspension was canceled. On hardware a successful deep sleep does not return; for simulator behavior, use the existing deep-sleep/test seam rather than retaining stale state. Add a regression that starts locked, makes BookStats persistence fail, triggers the Quick Lock timeout, verifies the stats activity stays interactive, unlocks, performs a later ordinary sleep/wake, and proves Quick Lock is not restored. Also retain the approved test that a default-false background owner continues draining rather than canceling.
+
+The hardware zero-MAC compile failure is addressed by direct comparison with a zero `std::array` at `src/activities/network/NearbyStatsSyncActivity.cpp:548-557`. The touch smoke correction is also sound: it asserts BookStats before exit and uses the real touch header path so stale synthetic Back-release suppression cannot consume the test action (`src/simulator/SimulatorSmokeTest.cpp:984-1008`). Logs established that Home was already the parent and no BookStats exit occurred before the earlier failure, so no production Back/navigation defect is inferred.
+
+**Fix-round specification verdict: FAIL pending the Medium Quick Lock marker fix. Quality verdict: PASS WITH FINDINGS.** The prior High is closed and no other breakage was found in this scoped diff. The previously reported Low dead Nearby mirrors remains deferred to the final gate as directed. Root's final native/simulator and actual UI fault-smoke results were still in progress and cannot be independently verified here.
+
+## Scoped fix-round 2 review
+
+Date: 2026-09-07. Scope was limited to `/private/tmp/crossink-stats10b-fix2-review.patch`, the appended fix report, and the Medium Quick Lock finding from fix round 1. Reported 39/39 focused tests were not rerun.
+
+**Prior Medium: ADDRESSED.** A failed `prepareToSuspend()` now clears both `quickLockResumePending` and `quickLockResumeTrigger` exactly when the activity's policy cancels the sleep attempt (`src/main.cpp:909-918`). When an ordinary background owner requests another drain attempt, `pendingDeepSleep` remains true and neither field is cleared, preserving the established retry behavior. The simulator-return cleanup uses the same `!pendingDeepSleep` condition and clears both fields (`main.cpp:1558-1568`). This prevents a canceled BookStats Quick Lock attempt from being persisted by a later ordinary sleep while retaining the default suspension contract.
+
+The new simulator sequence covers the complete persistence consequence: it arms both Quick Lock fields, executes the actual canceled sleep path, checks the in-memory fields, later enters an ordinary sleep through the existing simulator seam, reloads `APP_STATE`, and checks both durable fields (`src/simulator/SimulatorSmokeTest.cpp:1522-1573`). Replacing the fixture's synthetic Confirm with its existing Left route only avoids the unmatched `suppressNextConfirmRelease` latch; it does not alter production input code (`SimulatorSmokeTest.cpp:1012-1026`). No new breakage was found in the fix2 delta.
+
+**Specification: PASS for fix round 2. Quality: PASS WITH FINDINGS.** The lifecycle fix now meets the approved cancellation, retry, and stale-intent requirements. The previously reported Low dead Nearby state remains deferred to the final gate and is unchanged by this round. Root subsequently reported button and touch runtime passes that both logged the ordinary-sleep stale-intent assertion, plus both simulator builds passing; I did not rerun or independently verify those results. Hardware profile builds remained in progress.
+
+## Scoped fix-round 3 review
+
+Date: 2026-09-07. Scope was limited to the one-line production change in `/private/tmp/crossink-stats10b-fix3-review.patch`. Reported 39/39 focused tests were not rerun.
+
+**Compiler fix: ADDRESSED. Specification: PASS. Quality: PASS WITH FINDINGS.** `std::max<uint32_t>(uint32_t(start / kDaySeconds), 1)` explicitly selects the intended 32-bit unsigned comparison type and remains semantically identical to the rejected `1u` expression (`src/activities/reader/ReadingLanguageStats.cpp:75`). The quotient is already bounded by the `uint64_t` end clamp and the explicit conversion is unchanged; the lower bound still reserves day zero. No new behavior or breakage was introduced by this line. The prior Low dead Nearby state remains deferred to the final gate. Root reported the focused native suite passing; the actual C3 build remained in progress and was not independently verified here.

@@ -20,9 +20,6 @@ constexpr bool USE_ATKINSON = true;  // Use Atkinson dithering instead of Floyd-
 Bitmap::~Bitmap() {
   delete[] errorCurRow;
   delete[] errorNextRow;
-
-  delete atkinsonDitherer;
-  delete fsDitherer;
 }
 
 uint16_t Bitmap::readLE16(HalFile& f) {
@@ -175,18 +172,17 @@ BmpReaderError Bitmap::parseHeaders() {
   const bool highColor = !nativePalette;
   if (highColor && dithering) {
     if (USE_ATKINSON) {
-      atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(width, imageLevels);
-      if (!atkinsonDitherer || !atkinsonDitherer->isValid()) {
-        delete atkinsonDitherer;
-        atkinsonDitherer = nullptr;
+      atkinsonDitherer = makeUniqueNoThrow<AtkinsonDitherer>();
+      if (!atkinsonDitherer || !atkinsonDitherer->begin(width, imageLevels)) {
+        LOG_ERR("BMP", "OOM for bitmap dither rows (%d pixels)", width);
+        atkinsonDitherer.reset();
         return BmpReaderError::OomRowBuffer;
       }
     } else {
-      fsDitherer = new (std::nothrow) FloydSteinbergDitherer(width, imageLevels);
-      if (!fsDitherer || !fsDitherer->isValid()) {
-        delete fsDitherer;
-        fsDitherer = nullptr;
-        LOG_ERR("BMP", "Failed to allocate Floyd-Steinberg ditherer");
+      fsDitherer = makeUniqueNoThrow<FloydSteinbergDitherer>();
+      if (!fsDitherer || !fsDitherer->begin(width, imageLevels)) {
+        LOG_ERR("BMP", "OOM for bitmap dither rows (%d pixels)", width);
+        fsDitherer.reset();
         return BmpReaderError::OomRowBuffer;
       }
     }
@@ -203,14 +199,13 @@ bool Bitmap::setDitheredOutputSize(const int targetWidth, const int targetHeight
 
   // The error buffers must use final-screen coordinates. Recreating this tiny
   // helper costs about 3 KiB for an X3-wide custom sleep image, not a full BMP.
-  auto* resizedDitherer = new (std::nothrow) AtkinsonDitherer(targetWidth, imageLevels);
-  if (!resizedDitherer || !resizedDitherer->isValid()) {
-    delete resizedDitherer;
+  auto resizedDitherer = makeUniqueNoThrow<AtkinsonDitherer>();
+  if (!resizedDitherer || !resizedDitherer->begin(targetWidth, imageLevels)) {
+    LOG_ERR("BMP", "OOM for resized dither rows (%d pixels)", targetWidth);
     return false;
   }
 
-  delete atkinsonDitherer;
-  atkinsonDitherer = resizedDitherer;
+  atkinsonDitherer = std::move(resizedDitherer);
   outputWidth = targetWidth;
   outputHeight = targetHeight;
   return true;

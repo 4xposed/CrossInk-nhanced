@@ -15,6 +15,7 @@
 #include "CrossPointSettings.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
 #include "util/BookCacheUtils.h"
+#include "util/BookFolderMutation.h"
 
 namespace {
 constexpr const char* HIDDEN_ITEMS[] = {"System Volume Information", "XTCache"};
@@ -62,6 +63,11 @@ bool WebDAVHandler::canRaw(WebServer& server, const String& uri) {
 
 void WebDAVHandler::raw(WebServer& server, const String& uri, HTTPRaw& raw) {
   (void)uri;
+  if (raw.status == RAW_START && BookFolderMutation::storesFrozen()) BookFolderMutation::retryPendingMutation();
+  if (BookFolderMutation::storesFrozen()) {
+    _putOk = false;
+    return;
+  }
   if (raw.status == RAW_START) {
     _putPath = getRequestPath(server);
     if (isProtectedPath(_putPath)) {
@@ -132,6 +138,15 @@ void WebDAVHandler::raw(WebServer& server, const String& uri, HTTPRaw& raw) {
 }
 
 bool WebDAVHandler::handle(WebServer& server, HTTPMethod method, const String& uri) {
+  if (BookFolderMutation::storesFrozen() && method != HTTP_OPTIONS && method != HTTP_PROPFIND && method != HTTP_GET &&
+      method != HTTP_HEAD) {
+    const auto recovery = BookFolderMutation::retryPendingMutation();
+    if (BookFolderMutation::storesFrozen()) {
+      server.send(503, "text/plain",
+                  "metadata_recovery_pending: content may already have moved; check SD card and retry");
+      return true;
+    }
+  }
   (void)uri;
   switch (method) {
     case HTTP_OPTIONS:
@@ -560,6 +575,33 @@ void WebDAVHandler::handleMove(WebServer& s) {
     String parentPath = dstPath.substring(0, lastSlash);
     if (!parentPath.isEmpty() && !Storage.exists(parentPath.c_str())) {
       s.send(409, "text/plain", "Destination parent does not exist");
+      return;
+    }
+  }
+
+  HalFile source = Storage.open(srcPath.c_str());
+  if (!source) {
+    s.send(500, "text/plain", "Source unavailable");
+    return;
+  }
+  const bool directory = source.isDirectory();
+  if (!source.close()) {
+    s.send(500, "text/plain", "Source close failed");
+    return;
+  }
+  if (directory) {
+    const auto result = BookFolderMutation::move(srcPath.c_str(), dstPath.c_str());
+    if (result == BookFolderMutation::Result::Complete) {
+      ImageFolderIndex::invalidateForPath(srcPath.c_str());
+      ImageFolderIndex::invalidateForPath(dstPath.c_str());
+      s.send(201);
+      return;
+    }
+    if (result != BookFolderMutation::Result::NotManga) {
+      s.send(BookFolderMutation::httpStatus(result, overwrite), "text/plain",
+             result == BookFolderMutation::Result::RecoveryPending
+                 ? "metadata_recovery_pending: content may already have moved; retry to recover"
+                 : BookFolderMutation::error(result));
       return;
     }
   }

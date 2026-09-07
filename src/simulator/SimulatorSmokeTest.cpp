@@ -6,6 +6,8 @@
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <MangaBook.h>
+#include <MangaCover.h>
 #include <ReviewStateStore.h>
 
 #include <algorithm>
@@ -14,13 +16,30 @@
 #include <memory>
 #include <vector>
 
+#include "BookmarkStore.h"
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"
 #include "DeviceCapabilities.h"
+#include "GlobalActions.h"
+#include "MangaStatusSmoke.h"
 #include "MappedInputManager.h"
+#include "RecentBooksStore.h"
 #include "SettingsList.h"
 #include "activities/ActivityManager.h"
+#include "activities/boot_sleep/SleepCoverAssets.h"
 #include "activities/browser/OpdsBookBrowserActivity.h"
+#include "activities/home/BookActions.h"
+#include "activities/home/RecentBookProgress.h"
+#include "activities/reader/BookReadingStats.h"
+#include "activities/reader/BookStatsActivity.h"
+#include "activities/reader/BookStatsView.h"
 #include "activities/reader/EpubReaderMenuActivity.h"
+#include "activities/reader/EpubReaderWordLookupActivity.h"
+#include "activities/reader/MangaPrefetch.h"
+#include "activities/reader/MangaProgressStore.h"
+#include "activities/reader/MangaReaderActivity.h"
+#include "activities/reader/MangaTranslationActivity.h"
+#include "activities/reader/QrDisplayActivity.h"
 #include "activities/reader/ReaderOptionsActivity.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/settings/QuickActionsActivity.h"
@@ -30,6 +49,7 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "simulator/SimulatorHomeKeyInput.h"
+#include "util/LookupHistory.h"
 
 extern ActivityManager activityManager;
 extern GfxRenderer renderer;
@@ -91,6 +111,49 @@ class SimulatorSmokeTest {
     AssertTouchscreenEnabled,
     OpenSmokeBook,
     OpenBooks,
+    ManualReaderRefresh,
+    MangaAutoEvents,
+    MangaTouchPageTo,
+    MangaTouchMenuGesture,
+    MangaQrContracts,
+    MangaReviewInterleave,
+    MangaCacheContracts,
+    MangaMenuContracts,
+    MangaRenderFailure,
+    MangaStatusPlanes,
+    MangaMenuGoHome,
+    MangaMenuReset,
+    MangaTouchOptionDown,
+    MangaTouchOptionRelease,
+    MangaCheckMenuAction,
+    MangaCheckAuto,
+    MangaShortcutLookup,
+    MangaPrefetchDwell,
+    MangaPrefetchPush,
+    MangaPrefetchReplace,
+    MangaPrefetchPop,
+    MangaPrefetchSleep,
+    MangaBoundaryJump,
+    MangaQueueCurrentSource,
+    MangaHoldConsumption,
+    MangaWaitCompletion,
+    MangaReleaseCompletion,
+    MangaAssertPosition,
+    MangaLookupReady,
+    MangaAssertScanCache,
+    MangaOpenMenu,
+    MangaTranslationPage,
+    MangaRememberFont,
+    MangaAssertHistory,
+    MangaAssertFeedback,
+    MangaAssertEmptyTranslation,
+    MangaLookupUnavailable,
+    MangaOpenFixture,
+    MangaHideDictionaries,
+    MangaRestoreDictionaries,
+    MangaForceLookupExit,
+    MangaDuplicateMenu,
+    MangaConfirmOnCompletion,
     DisableReaderTouch,
     EnableReaderTouch,
     SetLookupPowerShortcut,
@@ -102,6 +165,14 @@ class SimulatorSmokeTest {
     TouchButtonRelease,
     AssertActivity,
     AssertAnkiNextCandidate,
+    AssertMangaBookmark,
+    AssertMangaLibrary,
+    OpenMangaLanguageStats,
+    AssertMangaLanguageStats,
+    MangaStatsSaveFailure,
+    OpenMangaRecents,
+    MangaReadingDwell,
+    MangaFinalPageDwell,
     Render
   };
 
@@ -120,6 +191,11 @@ class SimulatorSmokeTest {
   std::vector<ScriptAction> inputScript;
   size_t scriptIndex = 0;
   SmokeStep inputCompletionStep = SmokeStep::Done;
+  unsigned long mangaPrefetchDwellAt = 0;
+  int mangaReaderFontId = 0, mangaReaderFontWidth = 0, mangaReaderLineHeight = 0;
+  int mangaReaderOrientation = 0;
+  uint32_t mangaReaderImageHash = 0;
+  ReadingStatsDate mangaStatsStartBefore;
 
   int touchButtonX = 0;
   int touchButtonY = 0;
@@ -141,6 +217,11 @@ class SimulatorSmokeTest {
   static bool isAnkiDeckSmokeBook() {
     const char* bookPath = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
     return bookPath != nullptr && FsHelpers::hasAnkiDeckExtension(bookPath);
+  }
+
+  static bool isMangaSmokeBook() {
+    const char* bookPath = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
+    return bookPath != nullptr && bookPath[0] != '\0' && manga::MangaBook::isMangaFolder(bookPath);
   }
 
   static void applyRequestedTheme() {
@@ -716,6 +797,10 @@ class SimulatorSmokeTest {
     return {ScriptActionType::OpenBooks, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
   }
 
+  static ScriptAction manualReaderRefresh() {
+    return {ScriptActionType::ManualReaderRefresh, MappedInputManager::Button::Back, nullptr, 0, 0, 0};
+  }
+
   static ScriptAction render(const char* label, int framesToSettle = 3) {
     return {ScriptActionType::Render, MappedInputManager::Button::Back, label, framesToSettle, 0, 0};
   }
@@ -826,9 +911,752 @@ class SimulatorSmokeTest {
     inputScript.push_back(assertActivity("Home"));
   }
 
+  void addMangaTouchMenuGesture() {
+    for (int phase = 0; phase < 3; ++phase)
+      inputScript.push_back({ScriptActionType::MangaTouchMenuGesture, {}, nullptr, 0, phase, 0});
+  }
+  void buildMangaActiveEvents() {
+    const int count = mappedInputManager.hasTouchHardware() ? 6 : 5;
+    for (int event = 0; event < count; ++event) {
+      inputScript.push_back({ScriptActionType::MangaMenuGoHome, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Home before active cancellation", 3));
+      inputScript.push_back({ScriptActionType::MangaMenuReset, {}, nullptr, 0, 0, -1});
+      inputScript.push_back(openSmokeBook());
+      inputScript.push_back(render("Manga active cancellation fixture", 4));
+      inputScript.push_back({ScriptActionType::MangaOpenMenu, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga active cancellation menu", 3));
+      for (int i = 0; i < 12; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga active cancellation rate", 3));
+      for (int i = 0; i < 4; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga automatic mode before event", 3));
+      inputScript.push_back({ScriptActionType::MangaCheckAuto, {}, nullptr, 0, 1, 0});
+      if (event < 2)
+        addTap(event ? MappedInputManager::Button::Back : MappedInputManager::Button::Confirm);
+      else if (event == 5)
+        addMangaTouchMenuGesture();
+      else
+        inputScript.push_back({ScriptActionType::MangaAutoEvents, {}, nullptr, 0, event, 0});
+      inputScript.push_back(render("Manga active event consumed", 4));
+      if (event == 3) {
+        inputScript.push_back(assertActivity("ReaderOptions"));
+        addTap(MappedInputManager::Button::Back);
+        inputScript.push_back(render("Manga active suspension child returned", 4));
+      }
+      if (event == 4) {
+        inputScript.push_back(assertActivity("Home"));
+        inputScript.push_back(openSmokeBook());
+        inputScript.push_back(render("Manga active exit reopened", 4));
+      }
+      inputScript.push_back({ScriptActionType::MangaAutoEvents, {}, nullptr, 0, 6, event});
+    }
+  }
+  void buildMangaTouchPaging() {
+    inputScript.push_back({ScriptActionType::MangaAutoEvents, {}, nullptr, 0, 7, 0});
+    inputScript.push_back(render("Manga landscape touch paging", 4));
+    addMangaTouchMenuGesture();
+    inputScript.push_back(render("Manga landscape popup", 3));
+    inputScript.push_back({ScriptActionType::MangaAutoEvents, {}, nullptr, 0, 8, 0});
+    for (int row : {15, 0, 15}) inputScript.push_back({ScriptActionType::MangaTouchPageTo, {}, nullptr, 0, row, 0});
+    inputScript.push_back({ScriptActionType::MangaTouchOptionDown, {}, nullptr, 0, 15, 0});
+    inputScript.push_back({ScriptActionType::MangaTouchOptionRelease, {}, nullptr, 0, 15, 0});
+    inputScript.push_back(render("Manga touch-only last row after reverse paging", 4));
+    inputScript.push_back(assertActivity("QrDisplay"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Manga touch-paged QR returns", 4));
+    addMangaTouchMenuGesture();
+    inputScript.push_back(render("Manga reopened popup invalidates old hitboxes", 3));
+    inputScript.push_back({ScriptActionType::MangaTouchPageTo, {}, nullptr, 0, 0, 0});
+    inputScript.push_back({ScriptActionType::MangaTouchOptionDown, {}, nullptr, 0, 0, 0});
+    inputScript.push_back({ScriptActionType::MangaTouchOptionRelease, {}, nullptr, 0, 0, 0});
+    inputScript.push_back(render("Manga first row after popup reopen", 4));
+    inputScript.push_back(assertActivity("MangaReaderSelection"));
+    inputScript.push_back({ScriptActionType::MangaAutoEvents, {}, nullptr, 0, 9, 0});
+  }
+
+  void buildMangaQrContracts() {
+    for (int mode = 0; mode < 3; ++mode) {
+      inputScript.push_back({ScriptActionType::MangaQrContracts, {}, nullptr, 0, 0, mode});
+      inputScript.push_back({ScriptActionType::MangaOpenMenu, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga QR ownership menu", 3));
+      for (int i = 0; i < 15; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga QR allocation result", 5));
+      inputScript.push_back({ScriptActionType::MangaQrContracts, {}, nullptr, 0, 1, mode});
+      inputScript.push_back(render("Manga QR repeated redraw", 4));
+      inputScript.push_back({ScriptActionType::MangaQrContracts, {}, nullptr, 0, 2, mode});
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga QR same-view return", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, -1});
+    }
+  }
+
+  void buildMangaReviewInterleave() {
+    const std::string_view mode = std::getenv("CROSSINK_SIMULATOR_MANGA_REVIEW");
+    if (mode == "active_cancel") {
+      inputScript.push_back({ScriptActionType::MangaOpenMenu, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga completion cancellation menu", 3));
+      for (int i = 0; i < 12; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga completion cancellation rate", 3));
+      for (int i = 0; i < 4; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga auto before held refresh", 3));
+      inputScript.push_back({ScriptActionType::MangaCheckAuto, {}, nullptr, 0, 1, 0});
+    }
+    inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, mode == "finished" ? 1 : 0, 0});
+    if (mode == "finished")
+      inputScript.push_back({ScriptActionType::MangaWaitCompletion, {}, nullptr, 0, 0, 0});
+    else
+      inputScript.push_back({ScriptActionType::MangaPrefetchDwell, {}, nullptr, 230, 0, 0});
+    if (mode == "release" || mode == "active_cancel") {
+      inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 2, 0});
+      inputScript.push_back(render("Manga refresh waits for held completion", 3));
+      inputScript.push_back({ScriptActionType::MangaWaitCompletion, {}, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 7, 0});
+      // Inject exactly one edge in the iteration which consumes worker completion.
+      const auto edge =
+          mode == "release" ? MappedInputManager::Button::PageForward : MappedInputManager::Button::Confirm;
+      inputScript.push_back({ScriptActionType::MangaReleaseCompletion, edge, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga completion edge serviced", 4));
+      inputScript.push_back(
+          {ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 8, mode == "active_cancel" ? 1 : 0});
+      inputScript.push_back(render("Manga completion edge is not replayed", 4));
+      inputScript.push_back(
+          {ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 8, mode == "active_cancel" ? 1 : 0});
+    } else if (mode == "deferred") {
+      inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 2, 0});
+      inputScript.push_back(render("Manga refresh deferred behind worker", 3));
+      inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 3, 0});
+      inputScript.push_back(render("Manga menu after deferred render", 4));
+      for (int i = 0; i < 12; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga interleaved auto popup", 3));
+      for (int i = 0; i < 4; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga auto starts after deferred frame", 3));
+      inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 5400, 6, 0});
+      inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 4, 0});
+      addTap(MappedInputManager::Button::Back);
+    } else {
+      inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 5, mode == "finished" ? 1 : 0});
+      inputScript.push_back(render("One-shot manga lookup after worker drain", 6));
+      inputScript.push_back(assertActivity("EpubReaderWordLookup"));
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("One-shot shortcut restores same view", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, -1});
+      inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 6, 0});
+    }
+  }
+
+  void addMangaCacheDelete() {
+    inputScript.push_back({ScriptActionType::MangaOpenMenu, {}, nullptr, 0, 0, 0});
+    inputScript.push_back(render("Manga cache gate menu", 3));
+    for (int i = 0; i < 14; ++i) addTap(MappedInputManager::Button::Down);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga cache gate confirmation", 3));
+    addTap(MappedInputManager::Button::Down);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga cache gate result", 6));
+  }
+
+  void buildMangaFailureContracts() {
+    inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 11000, 6, 0});
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 0, 0});
+    addMangaCacheDelete();
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 1, 0});
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga resumes after blocked cache deletion", 4));
+    inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 3100, 6, 0});
+    addTap(MappedInputManager::Button::PageForward);
+    inputScript.push_back(render("Manga live panel change while stats target pending", 4));
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 2, 0});
+    inputScript.push_back(render("Manga exit retained after repeated stats failure", 5));
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 1, 1});
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga second failure dismissed", 3));
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 3, 0});
+    addMangaCacheDelete();
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 4, 0});
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Home after cache retry succeeds", 4));
+    inputScript.push_back(assertActivity("Home"));
+    inputScript.push_back(openSmokeBook());
+    inputScript.push_back(render("Manga regenerates pixels after cache retry", 6));
+    inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 5, 0});
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 6, 0});
+    inputScript.push_back(render("Manga screenshot SD failure feedback", 5));
+    inputScript.push_back({ScriptActionType::MangaCacheContracts, {}, nullptr, 0, 7, 0});
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga screenshot failure restores reading", 4));
+  }
+
+  void buildMangaRenderFailureScript() {
+    const bool restore = std::string_view(std::getenv("CROSSINK_SIMULATOR_MANGA_RENDER_FAILURE")) == "restore";
+    if (restore) {
+      inputScript.push_back({ScriptActionType::MangaRenderFailure, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga failed BW restore screenshot request", 6));
+      inputScript.push_back({ScriptActionType::MangaRenderFailure, {}, nullptr, 0, 1, 0});
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga restored after error feedback", 4));
+    } else {
+      inputScript.push_back({ScriptActionType::MangaOpenMenu, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga delete cache menu", 3));
+      for (int i = 0; i < 14; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga delete cache confirmation", 4));
+      addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga cache deletion result", 6));
+      inputScript.push_back({ScriptActionType::MangaRenderFailure, {}, nullptr, 0, 2, 0});
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Home after manga cache deletion", 5));
+      inputScript.push_back(assertActivity("Home"));
+    }
+  }
+
+  void buildMangaMenuScript() {
+    inputScript.push_back({ScriptActionType::MangaStatusPlanes, {}, nullptr, 0, 0, 0});
+    static constexpr const char* names[] = {"Chapter",     "Percent",        "Bookmarks",    "Toggle bookmark",
+                                            "Panels only", "Panel rotation", "Orientation",  "Home",
+                                            "Lookup",      "Translation",    "History",      "Manga settings",
+                                            "Auto turn",   "Screenshot",     "Delete cache", "OCR QR"};
+    for (int scope : {-1, 0}) {
+      for (int row = 0; row < 16; ++row) {
+        inputScript.push_back({ScriptActionType::MangaMenuGoHome, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(render("Home before menu row", 3));
+        inputScript.push_back({ScriptActionType::MangaMenuReset, {}, nullptr, 0, 0, scope});
+        inputScript.push_back(openSmokeBook());
+        inputScript.push_back(render("Manga menu fixture reopened", 5));
+        inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, scope});
+        if (row == 13) inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 0, 3, scope});
+        if (scope < 0)
+          addTap(MappedInputManager::Button::Confirm);
+        else {
+#if CROSSINK_APP_CAP_TOUCH
+          if (mappedInputManager.hasTouch()) {
+            const int x = renderer.getScreenWidth() / 2;
+            const int y = mappedInputManager.hasHomeKey() ? renderer.getScreenHeight() - 8 : 8;
+            const int end =
+                mappedInputManager.hasHomeKey() ? renderer.getScreenHeight() * 3 / 4 : renderer.getScreenHeight() / 4;
+            inputScript.push_back(touchDown(x, y));
+            inputScript.push_back(touchMove(x, end));
+            inputScript.push_back(touchRelease(x, end));
+          } else
+#endif
+            inputScript.push_back({ScriptActionType::MangaOpenMenu, {}, nullptr, 0, 0, 0});
+        }
+        inputScript.push_back(render("Manga sixteen-row popup", 3));
+        inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 0, 0, scope});
+#if CROSSINK_APP_CAP_TOUCH
+        if (mappedInputManager.hasTouch()) {
+          inputScript.push_back({ScriptActionType::MangaTouchPageTo, {}, nullptr, 0, row, 0});
+          inputScript.push_back({ScriptActionType::MangaTouchOptionDown, {}, nullptr, 0, row, 0});
+          inputScript.push_back({ScriptActionType::MangaTouchOptionRelease, {}, nullptr, 0, row, 0});
+        } else
+#endif
+        {
+          for (int i = 0; i < row; ++i) addTap(MappedInputManager::Button::Down);
+          addTap(MappedInputManager::Button::Confirm);
+        }
+        inputScript.push_back(render(names[row], 5));
+        inputScript.push_back({ScriptActionType::MangaCheckMenuAction, {}, nullptr, 0, row, scope});
+        if (row == 11) {
+          inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 0, 5, scope});
+          if (!mappedInputManager.hasTouchHardware()) {
+            addTap(MappedInputManager::Button::Down);
+            addTap(MappedInputManager::Button::Down);
+          }
+          addTap(MappedInputManager::Button::Confirm);
+          inputScript.push_back(render("Manga applicable setting changed", 3));
+        }
+        if (row == 13) inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 0, 4, scope});
+        if (row == 12) {
+          for (int i = 0; i < 4; ++i) addTap(MappedInputManager::Button::Down);
+          addTap(MappedInputManager::Button::Confirm);
+          inputScript.push_back(render("Manga auto 12 selected", 3));
+          inputScript.push_back({ScriptActionType::MangaCheckAuto, {}, nullptr, 0, 1, scope});
+          addTap(MappedInputManager::Button::PageForward);
+          inputScript.push_back(render("Manga ignores competing manual turn", 2));
+          inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, scope});
+          inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 5400, 6, scope});
+          inputScript.push_back(render("Manga automatic next physical page", 3));
+          inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 1, -1});
+          addTap(MappedInputManager::Button::Back);
+          inputScript.push_back(render("Manga auto cancelled by Back", 3));
+          inputScript.push_back({ScriptActionType::MangaCheckAuto, {}, nullptr, 0, 0, scope});
+        }
+        if (row == 11 || row == 14 || row == 15) {
+          addTap(MappedInputManager::Button::Back);
+          inputScript.push_back(render("Manga child returns to same view", 4));
+          inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, scope});
+          if (row == 11) inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 0, 2, scope});
+        }
+      }
+    }
+    inputScript.push_back({ScriptActionType::MangaMenuContracts, {}, nullptr, 0, 1, 0});
+    // Both ActivityManager overloads reach the same current-panel lookup.
+    for (int route = 0; route < 2; ++route) {
+      inputScript.push_back({ScriptActionType::MangaShortcutLookup, {}, nullptr, 0, route, 0});
+      inputScript.push_back(render("Manga configured lookup shortcut", 5));
+      inputScript.push_back(assertActivity("EpubReaderWordLookup"));
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga shortcut returns to same panel", 5));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+    }
+  }
+
+  void buildMangaInputScript() {
+    inputScript.clear();
+    scriptIndex = 0;
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_ACTIVE_EVENTS")) {
+      buildMangaActiveEvents();
+      return;
+    }
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_TOUCH_PAGING")) {
+      buildMangaTouchPaging();
+      return;
+    }
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_QR_REVIEW")) {
+      buildMangaQrContracts();
+      return;
+    }
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_REVIEW")) {
+      buildMangaReviewInterleave();
+      return;
+    }
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_FAILURES")) {
+      buildMangaFailureContracts();
+      return;
+    }
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_RENDER_FAILURE")) {
+      buildMangaRenderFailureScript();
+      return;
+    }
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_MENU")) {
+      buildMangaMenuScript();
+      return;
+    }
+
+    inputScript.push_back(assertActivity("MangaReader"));
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS")) {
+      const auto dwell = ScriptAction{ScriptActionType::MangaPrefetchDwell, MappedInputManager::Button::Back,
+                                      nullptr, 230, 0, 0};
+      for (int boundary = 0; boundary < 2; ++boundary) {
+        const int panel = boundary ? 0 : -1;
+        const auto retained = boundary ? MappedInputManager::Button::PageBack : MappedInputManager::Button::PageForward;
+        const auto fresh = boundary ? MappedInputManager::Button::PageForward : MappedInputManager::Button::PageBack;
+        inputScript.push_back({ScriptActionType::MangaBoundaryJump, {}, nullptr, 0, boundary, panel});
+        inputScript.push_back(render("Manga boundary prepared", 4));
+        inputScript.push_back({ScriptActionType::MangaQueueCurrentSource, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(dwell);
+        inputScript.push_back({ScriptActionType::MangaHoldConsumption, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(release(retained));
+        inputScript.push_back({ScriptActionType::MangaWaitCompletion, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::MangaReleaseCompletion, fresh, nullptr, 0, 0, 0});
+        inputScript.push_back(render("Manga opposing directions drained", 4));
+        inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, boundary, panel});
+      }
+      inputScript.push_back({ScriptActionType::MangaBoundaryJump, {}, nullptr, 0, 0, -1});
+      inputScript.push_back(render("Manga menu race prepared", 4));
+      inputScript.push_back({ScriptActionType::MangaQueueCurrentSource, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(dwell);
+      inputScript.push_back({ScriptActionType::MangaHoldConsumption, {}, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaDuplicateMenu, {}, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaWaitCompletion, {}, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaConfirmOnCompletion, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(release(MappedInputManager::Button::Confirm));
+      inputScript.push_back(render("Manga Confirm on menu drain selected chapter", 4));
+      inputScript.push_back(assertActivity("MangaReaderSelection"));
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga duplicate menu request consumed", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, -1});
+
+      inputScript.push_back(dwell);
+      inputScript.push_back({ScriptActionType::MangaPrefetchPush, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Prefetch child push drained", 4));
+      inputScript.push_back(assertActivity("ReaderOptions"));
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Prefetch child pop resumed manga", 4));
+      inputScript.push_back(assertActivity("MangaReader"));
+      inputScript.push_back(dwell);
+      inputScript.push_back(manualReaderRefresh());
+      inputScript.push_back(render("Prefetch manual refresh drained", 4));
+      inputScript.push_back(assertActivity("MangaReader"));
+      inputScript.push_back(dwell);
+      inputScript.push_back({ScriptActionType::MangaPrefetchReplace, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Prefetch replace drained", 4));
+      inputScript.push_back(assertActivity("ReaderOptions"));
+      inputScript.push_back(openSmokeBook());
+      inputScript.push_back(render("Manga restored after prefetch replace", 4));
+      inputScript.push_back(dwell);
+      inputScript.push_back({ScriptActionType::MangaPrefetchPop, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Prefetch reader pop drained", 4));
+      inputScript.push_back(assertActivity("Home"));
+      inputScript.push_back(openSmokeBook());
+      inputScript.push_back(render("Manga restored after prefetch pop", 4));
+      inputScript.push_back(dwell);
+      inputScript.push_back({ScriptActionType::MangaPrefetchSleep, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Prefetch main sleep drained", 4));
+      inputScript.push_back(assertActivity("Sleep"));
+      inputScript.push_back(openSmokeBook());
+      inputScript.push_back(render("Manga restored after prefetch sleep", 4));
+      inputScript.push_back(assertActivity("MangaReader"));
+    }
+    inputScript.push_back({ScriptActionType::MangaPrefetchDwell, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+
+#if CROSSINK_APP_CAP_TOUCH
+    if (mappedInputManager.hasTouch()) {
+      SETTINGS.touchReaderControls = 1;
+      SETTINGS.pageTurnGesture = CrossPointSettings::TAP_AND_SWIPE;
+      inputScript.push_back(touchDown(renderer.getScreenWidth() * 5 / 6, renderer.getScreenHeight() / 2));
+      inputScript.push_back(touchRelease(renderer.getScreenWidth() * 5 / 6, renderer.getScreenHeight() / 2));
+    } else
+#endif
+    {
+      addTap(MappedInputManager::Button::PageForward);
+    }
+    inputScript.push_back(render("Manga first panel from overview", 4));
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_OCR")) {
+      const auto openMenuRow = [this](int index) {
+#if CROSSINK_APP_CAP_TOUCH
+        if (mappedInputManager.hasTouch()) {
+          const int w = renderer.getScreenWidth(), h = renderer.getScreenHeight();
+          const int start = mappedInputManager.hasHomeKey() ? h - 8 : 8;
+          const int end = mappedInputManager.hasHomeKey() ? h * 3 / 4 : h / 4;
+          inputScript.push_back(touchDown(w / 2, start));
+          inputScript.push_back(touchMove(w / 2, end));
+          inputScript.push_back(touchRelease(w / 2, end));
+        } else
+#endif
+          inputScript.push_back({ScriptActionType::MangaOpenMenu, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+        for (int i = 0; i < index; ++i) addTap(MappedInputManager::Button::Down);
+        addTap(MappedInputManager::Button::Confirm);
+      };
+      inputScript.push_back({ScriptActionType::MangaRememberFont, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaQueueCurrentSource, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga panel shared lookup", 4));
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaAssertScanCache, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+#if CROSSINK_APP_CAP_TOUCH
+      if (mappedInputManager.hasTouch()) {
+        const int w = renderer.getScreenWidth(), y = renderer.getScreenHeight() / 4;
+        inputScript.push_back(touchDown(w * 3 / 4, y));
+        inputScript.push_back(touchMove(w / 4, y));
+        inputScript.push_back(touchRelease(w / 4, y));
+      } else
+#endif
+        addTap(MappedInputManager::Button::Right);
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, nullptr, 0, 1, 0});
+      // Close a completed verified scan at cursor 1, then open the identical
+      // physical page/panel through the real reader input path.
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga image restored after OCR child", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga warm panel shared lookup", 4));
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, nullptr, 0, 1, 0});
+      inputScript.push_back({ScriptActionType::MangaAssertScanCache, MappedInputManager::Button::Back, nullptr, 0, 1, 1});
+#if CROSSINK_APP_CAP_TOUCH
+      if (mappedInputManager.hasTouch()) {
+        const int w = renderer.getScreenWidth(), y = renderer.getScreenHeight() / 4;
+        inputScript.push_back(touchDown(w / 2, y));
+        inputScript.push_back(touchMove(w * 3 / 4, y));
+        inputScript.push_back(touchRelease(w * 3 / 4, y));
+      } else
+#endif
+        addTap(MappedInputManager::Button::Left);
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Down);
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "Reader", 0, 0, 1});
+      addTap(MappedInputManager::Button::Confirm);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "text", 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "Reader", 0, 0, 1});
+      addTap(MappedInputManager::Button::Up);
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "Reader", 0, 0, 0});
+      inputScript.push_back(press(MappedInputManager::Button::Left));
+      inputScript.push_back({ScriptActionType::MangaReadingDwell, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(release(MappedInputManager::Button::Left));
+      inputScript.push_back(render("Manga dictionary picker", 4));
+      inputScript.push_back(assertActivity("DictionarySelect"));
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "Reader", 0, 0, 0});
+      inputScript.push_back(press(MappedInputManager::Button::Confirm));
+      inputScript.push_back({ScriptActionType::MangaReadingDwell, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(release(MappedInputManager::Button::Confirm));
+      inputScript.push_back(render("Manga clipping feedback", 4));
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga image restored after OCR child", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      openMenuRow(9);
+      inputScript.push_back(render("Manga stored panel translation", 4));
+      inputScript.push_back(assertActivity("MangaTranslation"));
+#if CROSSINK_APP_CAP_TOUCH
+      if (mappedInputManager.hasTouch()) {
+        const int w = renderer.getScreenWidth(), h = renderer.getScreenHeight();
+        inputScript.push_back(touchDown(w * 5 / 6, h / 2));
+        inputScript.push_back(touchRelease(w * 5 / 6, h / 2));
+      } else
+#endif
+        addTap(MappedInputManager::Button::PageForward);
+      inputScript.push_back(render("Manga translation next page", 4));
+      inputScript.push_back({ScriptActionType::MangaTranslationPage, MappedInputManager::Button::Back, nullptr, 0, 1, 0});
+      addTap(MappedInputManager::Button::PageBack);
+      inputScript.push_back({ScriptActionType::MangaTranslationPage, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga image restored after OCR child", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      openMenuRow(10);
+      inputScript.push_back(render("Manga lookup history", 4));
+      inputScript.push_back(assertActivity("LookedUpWords"));
+      inputScript.push_back({ScriptActionType::MangaAssertHistory, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+
+      // A translation-only physical page remains usable without OCR.
+      inputScript.push_back({ScriptActionType::MangaBoundaryJump, MappedInputManager::Button::Back, nullptr, 0, 1, 0});
+      inputScript.push_back(render("Manga translation-only panel", 4));
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga empty OCR feedback", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertFeedback, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      openMenuRow(9);
+      inputScript.push_back(render("Manga translation without OCR", 4));
+      inputScript.push_back({ScriptActionType::MangaTranslationPage, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back({ScriptActionType::MangaBoundaryJump, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga restored before pending Confirm", 4));
+
+      // Hold completion consumption: two real Confirm edges must queue one child.
+      inputScript.push_back({ScriptActionType::MangaHoldConsumption, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaQueueCurrentSource, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Confirm);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(assertActivity("MangaReader"));
+      inputScript.push_back({ScriptActionType::MangaWaitCompletion, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaReleaseCompletion, MappedInputManager::Button::Confirm, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga lookup after repeated pending Confirm", 4));
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "Reader", 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaForceLookupExit, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga forced lookup exit", 4));
+      inputScript.push_back(assertActivity("Home"));
+      inputScript.push_back(openSmokeBook());
+      inputScript.push_back(render("Manga reopened after forced lookup exit", 4));
+      inputScript.push_back(render("Manga image restored after OCR child", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+
+      inputScript.push_back({ScriptActionType::MangaOpenFixture, MappedInputManager::Button::Back, "/manga-ocr-fixtures/crop-only", 0, 0, 0});
+      inputScript.push_back(render("Manga legacy crop-only reader", 4));
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga text fallback shared lookup", 4));
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "Reader", 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga image restored after OCR child", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+
+      inputScript.push_back({ScriptActionType::MangaOpenFixture, MappedInputManager::Button::Back, "/manga-ocr-fixtures/empty", 0, 0, 0});
+      inputScript.push_back(render("Manga empty fixture", 4));
+      inputScript.push_back({ScriptActionType::MangaBoundaryJump, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga empty fixture panel", 4));
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga empty panel Confirm feedback", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertFeedback, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      openMenuRow(9);
+      inputScript.push_back(render("Manga empty stored translation", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertEmptyTranslation, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+
+      // Rename only the runner's synthetic fixture directory, with no lookup
+      // worker alive. No user storage or installed dictionary is touched.
+      inputScript.push_back({ScriptActionType::MangaHideDictionaries, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaOpenFixture, MappedInputManager::Button::Back, "/manga-ocr-fixtures/crop-only", 0, 0, 0});
+      inputScript.push_back(render("Manga no-dictionary reader", 4));
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga unavailable dictionary", 4));
+      inputScript.push_back({ScriptActionType::MangaLookupUnavailable, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      openMenuRow(9);
+      inputScript.push_back(render("Manga translation without dictionary", 4));
+      inputScript.push_back({ScriptActionType::MangaTranslationPage, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back({ScriptActionType::MangaRestoreDictionaries, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(openSmokeBook());
+      inputScript.push_back(render("Manga restored after edge fixtures", 4));
+      inputScript.push_back(render("Manga image restored after OCR child", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    }
+
+    inputScript.push_back({ScriptActionType::MangaReadingDwell, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    inputScript.push_back(assertActivity("MangaReader"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Manga overview restored from panel", 4));
+    if (std::getenv("CROSSINK_SIMULATOR_MANGA_OCR")) {
+      addTap(MappedInputManager::Button::Confirm);
+      for (int i = 0; i < 8; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga overview shared lookup", 4));
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga image restored after OCR child", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, -1});
+      addTap(MappedInputManager::Button::Confirm);
+      for (int i = 0; i < 9; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga stored overview translation", 4));
+      inputScript.push_back(assertActivity("MangaTranslation"));
+      addTap(MappedInputManager::Button::Back);
+    }
+
+    inputScript.push_back({ScriptActionType::MangaReadingDwell, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    inputScript.push_back(assertActivity("MangaReader"));
+
+    addTap(MappedInputManager::Button::Confirm);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga chapter list opened", 4));
+    inputScript.push_back(assertActivity("MangaReaderSelection"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Manga reader restored after chapter cancel", 4));
+    inputScript.push_back(assertActivity("MangaReader"));
+
+    addTap(MappedInputManager::Button::Confirm);
+    for (int index = 0; index < 3; ++index) addTap(MappedInputManager::Button::Down);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga bookmark toggled", 4));
+    inputScript.push_back({ScriptActionType::AssertMangaBookmark, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    inputScript.push_back(assertActivity("MangaReader"));
+    addTap(MappedInputManager::Button::Confirm);
+    for (int index = 0; index < 2; ++index) addTap(MappedInputManager::Button::Down);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga bookmark list opened", 4));
+    inputScript.push_back(assertActivity("MangaReaderSelection"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Manga reader restored after bookmark cancel", 4));
+    inputScript.push_back(assertActivity("MangaReader"));
+
+    addTap(MappedInputManager::Button::Confirm);
+    addTap(MappedInputManager::Button::Down);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga percent selector opened", 4));
+    inputScript.push_back(assertActivity("EpubReaderPercentSelection"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Manga reader restored after percent cancel", 4));
+    inputScript.push_back(assertActivity("MangaReader"));
+    inputScript.push_back(manualReaderRefresh());
+    inputScript.push_back(render("Manga manual refresh after child menu", 4));
+    inputScript.push_back(assertActivity("MangaReader"));
+
+    addTap(MappedInputManager::Button::Confirm);
+    for (int index = 0; index < 4; ++index) addTap(MappedInputManager::Button::Down);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga panels-only mode enabled", 4));
+    inputScript.push_back(assertActivity("MangaReader"));
+    inputScript.push_back({ScriptActionType::MangaOpenMenu, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    for (int index = 0; index < 5; ++index) addTap(MappedInputManager::Button::Down);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga panel rotation disabled", 4));
+    inputScript.push_back({ScriptActionType::MangaReadingDwell, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    inputScript.push_back(assertActivity("MangaReader"));
+
+    addTap(MappedInputManager::Button::PageForward);
+    inputScript.push_back(render("Manga second page first panel", 4));
+    inputScript.push_back(assertActivity("MangaReader"));
+    inputScript.push_back({ScriptActionType::MangaFinalPageDwell, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    addTap(MappedInputManager::Button::PageForward);
+    addTap(MappedInputManager::Button::PageForward);
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Home after manga exit", 4));
+    inputScript.push_back(assertActivity("Home"));
+    inputScript.push_back(openBooks());
+    inputScript.push_back(render("Books reopened for manga folder", 4));
+    inputScript.push_back(assertActivity("FileBrowser"));
+    addAnkiTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga reader reopened at persisted position", 8));
+    inputScript.push_back({ScriptActionType::AssertMangaBookmark, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    inputScript.push_back(assertActivity("MangaReader"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Home after reopened manga exit", 4));
+    inputScript.push_back(assertActivity("Home"));
+    inputScript.push_back({ScriptActionType::AssertMangaLibrary, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    inputScript.push_back(
+        {ScriptActionType::OpenMangaLanguageStats, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    inputScript.push_back(render("Manga statistics summary", 4));
+    inputScript.push_back(assertActivity("BookStats"));
+    addAnkiTap(MappedInputManager::Button::Right);
+    inputScript.push_back(render("Manga reading language totals", 4));
+    inputScript.push_back(
+        {ScriptActionType::AssertMangaLanguageStats, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    addAnkiTap(MappedInputManager::Button::Right);
+    inputScript.push_back(render("Device reading language totals", 4));
+    inputScript.push_back(assertActivity("BookStats"));
+    addAnkiTap(MappedInputManager::Button::Left);
+    inputScript.push_back(render("Manga languages restored before statistics exit", 4));
+    inputScript.push_back(assertActivity("BookStats"));
+#if CROSSINK_APP_CAP_TOUCH
+    if (mappedInputManager.hasTouchHardware()) {
+      // Earlier injected logical Back releases leave reader suppression armed.
+      // Exercise the real header exit without changing global simulator input behavior.
+      const Rect back = TouchHeaderBackButton::layout(TouchHeaderBackButton::compactHeaderRect(renderer)).touchRect;
+      const int x = back.x + back.width / 2, y = back.y + back.height / 2;
+      inputScript.push_back(touchDown(x, y));
+      inputScript.push_back(touchRelease(x, y));
+    } else
+#endif
+    {
+      addTap(MappedInputManager::Button::Back);
+    }
+    inputScript.push_back(render("Home after language statistics", 4));
+    inputScript.push_back(assertActivity("Home"));
+
+    if (halClock.isAvailable()) {
+      inputScript.push_back(
+          {ScriptActionType::OpenMangaLanguageStats, MappedInputManager::Button::Back, nullptr, 1, 0, 0});
+      inputScript.push_back(render("Manga statistics before save failure", 4));
+      addTap(MappedInputManager::Button::Left);
+      inputScript.push_back(render("Manga date editor before save failure", 4));
+      addTap(MappedInputManager::Button::Right);
+      inputScript.push_back(
+          {ScriptActionType::MangaStatsSaveFailure, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Manga dirty edits retained after failed Home save", 4));
+      inputScript.push_back(assertActivity("BookStats"));
+      inputScript.push_back(
+          {ScriptActionType::MangaStatsSaveFailure, MappedInputManager::Button::Back, nullptr, 0, 1, 0});
+      inputScript.push_back(render("Manga dirty edits retained after failed sleep save", 4));
+      inputScript.push_back(assertActivity("BookStats"));
+      inputScript.push_back(
+          {ScriptActionType::MangaStatsSaveFailure, MappedInputManager::Button::Back, nullptr, 0, 2, 0});
+      inputScript.push_back(render("Home after successful manga stats retry", 4));
+      inputScript.push_back(assertActivity("Home"));
+      inputScript.push_back(
+          {ScriptActionType::MangaStatsSaveFailure, MappedInputManager::Button::Back, nullptr, 0, 3, 0});
+    }
+
+    inputScript.push_back({ScriptActionType::OpenMangaRecents, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    inputScript.push_back(render("Manga Recent Books grid", 4));
+    inputScript.push_back(assertActivity("RecentBooksGrid"));
+    addAnkiTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Manga reopened from Recent Books", 4));
+    inputScript.push_back(assertActivity("MangaReader"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Home after Recent Books manga exit", 4));
+    inputScript.push_back(assertActivity("Home"));
+    if (halClock.isAvailable()) {
+      inputScript.push_back(
+          {ScriptActionType::MangaStatsSaveFailure, MappedInputManager::Button::Back, nullptr, 0, 4, 0});
+    }
+  }
+
   void buildReaderInputScript() {
     if (isAnkiDeckSmokeBook()) {
       buildAnkiDeckInputScript();
+      return;
+    }
+    if (isMangaSmokeBook()) {
+      buildMangaInputScript();
       return;
     }
 
@@ -1181,6 +2009,18 @@ class SimulatorSmokeTest {
     inputScript.push_back(assertActivity("FileBrowserSettings"));
   }
 #endif
+  uint32_t mangaImageHashLocked() const {
+    uint32_t hash = 2166136261U;
+    const uint8_t* pixels = renderer.getFrameBuffer();
+    for (size_t i = 0; pixels && i < renderer.getBufferSize(); ++i) hash = (hash ^ pixels[i]) * 16777619U;
+    return hash;
+  }
+
+  MangaReaderActivity& mangaReaderForTest() {
+    auto* reader = dynamic_cast<MangaReaderActivity*>(activityManager.currentForSimulatorTest());
+    if (!reader) fail("Expected actual manga reader for deterministic input test");
+    return *reader;
+  }
 
   void runReaderInputScript() {
     if (scriptIndex >= inputScript.size()) {
@@ -1190,6 +2030,397 @@ class SimulatorSmokeTest {
 
     const auto& action = inputScript[scriptIndex++];
     switch (action.type) {
+      case ScriptActionType::MangaAutoEvents:
+        if (action.x == 2) {
+          activityManager.notifyInputLockChanged(true);
+          if (mangaReaderForTest().preventAutoSleep()) fail("Lock did not cancel active manga auto mode");
+          activityManager.notifyInputLockChanged(false);
+        } else if (action.x == 3) {
+          activityManager.pushActivity(
+              std::make_unique<ReaderOptionsActivity>(renderer, mappedInputManager, ReaderSettingsScope::Manga));
+        } else if (action.x == 4)
+          activityManager.goHome();
+        else if (action.x == 6) {
+          const auto position = mangaReaderForTest().simulatorPosition();
+          if (mangaReaderForTest().preventAutoSleep() || mangaReaderForTest().simulatorMenuActive() ||
+              position.page != 0 || position.panel != -1)
+            fail("Active manga event did not cancel and consume safely");
+          LOG_INF("SMOKE", "Verified active manga automatic event cancellation mode=%d", action.y);
+        } else if (action.x == 7) {
+          if (!mappedInputManager.hasTouchHardware()) fail("Touch paging needs touch simulator");
+          SETTINGS.orientation = CrossPointSettings::LANDSCAPE_CW;
+          SETTINGS.touchReaderControls = true;
+          activityManager.requestManualReaderRefresh();
+        } else if (action.x == 8) {
+          int x, y;
+          if (mangaReaderForTest().simulatorMenuOptionCenter(15, x, y))
+            fail("Touch paging fixture did not require scrolling");
+        } else if (action.x == 9)
+          LOG_INF("SMOKE", "Verified touch-only manga paging in both directions and fresh popup hitboxes");
+        break;
+      case ScriptActionType::MangaTouchMenuGesture:
+#if CROSSINK_APP_CAP_TOUCH
+      {
+        static int endY = 0;
+        if (action.x == 0) {
+          touchButtonX = renderer.getScreenWidth() / 2;
+          touchButtonY = mappedInputManager.hasHomeKey() ? renderer.getScreenHeight() - 8 : 8;
+          endY = mappedInputManager.hasHomeKey() ? renderer.getScreenHeight() * 3 / 4 : renderer.getScreenHeight() / 4;
+          mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+        } else if (action.x == 1)
+          mappedInputManager.simulatorInjectTouchMove(touchButtonX, endY);
+        else
+          mappedInputManager.simulatorInjectTouchRelease(touchButtonX, endY);
+      }
+#endif
+      break;
+      case ScriptActionType::MangaTouchPageTo:
+#if CROSSINK_APP_CAP_TOUCH
+      {
+        static int phase = 0, endY = 0;
+        int x, y;
+        if (phase == 0) {
+          if (mangaReaderForTest().simulatorMenuOptionCenter(action.x, x, y)) break;
+          int first = -1, last = -1, firstY = 0, lastY = 0;
+          for (int row = 0; row < 16; ++row)
+            if (mangaReaderForTest().simulatorMenuOptionCenter(row, x, y)) {
+              if (first < 0) {
+                first = row;
+                firstY = y;
+              }
+              last = row;
+              lastY = y;
+            }
+          if (first < 0 || first == last) fail("No swipe range in manga popup");
+          const bool up = action.x > last;
+          touchButtonX = x;
+          touchButtonY = up ? lastY : firstY;
+          endY = up ? firstY : lastY;
+          mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+          phase = 1;
+        } else if (phase == 1) {
+          mappedInputManager.simulatorInjectTouchMove(touchButtonX, endY);
+          phase = 2;
+        } else if (phase == 2) {
+          mappedInputManager.simulatorInjectTouchRelease(touchButtonX, endY);
+          // Match hardware's mutually exclusive swipe/tap release contract.
+          // Otherwise the popup handles the synthetic tap before its swipe.
+          if (mappedInputManager.wasSwipe() == MappedInputManager::SwipeDir::None ||
+              mappedInputManager.wasScreenTapped(x, y))
+            fail("Injected popup swipe release was also reported as a tap");
+          phase = 3;
+        } else {
+          if (!mangaReaderForTest().simulatorMenuActive()) fail("Popup swipe selected a stale touched row");
+          phase = 0;
+        }
+        --scriptIndex;
+      }
+#endif
+      break;
+      case ScriptActionType::MangaQrContracts:
+        if (action.x == 0) {
+          if (action.y) QrDisplayActivity::simulatorFailAllocation(action.y == 2);
+        } else {
+          if (action.y == 1) {
+            if (!mangaReaderForTest().simulatorFeedbackIs(StrId::STR_MEMORY_ERROR))
+              fail("QR child OOM lost parent feedback");
+          } else {
+            auto* qr = dynamic_cast<QrDisplayActivity*>(activityManager.currentForSimulatorTest());
+            if (!qr || qr->simulatorPayloadBytes() != 2953 ||
+                qr->simulatorModuleBytes() != (action.y == 2 ? 0u : 3917u))
+              fail("Maximum mixed UTF-8 QR child allocation contract failed");
+            RenderLock lock;
+            if (action.x == 1)
+              mangaReaderImageHash = mangaImageHashLocked();
+            else if (mangaReaderImageHash != mangaImageHashLocked())
+              fail("QR child redraw changed owned payload/frame");
+          }
+          if (action.x == 2)
+            LOG_INF("SMOKE", "Verified maximum mixed UTF-8 QR child redraw/allocation mode=%d", action.y);
+        }
+        break;
+      case ScriptActionType::MangaReviewInterleave:
+        if (action.x <= 1) {
+          if (!action.x) setenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS", "1", 1);
+          manga::prefetchTestHoldConsumption(false);
+          if (!mangaReaderForTest().simulatorStartWarmWhenIdle()) {
+            --scriptIndex;
+            break;
+          }
+          manga::prefetchTestHoldConsumption(true);
+        } else if (action.x == 2) {
+          activityManager.requestManualReaderRefresh();
+        } else if (action.x == 3) {
+          if (!mangaReaderForTest().simulatorPendingRender()) fail("Test did not reach deferred render");
+          if (!mangaReaderForTest().openReaderSettingsMenu()) fail("Cannot queue menu behind worker");
+          manga::prefetchTestHoldConsumption(false);
+          unsetenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS");
+        } else if (action.x == 4) {
+          const auto position = mangaReaderForTest().simulatorPosition();
+          if (position.page != 1 || position.panel != -1 || mangaReaderForTest().simulatorPendingRender())
+            fail("Deferred render stranded automatic turn");
+          LOG_INF("SMOKE", "Verified deferred-render menu interleaving rearms one automatic deadline");
+        } else if (action.x == 5) {
+          const bool accepted =
+              action.y ? activityManager.handleShortcutAction(static_cast<uint8_t>(CrossPointSettings::LOOKUP_WORD))
+                       : activityManager.handleShortcutAction(CrossPointSettings::SHORT_PWRBTN::LOOKUP_WORD);
+          if (!accepted) fail("One-shot lookup discarded ordinary prefetch warming");
+          if (activityManager.handleShortcutAction(static_cast<uint8_t>(CrossPointSettings::LOOKUP_WORD)) ||
+              activityManager.handleShortcutAction(CrossPointSettings::SHORT_PWRBTN::LOOKUP_WORD))
+            fail("Lookup accepted an already-owned foreground drain");
+          manga::prefetchTestHoldConsumption(false);
+          unsetenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS");
+        } else if (action.x == 7) {
+          if (!mangaReaderForTest().simulatorPendingRender() || !manga::prefetchTestCompletionReady())
+            fail("Completion edge test did not hold a deferred render and finished worker");
+          unsetenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS");
+        } else if (action.x == 8) {
+          const auto position = mangaReaderForTest().simulatorPosition();
+          if (action.y) {
+            if (mangaReaderForTest().preventAutoSleep() || mangaReaderForTest().simulatorMenuActive() ||
+                position.page != 0 || position.panel != -1)
+              fail("Deferred render consumed active cancellation edge");
+            LOG_INF("SMOKE", "Verified active cancellation precedes completion render service");
+          } else {
+            if (position.page != 0 || position.panel != 0)
+              fail("Deferred render discarded or replayed one-shot page release");
+            LOG_INF("SMOKE", "Verified one-shot page release survives completion render service exactly once");
+          }
+        } else
+          LOG_INF("SMOKE", "Verified one-shot lookup survives warming and rejects owned drain");
+        break;
+      case ScriptActionType::MangaCacheContracts: {
+        const std::string cache = manga::cachePath(std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK"));
+        static uint32_t frozenSeconds = 0, finalSeconds = 0;
+        constexpr const char* obstruction = "/.crosspoint/global_stats.bin.tmp";
+        constexpr const char* marker = "/.crosspoint/global_stats.bin.tmp/blocked";
+        const auto writeMarker = [&](const std::string& path) {
+          FsFile file;
+          if (!Storage.openFileForWrite("SMOKE", path, file)) fail("Cannot write menu preservation marker");
+          if (file.write(static_cast<uint8_t>(73)) != 1 || !file.close()) fail("Cannot close menu marker");
+        };
+        if (action.x == 0) {
+          if (!Storage.mkdir(obstruction)) fail("Cannot obstruct pending global stats");
+          writeMarker(marker);
+          for (const char* name : {"dictionary.bin", "dictionary_history.txt", "derived-menu.bin"})
+            writeMarker(cache + "/" + name);
+          // Real legacy layout from BookReadingStats.cpp: v4 is 69 bytes,
+          // version byte 4 followed by zero counters/flags/unknown dates.
+          const uint8_t legacyStats[69] = {4};
+          FsFile legacy;
+          if (!Storage.openFileForWrite("SMOKE", cache + "/stats_v4.bin", legacy)) fail("Cannot seed legacy stats");
+          const bool wroteLegacy = legacy.write(legacyStats, sizeof(legacyStats)) == sizeof(legacyStats);
+          if (!legacy.close() || !wroteLegacy) fail("Cannot close legacy stats fixture");
+        } else if (action.x == 1) {
+          if (!mangaReaderForTest().simulatorFeedbackIs(StrId::STR_STATS_SAVE_FAILED) ||
+              !activityManager.preventAutoSleep() || !Storage.exists((cache + "/derived-menu.bin").c_str()))
+            fail("Failed stats gate did not retain cache and reader");
+          const auto book = BookReadingStats::load(cache);
+          if (!action.y) frozenSeconds = book.totalReadingSeconds;
+          if (frozenSeconds < 10 || book.totalReadingSeconds != frozenSeconds)
+            fail("Successful book target replayed during pending global retry");
+          LOG_INF("SMOKE", "Verified cache stats failure retains frozen target and usable reader retry=%d", action.y);
+        } else if (action.x == 2) {
+          if (mangaReaderForTest().simulatorPosition().panel != 0)
+            fail("Reader input did not resume after save failure");
+          activityManager.goHome();
+        } else if (action.x == 3) {
+          if (!Storage.remove(marker) || !Storage.rmdir(obstruction)) fail("Cannot remove global stats obstruction");
+        } else if (action.x == 4) {
+          if (!mangaReaderForTest().simulatorFeedbackIs(StrId::STR_BOOK_CACHE_DELETED) ||
+              mangaReaderForTest().simulatorRenderErrors() || Storage.exists((cache + "/derived-menu.bin").c_str()))
+            fail("Cache retry did not delete derived content cleanly");
+          for (const char* name : {"dictionary.bin", "dictionary_history.txt", "stats_v4.bin"}) {
+            FsFile file;
+            if (!Storage.openFileForRead("SMOKE", cache + "/" + name, file)) fail("Cache deletion lost user data");
+            const bool legacy = std::string_view(name) == "stats_v4.bin";
+            bool valid = file.fileSize64() == (legacy ? 69u : 1u) && file.read() == (legacy ? 4 : 73);
+            if (legacy)
+              for (int i = 1; i < 69; ++i) valid = file.read() == 0 && valid;
+            if (!file.close() || !valid) fail("Cache deletion changed user data bytes");
+          }
+          const auto book = BookReadingStats::load(cache);
+          finalSeconds = book.totalReadingSeconds;
+          if (finalSeconds < frozenSeconds + 3 || GlobalReadingStats::load().totalReadingSeconds != finalSeconds)
+            fail("Cache retry lost new accepted reading interval");
+          LOG_INF("SMOKE", "Verified menu cache retry preserves dictionary/history/stats and accepted tail");
+        } else if (action.x == 5) {
+          if (BookReadingStats::load(cache).totalReadingSeconds != finalSeconds)
+            fail("Successful cache exit replayed stats");
+          manga::PixelIdentity identity;
+          if (std::getenv("CROSSINK_SIMULATOR_MANGA_GRAYSCALE") &&
+              !manga::MangaPixelCache::sourceIdentity(std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK"), 0, 0, identity))
+            fail("Manga pixels did not regenerate after confirmed cache deletion");
+          LOG_INF("SMOKE", "Verified menu cache regeneration and idempotent exit");
+          writeMarker("/screenshots");
+        } else if (action.x == 6) {
+          if (!activityManager.handleShortcutAction(CrossPointSettings::SHORT_PWRBTN::SCREENSHOT)) {
+            activityManager.requestManualReaderRefresh();
+            --scriptIndex;
+          }
+        } else {
+          if (!mangaReaderForTest().simulatorFeedbackIs(StrId::STR_MANGA_SCREENSHOT_FAILED))
+            fail("Screenshot SD failure did not produce usable feedback");
+          if (!Storage.remove("/screenshots")) fail("Cannot remove screenshot obstruction");
+          LOG_INF("SMOKE", "Verified deferred manga screenshot write failure feedback");
+        }
+        break;
+      }
+      case ScriptActionType::MangaMenuContracts: {
+        static uint8_t oldSetting = 0;
+        const auto rejected = [&] {
+          if (activityManager.handleShortcutAction(static_cast<uint8_t>(CrossPointSettings::LOOKUP_WORD)) ||
+              activityManager.handleShortcutAction(CrossPointSettings::SHORT_PWRBTN::LOOKUP_WORD))
+            fail("Manga lookup shortcut accepted while unavailable");
+        };
+        if (action.x == 0)
+          rejected();
+        else if (action.x == 1) {
+          activityManager.notifyInputLockChanged(true);
+          rejected();
+          activityManager.notifyInputLockChanged(false);
+          {
+            RenderLock lock;
+            mangaReaderForTest().prepareToSuspend();
+          }
+          rejected();
+          {
+            RenderLock lock;
+            mangaReaderForTest().onResume();
+          }
+          activityManager.requestUpdate();
+          LOG_INF("SMOKE", "Verified both manga shortcuts reject modal, lock and suspension");
+        } else if (action.x == 2) {
+          const uint8_t changed = mappedInputManager.hasTouchHardware() ? SETTINGS.disableReaderTouchscreen
+                                                                        : SETTINGS.sideButtonOrientationAware;
+          if (changed == oldSetting) fail("Applicable manga settings widget did not change value");
+          if (!SETTINGS.loadFromFile()) fail("Cannot reload manga settings");
+          if (changed != (mappedInputManager.hasTouchHardware() ? SETTINGS.disableReaderTouchscreen
+                                                                : SETTINGS.sideButtonOrientationAware))
+            fail("Manga settings change did not persist on return");
+          LOG_INF("SMOKE", "Verified applicable manga settings change persists on child return");
+        } else if (action.x == 3) {
+          RenderLock lock;
+          mangaReaderImageHash = mangaImageHashLocked();
+        } else if (action.x == 4) {
+          RenderLock lock;
+          const auto info = activityManager.getScreenshotInfo();
+          if (info.readerType != ScreenshotInfo::ReaderType::Manga || info.currentPage != 1 || info.totalPages != 2 ||
+              info.progressPercent != 0 || std::string_view(info.title) != "Manga OCR smoke")
+            fail("Manga screenshot metadata incorrect");
+          if (mangaImageHashLocked() != mangaReaderImageHash)
+            fail("Manga screenshot left popup or border in restored frame");
+          LOG_INF("SMOKE", "Verified manga screenshot scope=%d framebuffer=%08lx", action.y,
+                  static_cast<unsigned long>(mangaReaderImageHash));
+        } else if (action.x == 6) {
+          if (!mangaPrefetchDwellAt) mangaPrefetchDwellAt = millis();
+          if (millis() - mangaPrefetchDwellAt < action.settleFrames)
+            --scriptIndex;
+          else
+            mangaPrefetchDwellAt = 0;
+        } else
+          oldSetting = mappedInputManager.hasTouchHardware() ? SETTINGS.disableReaderTouchscreen
+                                                             : SETTINGS.sideButtonOrientationAware;
+        break;
+      }
+      case ScriptActionType::MangaRenderFailure:
+        if (action.x == 0) {
+          mangaReaderForTest().simulatorFailNextBwRestore();
+          if (!activityManager.handleShortcutAction(static_cast<uint8_t>(CrossPointSettings::SCREENSHOT))) {
+            activityManager.requestManualReaderRefresh();
+            --scriptIndex;
+          }
+        } else if (action.x == 1) {
+          if (!mangaReaderForTest().simulatorFeedbackIs(StrId::STR_PAGE_LOAD_ERROR))
+            fail("Screenshot after failed BW restore did not report page error");
+          LOG_INF("SMOKE", "Verified failed BW restore prevents manga screenshot");
+        } else {
+          if (mangaReaderForTest().simulatorRenderErrors()) fail("Cache feedback attempted closed-book rendering");
+          if (!mangaReaderForTest().simulatorFeedbackIs(StrId::STR_BOOK_CACHE_DELETED))
+            fail("Missing cache deletion result");
+          LOG_INF("SMOKE", "Verified cache deletion feedback without closed-book rendering");
+        }
+        break;
+      case ScriptActionType::MangaStatusPlanes: {
+        RenderLock lock;
+        if (!verifyMangaStatusPlanes(renderer)) fail("Manga actual renderer status plane contract failed");
+        activityManager.requestUpdate();
+        break;
+      }
+      case ScriptActionType::MangaMenuGoHome:
+        activityManager.goHome();
+        break;
+      case ScriptActionType::MangaMenuReset: {
+        manga::Progress progress;
+        manga::MangaProgressStore store(std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK"));
+        store.load(progress);
+        progress.page = 0;
+        progress.panel = action.y;
+        progress.panelsOnly = false;
+        progress.rotatePanels = false;
+        if (!store.save(progress)) fail("Cannot reset menu fixture progress");
+        SETTINGS.orientation = CrossPointSettings::PORTRAIT;
+        SETTINGS.disableReaderTouchscreen = false;
+        break;
+      }
+      case ScriptActionType::MangaTouchOptionDown:
+#if CROSSINK_APP_CAP_TOUCH
+        if (!mangaReaderForTest().simulatorMenuOptionCenter(action.x, touchButtonX, touchButtonY))
+          fail("Manga popup target is not visible");
+        mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+#endif
+        break;
+      case ScriptActionType::MangaTouchOptionRelease:
+#if CROSSINK_APP_CAP_TOUCH
+      {
+        mappedInputManager.simulatorInjectTouchRelease(touchButtonX, touchButtonY);
+        int x = 0, y = 0;
+        if (mappedInputManager.wasSwipe() != MappedInputManager::SwipeDir::None ||
+            !mappedInputManager.wasScreenTapped(x, y) || x != touchButtonX || y != touchButtonY)
+          fail("Stationary injected popup release did not remain a tap");
+      }
+#endif
+        break;
+      case ScriptActionType::MangaCheckMenuAction: {
+        static constexpr const char* child[] = {"MangaReaderSelection", "EpubReaderPercentSelection",
+                                                "MangaReaderSelection", "MangaReader",
+                                                "MangaReader",          "MangaReader",
+                                                "MangaReader",          "Home",
+                                                "EpubReaderWordLookup", "MangaTranslation",
+                                                "LookedUpWords",        "ReaderOptions",
+                                                "MangaReader",          "MangaReader",
+                                                "Confirmation",         "QrDisplay"};
+        if (!activityManager.isCurrentActivityNamed(child[action.x])) fail("Wrong manga menu action %d", action.x);
+        if (action.x == 11) {
+          auto* options = dynamic_cast<ReaderOptionsActivity*>(activityManager.currentForSimulatorTest());
+          const auto& settings = options->simulatorSettings();
+          size_t rows = 0;
+          for (const auto& setting : settings) {
+            if (setting.type == SettingType::SECTION_HEADER) continue;
+            if (!setting.key || (std::string_view(setting.key) != "disableReaderTouchscreen" &&
+                                 std::string_view(setting.key) != "touchReaderControls" &&
+                                 std::string_view(setting.key) != "pageTurnGesture" &&
+                                 std::string_view(setting.key) != "sideButtonLayout" &&
+                                 std::string_view(setting.key) != "sideButtonOrientationAware" &&
+                                 std::string_view(setting.key) != "frontButtonOrientationAware"))
+              fail("Unsupported manga settings row");
+            ++rows;
+          }
+          if (rows != (mappedInputManager.hasTouchHardware() ? 5u : 3u))
+            fail("Manga settings omitted applicable controls");
+        }
+        if (action.x == 12 && !mangaReaderForTest().simulatorMenuActive()) fail("Manga auto rate popup missing");
+        LOG_INF("SMOKE", "Verified manga menu action %d scope %d", action.x, action.y);
+        break;
+      }
+      case ScriptActionType::MangaCheckAuto:
+        if (mangaReaderForTest().preventAutoSleep() != bool(action.x)) fail("Manga auto turn cancellation/rate failed");
+        break;
+      case ScriptActionType::MangaShortcutLookup:
+        if (!(action.x ? activityManager.handleShortcutAction(static_cast<uint8_t>(CrossPointSettings::LOOKUP_WORD))
+                       : activityManager.handleShortcutAction(CrossPointSettings::SHORT_PWRBTN::LOOKUP_WORD)))
+          fail("One-shot configured manga lookup was rejected");
+        break;
       case ScriptActionType::Press:
         mappedInputManager.simulatorInjectPress(action.button);
         break;
@@ -1262,6 +2493,9 @@ class SimulatorSmokeTest {
       case ScriptActionType::OpenBooks:
         activityManager.goToFileBrowser("/books");
         break;
+      case ScriptActionType::ManualReaderRefresh:
+        if (!activityManager.requestManualReaderRefresh()) fail("Manga manual reader refresh was rejected");
+        break;
       case ScriptActionType::TouchDown:
 #if CROSSINK_APP_CAP_TOUCH
         mappedInputManager.simulatorInjectTouchDown(action.x, action.y);
@@ -1280,6 +2514,329 @@ class SimulatorSmokeTest {
       case ScriptActionType::AssertActivity:
         if (!activityManager.isCurrentActivityNamed(action.label)) fail("Expected current activity: %s", action.label);
         break;
+      case ScriptActionType::MangaBoundaryJump:
+        if (!mangaReaderForTest().simulatorJumpWhenIdle({static_cast<uint32_t>(action.x), static_cast<int16_t>(action.y)}))
+          --scriptIndex;
+        break;
+      case ScriptActionType::MangaQueueCurrentSource:
+        if (!mangaReaderForTest().simulatorQueueCurrentSource()) fail("Cannot post current source for boundary test");
+        break;
+      case ScriptActionType::MangaHoldConsumption:
+        manga::prefetchTestHoldConsumption(true);
+        break;
+      case ScriptActionType::MangaWaitCompletion:
+        if (!mangaPrefetchDwellAt) mangaPrefetchDwellAt = millis();
+        if (!manga::prefetchTestCompletionReady()) {
+          if (millis() - mangaPrefetchDwellAt > 5000) fail("Worker did not acknowledge cleanup");
+          --scriptIndex;
+        } else mangaPrefetchDwellAt = 0;
+        break;
+      case ScriptActionType::MangaReleaseCompletion:
+        mappedInputManager.simulatorInjectRelease(action.button);
+        manga::prefetchTestHoldConsumption(false);
+        break;
+      case ScriptActionType::MangaDuplicateMenu:
+        if (!mangaReaderForTest().openReaderSettingsMenu() || !mangaReaderForTest().openReaderSettingsMenu())
+          fail("Duplicate menu intent rejected");
+        break;
+      case ScriptActionType::MangaConfirmOnCompletion:
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        manga::prefetchTestHoldConsumption(false);
+        break;
+      case ScriptActionType::MangaOpenFixture:
+        activityManager.goToReader(action.label, true);
+        break;
+      case ScriptActionType::MangaHideDictionaries:
+        if (!Storage.rename("/dictionaries", "/manga-smoke-dictionaries")) fail("Cannot park synthetic dictionaries");
+        break;
+      case ScriptActionType::MangaRestoreDictionaries:
+        if (!Storage.rename("/manga-smoke-dictionaries", "/dictionaries")) fail("Cannot restore synthetic dictionaries");
+        break;
+      case ScriptActionType::MangaForceLookupExit:
+        if (!activityManager.isCurrentActivityNamed("EpubReaderWordLookup")) fail("Expected shared lookup before forced exit");
+        activityManager.goHome();
+        break;
+      case ScriptActionType::MangaAssertFeedback:
+        if (!mangaReaderForTest().simulatorNoOcrFeedback()) fail("Missing translated empty OCR message");
+        LOG_INF("SMOKE", "Verified manga empty OCR feedback");
+        break;
+      case ScriptActionType::MangaAssertEmptyTranslation: {
+        auto* translation = dynamic_cast<MangaTranslationActivity*>(activityManager.currentForSimulatorTest());
+        if (!translation || !translation->simulatorEmpty()) fail("Missing empty translation state");
+        LOG_INF("SMOKE", "Verified manga empty translation state");
+        break;
+      }
+      case ScriptActionType::MangaLookupUnavailable: {
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (!lookup || !lookup->simulatorUnavailable()) fail("Missing unavailable dictionary state");
+        LOG_INF("SMOKE", "Verified manga unavailable dictionary state");
+        break;
+      }
+      case ScriptActionType::MangaOpenMenu:
+        if (!mangaReaderForTest().openReaderSettingsMenu()) fail("Could not request manga menu");
+        break;
+      case ScriptActionType::MangaRememberFont: {
+        RenderLock lock;
+        mangaReaderFontId = SETTINGS.getReaderFontId();
+        mangaReaderFontWidth = renderer.getTextWidth(mangaReaderFontId, "Reader text");
+        mangaReaderLineHeight = renderer.getLineHeight(mangaReaderFontId);
+        mangaReaderOrientation = static_cast<int>(renderer.getOrientation());
+        mangaReaderImageHash = mangaImageHashLocked();
+        break;
+      }
+      case ScriptActionType::MangaTranslationPage: {
+        auto* translation = dynamic_cast<MangaTranslationActivity*>(activityManager.currentForSimulatorTest());
+        if (!translation || translation->simulatorPage() != static_cast<uint32_t>(action.x) || translation->simulatorEmpty()) fail("Translation paging or nonempty content failed");
+        LOG_INF("SMOKE", "Verified manga translation page=%d", action.x);
+        break;
+      }
+      case ScriptActionType::MangaAssertHistory: {
+        const auto entries = LookupHistory::load(manga::cachePath(std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK")));
+        bool reader = false, text = false;
+        for (const auto& entry : entries) { reader |= entry.word == "Reader"; text |= entry.word == "text"; }
+        if (!reader || !text) fail("Manga lookup history did not retain both real definitions");
+        LOG_INF("SMOKE", "Verified manga saved lookup history");
+        break;
+      }
+      case ScriptActionType::MangaAssertScanCache: {
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (!lookup) fail("Expected shared lookup for scan cache assertion");
+        if (!mangaPrefetchDwellAt) mangaPrefetchDwellAt = millis();
+        if (!lookup->simulatorVerifiedScanComplete()) {
+          if (millis() - mangaPrefetchDwellAt > 10000) fail("Dictionary scan did not become verified and complete");
+          --scriptIndex;
+          return;
+        }
+        if (lookup->simulatorVerifiedCacheLoaded() != static_cast<bool>(action.x) ||
+            !lookup->simulatorReadyAt(action.y, 0)) fail("Actual activity scan cache/cursor restoration failed");
+        mangaPrefetchDwellAt = 0;
+        LOG_INF("SMOKE", "Verified manga scan cache loaded=%d cursor=%d", action.x, action.y);
+        break;
+      }
+      case ScriptActionType::MangaLookupReady: {
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (!lookup) fail("Expected shared manga lookup activity");
+        if (!mangaPrefetchDwellAt) mangaPrefetchDwellAt = millis();
+        if (!lookup->simulatorReadyAt(action.x, action.y, action.label)) {
+          if (millis() - mangaPrefetchDwellAt > 10000) { lookup->simulatorLogSelection(); fail("Manga dictionary did not reach requested selection"); }
+          --scriptIndex;
+          return;
+        }
+        mangaPrefetchDwellAt = 0;
+        lookup->simulatorLogSelection();
+        LOG_INF("SMOKE", "Verified manga dictionary ready cursor=%d definitionPage=%d", action.x, action.y);
+        break;
+      }
+      case ScriptActionType::MangaAssertPosition: {
+        if (mangaReaderFontId) {
+          RenderLock lock;
+          if (SETTINGS.getReaderFontId() != mangaReaderFontId || renderer.getTextWidth(mangaReaderFontId, "Reader text") != mangaReaderFontWidth ||
+              renderer.getLineHeight(mangaReaderFontId) != mangaReaderLineHeight || static_cast<int>(renderer.getOrientation()) != mangaReaderOrientation) fail("Reader font or orientation not restored after manga child");
+          LOG_INF("SMOKE", "Verified manga reader font restored");
+          if (action.x == 0 && action.y == 0 && activityManager.currentForSimulatorTest()->getCurrentBookPath() == "/books/smoke-manga") {
+            if (mangaImageHashLocked() != mangaReaderImageHash) fail("Manga panel image changed after child return");
+            LOG_INF("SMOKE", "Verified manga image framebuffer restored");
+          }
+        }
+        const auto position = mangaReaderForTest().simulatorPosition();
+        if (position.page != static_cast<uint32_t>(action.x) || position.panel != action.y ||
+            mangaReaderForTest().simulatorMenuActive())
+          fail("Pending intent changed boundary or reopened menu: page=%lu panel=%d", position.page, position.panel);
+        LOG_INF("SMOKE", "Verified coalesced input page=%lu panel=%d with menu closed", position.page, position.panel);
+        break;
+      }
+      case ScriptActionType::MangaPrefetchPush:
+        activityManager.pushActivity(std::make_unique<ReaderOptionsActivity>(renderer, mappedInputManager));
+        break;
+      case ScriptActionType::MangaPrefetchReplace:
+        activityManager.replaceActivity(std::make_unique<ReaderOptionsActivity>(renderer, mappedInputManager));
+        break;
+      case ScriptActionType::MangaPrefetchPop:
+        activityManager.popActivity();
+        break;
+      case ScriptActionType::MangaPrefetchSleep:
+        enterDeepSleep(false);
+        if (!activityManager.isCurrentActivityNamed("MangaReader")) fail("Prefetch sleep did not defer");
+        LOG_INF("SMOKE", "Verified main sleep defers before persistence while prefetch drains");
+        break;
+      case ScriptActionType::MangaPrefetchDwell:
+        // Leave the main loop running so the reader can post and consume work.
+        // A blocking delay here would prevent the idle candidate from posting.
+        if (!mangaPrefetchDwellAt) mangaPrefetchDwellAt = millis();
+        if (action.settleFrames && std::getenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS")) {
+          if (!manga::prefetchTestHoldingSource()) {
+            if (millis() - mangaPrefetchDwellAt > 5000) fail("Worker did not reach open-source barrier");
+            --scriptIndex;
+          } else {
+            mangaPrefetchDwellAt = 0;
+            LOG_INF("SMOKE", "Verified prefetch holds source before foreground intent");
+          }
+        } else if (millis() - mangaPrefetchDwellAt < 1200) {
+          --scriptIndex;
+        } else {
+          mangaPrefetchDwellAt = 0;
+          LOG_INF("SMOKE", "Completed manga prefetch dwell with active input polling");
+        }
+        break;
+      case ScriptActionType::MangaFinalPageDwell:
+        delay(11000);
+        break;
+      case ScriptActionType::MangaReadingDwell:
+        delay(700);
+        break;
+      case ScriptActionType::OpenMangaRecents:
+        SETTINGS.recentBooksView = CrossPointSettings::RECENT_BOOKS_GRID;
+        activityManager.goToRecentBooks();
+        break;
+      case ScriptActionType::OpenMangaLanguageStats: {
+        const std::string path = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
+        const auto cache = manga::cachePath(path);
+        auto book = BookReadingStats::load(cache);
+        const auto global = GlobalReadingStats::load();
+        uint64_t sum = 0;
+        for (const auto& entry : book.languageTotals.entries) sum += entry.seconds;
+        if (sum != book.totalReadingSeconds || !book.languageTotals.entries[2].seconds)
+          fail("Manga language durations disagree with committed seconds");
+        // Include a visible unknown duration in the preview only, exercising its
+        // localized row without mutating the reader's durable accounting fixture.
+        mangaStatsStartBefore = book.startDate;
+        if (!action.settleFrames) book.languageTotals.entries[0].seconds = 60;
+        activityManager.pushActivity(std::make_unique<BookStatsActivity>(renderer, mappedInputManager, "Manga smoke",
+                                                                         cache, book, 100.0f, false, 0, global));
+        break;
+      }
+      case ScriptActionType::MangaStatsSaveFailure: {
+        constexpr const char* obstruction = "/.crosspoint/global_stats.bin.tmp";
+        constexpr const char* marker = "/.crosspoint/global_stats.bin.tmp/blocked";
+        if (action.x == 0) {
+          if (!Storage.mkdir(obstruction)) fail("Could not create stats failure obstruction");
+          FsFile file;
+          if (!Storage.openFileForWrite("SMOKE", marker, file)) fail("Could not create stats failure marker");
+          const bool wrote = file.write(static_cast<uint8_t>(1)) == 1;
+          const bool closed = file.close();
+          if (!wrote || !closed) fail("Could not close stats failure marker");
+          if (!activityManager.handleHomeButtonBackOrHome()) fail("Stats Home gesture not handled");
+        } else if (action.x == 1) {
+          if (!activityManager.preventAutoSleep()) fail("Failed dirty stats did not suppress automatic retry");
+          // Arm the same one-shot intent as a Quick Lock timeout before the
+          // real canceled sleep path; a later ordinary sleep must not retain it.
+          APP_STATE.quickLockResumePending = true;
+          APP_STATE.quickLockResumeTrigger = static_cast<uint8_t>(QuickLockTrigger::ShortPower);
+          enterDeepSleep(true);
+          if (APP_STATE.quickLockResumePending ||
+              APP_STATE.quickLockResumeTrigger != static_cast<uint8_t>(QuickLockTrigger::None))
+            fail("Canceled stats sleep retained Quick Lock resume intent");
+          if (activityManager.retrySuspensionAfterFailure()) fail("Failed stats sleep entered drain retry policy");
+        } else if (action.x == 2) {
+          if (!Storage.remove(marker) || !Storage.rmdir(obstruction))
+            fail("Could not remove stats failure obstruction");
+          if (!activityManager.handleHomeButtonBackOrHome()) fail("Stats Home retry not handled");
+        } else if (action.x == 3) {
+          const auto cache = manga::cachePath(std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK"));
+          const auto book = BookReadingStats::load(cache);
+          if (!book.startDateManual || compareReadingStatsDate(book.startDate, mangaStatsStartBefore) == 0)
+            fail("Retained date edit was not persisted after retry");
+          LOG_INF("SMOKE", "Verified dirty manga stats survive Home and sleep save failures then retry");
+        } else {
+          // Reuse the existing sleep-preparation seam so the HAL's intentional
+          // wait-for-wake loop does not stop this persistence assertion.
+          const bool hadSleepSeam = std::getenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS") != nullptr;
+          if (!hadSleepSeam) setenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS", "1", 1);
+          enterDeepSleep(false);
+          if (!hadSleepSeam) unsetenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS");
+          if (!APP_STATE.loadFromFile()) fail("Could not reload ordinary sleep state");
+          if (APP_STATE.quickLockResumePending ||
+              APP_STATE.quickLockResumeTrigger != static_cast<uint8_t>(QuickLockTrigger::None))
+            fail("Ordinary sleep persisted stale Quick Lock resume intent");
+          LOG_INF("SMOKE", "Verified ordinary sleep after canceled stats sleep has no Quick Lock wake intent");
+        }
+        break;
+      }
+      case ScriptActionType::AssertMangaLanguageStats: {
+        if (!activityManager.isCurrentActivityNamed("BookStats")) fail("Missing actual manga BookStats activity");
+        RenderLock lock;
+        const auto& metrics = UITheme::getInstance().getMetrics();
+        const int dotY = renderer.getScreenHeight() - metrics.buttonHintsHeight - metrics.verticalSpacing - 4;
+        renderer.fillRect(0, dotY, renderer.getScreenWidth(), 8, false);
+        const uint32_t actual = mangaImageHashLocked();
+        const auto cache = manga::cachePath(std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK"));
+        auto book = BookReadingStats::load(cache);
+        book.languageTotals.entries[0].seconds = 60;
+        // Compare the routed activity framebuffer with the actual production
+        // language view; catches navigation landing on another stats scope/page.
+        renderReadingLanguagesPage(renderer, &mappedInputManager, "Manga smoke", book.languageTotals, 0, true);
+        // Page dots differ from the standalone view; mask only that ornament.
+        renderer.fillRect(0, dotY, renderer.getScreenWidth(), 8, false);
+        if (actual != mangaImageHashLocked()) fail("Stats navigation did not render the language breakdown");
+        if (readingLanguageRowCount(book.languageTotals) < 2) fail("Manga language/Unknown rows missing");
+        LOG_INF("SMOKE", "Verified actual manga language stats activity and language/Unknown totals");
+        activityManager.requestUpdate();
+        break;
+      }
+      case ScriptActionType::AssertMangaLibrary: {
+        RenderLock lock;
+        const std::string path = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
+        const auto& books = RECENT_BOOKS.getBooks();
+        const auto found =
+            std::find_if(books.begin(), books.end(), [&](const RecentBook& book) { return book.path == path; });
+        if (found == books.end() || found->title.empty() || found->coverBmpPath != manga::thumbnailTemplatePath(path) ||
+            RecentBookProgress::loadPercent(*found) != 100.0f)
+          fail("Manga recent metadata/progress missing");
+        manga::Progress before, after;
+        manga::MangaProgressStore store(path);
+        if (!store.load(before)) fail("Manga progress missing before cache clear");
+        manga::Progress firstPage = before;
+        firstPage.page = 0;
+        if (!store.save(firstPage) || RecentBookProgress::loadPercent(*found) != 50.0f || !store.save(before))
+          fail("Manga first-page percentage or restore failed");
+        const auto cache = manga::cachePath(path);
+        const auto stats = BookReadingStats::load(cache);
+        if (!Storage.exists((cache + "/stats_v6.bin").c_str()) || stats.totalPagesTurned != 2 || !stats.isCompleted ||
+            stats.totalReadingSeconds < 10)
+          fail("Manga statistics: pages=%lu seconds=%lu completed=%d",
+               static_cast<unsigned long>(stats.totalPagesTurned),
+               static_cast<unsigned long>(stats.totalReadingSeconds), stats.isCompleted);
+        // Explicit migration sources must survive alongside the current full v6 file.
+        for (const char* oldName : {"stats_v4.bin", "stats_v5.bin"}) {
+          FsFile old;
+          if (!Storage.openFileForWrite("SMOKE", cache + "/" + oldName, old))
+            fail("Cannot seed legacy cache preservation");
+          const uint8_t marker = oldName[7] == '4' ? 4 : 5;
+          if (old.write(&marker, 1) != 1 || !old.close()) fail("Cannot close legacy preservation fixture");
+        }
+        if (!BookActions::clearBookCache(path) || !store.load(after) || before.page != after.page ||
+            before.panel != after.panel || !Storage.exists((cache + "/stats_v6.bin").c_str()) ||
+            BookReadingStats::load(cache).totalPagesTurned != stats.totalPagesTurned)
+          fail("Manga cache clear lost durable state");
+        if (!Storage.exists((cache + "/stats_v4.bin").c_str()) || !Storage.exists((cache + "/stats_v5.bin").c_str()) ||
+            BookReadingStats::load(cache).languageTotals.entries[2].seconds != stats.languageTotals.entries[2].seconds)
+          fail("Manga cache clear lost v4/v5/v6 stats or language attribution");
+        if (!SleepCoverAssets::prepareMinimalCoverForPath(path, &renderer) ||
+            !SleepCoverAssets::prepareDashboardCoverForPath(path, &renderer) ||
+            !SleepCoverAssets::prepareFullCoverForPath(path, false, &renderer))
+          fail("Manga sleep cover generation failed");
+        const std::string fullCover = SleepCoverAssets::cachedCoverPathFor(path, false, &renderer);
+        if (fullCover.empty()) fail("Manga full sleep cover path is missing");
+        FsFile corruptCover;
+        if (!Storage.openFileForWrite("SMOKE", fullCover, corruptCover)) fail("Cannot inject corrupt sleep cover");
+        const uint8_t invalid = 0;
+        if (corruptCover.write(&invalid, 1) != 1 || !corruptCover.close()) fail("Cannot close corrupt sleep cover");
+        if (!SleepCoverAssets::prepareFullCoverForPath(path, true, &renderer) ||
+            SleepCoverAssets::cachedCoverPathFor(path, true, &renderer).empty())
+          fail("Manga sleep cover did not recover");
+        LOG_INF("SMOKE", "Verified manga sleep cover generation and corrupt-cache recovery");
+        LOG_INF("SMOKE", "Verified manga recents, progress, stats, and safe cache clear");
+        break;
+      }
+      case ScriptActionType::AssertMangaBookmark: {
+        RenderLock lock;
+        const auto& bookmarks = BOOKMARKS.getBookmarks();
+        if (bookmarks.size() != 1 || bookmarks[0].spineIndex != 0 || bookmarks[0].paragraphIndex != 0) {
+          fail("Manga overview bookmark did not survive save/reopen");
+        }
+        LOG_INF("SMOKE", "Verified manga overview bookmark");
+        break;
+      }
       case ScriptActionType::AssertAnkiNextCandidate: {
         const char* bookPath = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
         if (bookPath == nullptr || bookPath[0] == '\0') fail("Smoke test book path is missing");
@@ -1310,6 +2867,29 @@ SimulatorSmokeTest smokeTest;
 
 }  // namespace
 
-void runSimulatorSmokeTestTick() { smokeTest.tick(); }
+void runSimulatorSmokeTestTick() {
+  // Isolated localhost lifecycle regression: the external WS client writes the
+  // trigger only after a real START/READY and incomplete binary upload.
+  const char* transferAction = std::getenv("CROSSINK_SIMULATOR_UPLOAD_SUSPEND");
+  static bool transferTriggered = false;
+  if (transferAction && !transferTriggered && Storage.exists("/upload-suspend.trigger") &&
+      (activityManager.isCurrentActivityNamed("CrossPointWebServer") ||
+       activityManager.isCurrentActivityNamed("CalibreConnect"))) {
+    transferTriggered = true;
+    LOG_INF("SMOKE", "Upload suspend trigger: %s", transferAction);
+    if (strcmp(transferAction, "sleep") == 0) {
+      const bool hadSleepSeam = std::getenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS") != nullptr;
+      if (!hadSleepSeam) setenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS", "1", 1);
+      enterDeepSleep(false);
+      if (!hadSleepSeam) unsetenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS");
+      LOG_INF("SMOKE", "Upload sleep call returned");
+    } else if (strcmp(transferAction, "pop") == 0) {
+      activityManager.popActivity();
+    } else {
+      activityManager.handleHomeButtonBackOrHome();
+    }
+  }
+  smokeTest.tick();
+}
 
 #endif

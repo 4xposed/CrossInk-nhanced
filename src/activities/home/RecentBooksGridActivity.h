@@ -1,8 +1,9 @@
 #pragma once
-
+#include <array>
 #include <vector>
 
 #include "../Activity.h"
+#include "MangaCoverWork.h"
 #include "RecentBooksStore.h"
 #include "util/ButtonNavigator.h"
 
@@ -17,6 +18,9 @@ class RecentBooksGridActivity final : public Activity {
       : Activity("RecentBooksGrid", renderer, mappedInput) {}
   void onEnter() override;
   void onExit() override;
+  void requestBackgroundCancellation() override { coverWork.requestCancellation(); }
+  bool prepareToSuspend() override { return !coverWork.active; }
+  void onResume() override { coverWork.authorizeIntent(); }
   void loop() override;
   void render(RenderLock&&) override;
 
@@ -28,6 +32,8 @@ class RecentBooksGridActivity final : public Activity {
   };
   static constexpr int NO_PAGE_LOADED = -1;
 
+  MangaCoverWork coverWork;
+  std::array<MangaCoverAttempt, MAX_GRID_BOOKS> coverAttempts{};
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
   bool longPressFired = false;

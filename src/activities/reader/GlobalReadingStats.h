@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 
+#include "ReadingLanguageStats.h"
 #include "ReadingStatsUtils.h"
 
 // Cumulative reading statistics across all books, persisted to
@@ -17,8 +18,14 @@ struct GlobalReadingStats {
   std::array<uint8_t, READING_HISTORY_BYTES> readingHistoryBits{};
   uint16_t longestReadingStreak = 0;
 
-  static constexpr uint8_t CURRENT_FILE_VERSION = 3;
-  static constexpr size_t CURRENT_FILE_SIZE = 159;
+  ReadingLanguageTotals languageTotals;
+  // A failed read must not turn existing durable data into a writable empty snapshot.
+  bool persistenceWritable = true;
+
+  static constexpr uint8_t CURRENT_FILE_VERSION = 4;
+  static constexpr size_t SUMMARY_FILE_SIZE = 223;
+  static constexpr size_t CURRENT_FILE_SIZE = SUMMARY_FILE_SIZE;
+  static constexpr size_t MAX_LOCAL_FILE_SIZE = 26515;
   static constexpr size_t MIN_SUPPORTED_FILE_SIZE = 13;
 
   // Loads stats from /.crosspoint/global_stats.bin. Returns default-constructed
@@ -38,7 +45,7 @@ struct GlobalReadingStats {
   static GlobalReadingStats loadAggregated(const GlobalReadingStats& localStats);
 
   // Saves stats to /.crosspoint/global_stats.bin.
-  void save() const;
+  bool save(const ReadingLanguageSpan* span = nullptr) const;
 
   // Replaces /.crosspoint/global_stats.bin with a fresh empty file without
   // rotating or deleting any backup files.
@@ -48,3 +55,5 @@ struct GlobalReadingStats {
   uint16_t currentReadingStreak(const ReadingStatsDate* today) const;
   uint16_t displayLongestReadingStreak() const;
 };
+
+static_assert(sizeof(GlobalReadingStats) < 256, "Global stats must stay a compact copied value");

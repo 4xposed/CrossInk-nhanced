@@ -4,6 +4,8 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <MangaBook.h>
+#include <Memory.h>
 
 #include <algorithm>
 #include <memory>
@@ -21,6 +23,7 @@
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "fontIds.h"
+#include "util/BookFolderMutation.h"
 
 namespace fui = freeink::ui;
 
@@ -203,13 +206,23 @@ void RecentBooksActivity::promptDeleteBook(const RecentBook& book) {
       return;
     }
 
-    BookActions::clearFileMetadata(path);
-    if (!Storage.remove(path.c_str())) {
-      LOG_ERR("RBA", "Failed to delete file: %s", path.c_str());
-      return;
+    if (manga::MangaBook::isMangaFolder(path.c_str())) {
+      const auto result = BookFolderMutation::remove(path.c_str());
+      if (result != BookFolderMutation::Result::Complete) {
+        LOG_ERR("RBA", "Delete failed: %s", BookFolderMutation::error(result));
+        BookActions::drawToast(renderer, result == BookFolderMutation::Result::RecoveryPending
+                                             ? tr(STR_METADATA_RECOVERY_PENDING)
+                                             : tr(STR_ERROR_GENERAL_FAILURE));
+        return;
+      }
+    } else {
+      if (!Storage.remove(path.c_str())) {
+        LOG_ERR("RBA", "Failed to delete book: %s", path.c_str());
+        return;
+      }
+      BookActions::clearFileMetadata(path);
+      RECENT_BOOKS.removeByPath(path);
     }
-
-    RECENT_BOOKS.removeByPath(path);
     reloadAfterBookAction();
   };
 
@@ -312,15 +325,20 @@ void RecentBooksActivity::showBookActionMenu(const size_t bookIndex, const bool 
                   reloadAfterBookAction();
                 });
             return;
-          case FileBrowserAction::ToggleCompleted: {
-            bool completed = false;
-            if (BookActions::toggleBookCompleted(book.path, book.title, completed)) {
-              BookActions::drawToast(renderer, completed ? tr(STR_MARKED_FINISHED) : tr(STR_MARKED_UNFINISHED));
-              delay(1000);
-            }
-            reloadAfterBookAction();
+          case FileBrowserAction::ToggleCompleted:
+            BookActions::startCompletionEdit(
+                *this, renderer, mappedInput, book.path, book.title, [this](const ActivityResult& result) {
+                  if (!result.isCancelled) {
+                    const auto* completed = std::get_if<OptionSelectionResult>(&result.data);
+                    if (completed) {
+                      BookActions::drawToast(renderer,
+                                             completed->index ? tr(STR_MARKED_FINISHED) : tr(STR_MARKED_UNFINISHED));
+                      delay(1000);
+                    }
+                  }
+                  reloadAfterBookAction();
+                });
             return;
-          }
           case FileBrowserAction::EpubRenderMode: {
             const uint8_t currentIndex =
                 BookActions::epubRenderModeDisplayIndex(EpubReaderActivity::loadBookRenderMode(book.path));

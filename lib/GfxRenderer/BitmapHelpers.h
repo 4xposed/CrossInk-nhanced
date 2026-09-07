@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <utility>
 
 #include "../Memory/Memory.h"
 
@@ -38,16 +39,25 @@ void createBmpHeader(BmpHeader* bmpHeader, int width, int height, BmpRowOrder ro
 //     1/8
 class Atkinson1BitDitherer {
  public:
-  explicit Atkinson1BitDitherer(int width) {
-    if (width <= 0) return;
+  Atkinson1BitDitherer() = default;
+  explicit Atkinson1BitDitherer(int width) { begin(width); }
+
+  // One contiguous allocation for all three rows keeps conversion from
+  // fragmenting the C3 heap; begin() may be called again to reuse the object.
+  bool begin(int width) {
+    errorRows.reset();
+    errorRow0 = errorRow1 = errorRow2 = nullptr;
+    rowSize = 0;
+    if (width <= 0 || width > 8192) return false;
     const size_t candidateRowSize = static_cast<size_t>(width) + 4;
-    if (candidateRowSize > SIZE_MAX / (3 * sizeof(int16_t))) return;
+    auto rows = makeUniqueNoThrow<int16_t[]>(candidateRowSize * 3);
+    if (!rows) return false;
     rowSize = candidateRowSize;
-    errorRows = makeUniqueNoThrow<int16_t[]>(rowSize * 3);
-    if (!errorRows) return;
+    errorRows = std::move(rows);
     errorRow0 = errorRows.get();
     errorRow1 = errorRow0 + rowSize;
     errorRow2 = errorRow1 + rowSize;
+    return true;
   }
 
   bool isValid() const { return errorRows != nullptr; }
@@ -126,16 +136,26 @@ class Atkinson1BitDitherer {
 // Less error buildup = fewer artifacts than Floyd-Steinberg
 class AtkinsonDitherer {
  public:
-  explicit AtkinsonDitherer(int width, bool imageLevels = false) : imageLevels(imageLevels) {
-    if (width <= 0) return;
+  AtkinsonDitherer() = default;
+  explicit AtkinsonDitherer(int width, bool levels = false) { begin(width, levels); }
+
+  // One contiguous allocation for all three rows keeps conversion from
+  // fragmenting the C3 heap; begin() may be called again to reuse the object.
+  bool begin(int width, bool levels = false) {
+    imageLevels = levels;
+    errorRows.reset();
+    errorRow0 = errorRow1 = errorRow2 = nullptr;
+    rowSize = 0;
+    if (width <= 0 || width > 8192) return false;
     const size_t candidateRowSize = static_cast<size_t>(width) + 4;
-    if (candidateRowSize > SIZE_MAX / (3 * sizeof(int16_t))) return;
+    auto rows = makeUniqueNoThrow<int16_t[]>(candidateRowSize * 3);
+    if (!rows) return false;
     rowSize = candidateRowSize;
-    errorRows = makeUniqueNoThrow<int16_t[]>(rowSize * 3);
-    if (!errorRows) return;
+    errorRows = std::move(rows);
     errorRow0 = errorRows.get();
     errorRow1 = errorRow0 + rowSize;
     errorRow2 = errorRow1 + rowSize;
+    return true;
   }
   // **1. EXPLICITLY DELETE THE COPY CONSTRUCTOR**
   AtkinsonDitherer(const AtkinsonDitherer& other) = delete;
@@ -217,7 +237,7 @@ class AtkinsonDitherer {
   }
 
  private:
-  const bool imageLevels;
+  bool imageLevels = false;
   size_t rowSize{0};
   std::unique_ptr<int16_t[]> errorRows;
   int16_t* errorRow0 = nullptr;
@@ -235,15 +255,26 @@ class AtkinsonDitherer {
 //      7/16  X
 class FloydSteinbergDitherer {
  public:
-  explicit FloydSteinbergDitherer(int width, bool imageLevels = false) : imageLevels(imageLevels), rowCount(0) {
-    if (width <= 0) return;
+  FloydSteinbergDitherer() = default;
+  explicit FloydSteinbergDitherer(int width, bool levels = false) { begin(width, levels); }
+
+  // One contiguous allocation for both rows keeps conversion from fragmenting
+  // the C3 heap; begin() may be called again to reuse the object.
+  bool begin(int width, bool levels = false) {
+    imageLevels = levels;
+    rowCount = 0;
+    errorRows.reset();
+    errorCurRow = errorNextRow = nullptr;
+    rowSize = 0;
+    if (width <= 0 || width > 8192) return false;
     const size_t candidateRowSize = static_cast<size_t>(width) + 2;
-    if (candidateRowSize > SIZE_MAX / (2 * sizeof(int16_t))) return;
+    auto rows = makeUniqueNoThrow<int16_t[]>(candidateRowSize * 2);
+    if (!rows) return false;
     rowSize = candidateRowSize;
-    errorRows = makeUniqueNoThrow<int16_t[]>(rowSize * 2);
-    if (!errorRows) return;
+    errorRows = std::move(rows);
     errorCurRow = errorRows.get();
     errorNextRow = errorCurRow + rowSize;
+    return true;
   }
 
   bool isValid() const { return errorRows != nullptr; }
@@ -352,8 +383,8 @@ class FloydSteinbergDitherer {
   }
 
  private:
-  const bool imageLevels;
-  int rowCount;
+  bool imageLevels = false;
+  int rowCount = 0;
   size_t rowSize{0};
   std::unique_ptr<int16_t[]> errorRows;
   int16_t* errorCurRow = nullptr;

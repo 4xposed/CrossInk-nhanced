@@ -11,6 +11,7 @@
 
 #include <algorithm>
 
+#include "BackgroundSuspension.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "OpdsServerStore.h"
@@ -37,6 +38,7 @@
 #include "reader/ReaderActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
+#include "util/BookFolderMutation.h"
 #include "util/FrontlightPanelActivity.h"
 #include "util/FullScreenMessageActivity.h"
 #include "util/TwoFingerSwipe.h"
@@ -275,6 +277,9 @@ void ActivityManager::renderTaskLoop() {
 }
 
 void ActivityManager::loop() {
+  if (BookFolderMutation::hasPending() && pendingAction == PendingAction::None && currentActivity &&
+      currentActivity->name == "Home")
+    return;
   if (currentActivity && currentActivity->requiresExclusiveStorageLoop()) {
     currentActivity->loop();
     // USB Drive normally restarts the device rather than replacing itself. The
@@ -287,7 +292,7 @@ void ActivityManager::loop() {
     }
   }
 
-  if (currentActivity) {
+  if (currentActivity && pendingAction == PendingAction::None) {
     mappedInput.setPowerAsConfirmInReaderMode(currentActivity->allowPowerAsConfirmInReaderMode());
 
     if (currentActivity->blocksGlobalInput()) {
@@ -329,6 +334,14 @@ void ActivityManager::loop() {
   }
 
   while (pendingAction != PendingAction::None) {
+    if (!prepareToSuspend()) {
+      if (!retrySuspensionAfterFailure()) {
+        pendingAction = PendingAction::None;
+        pendingActivity.reset();
+        openReaderMenuAfterPop = false;
+      }
+      return;
+    }
     if (pendingAction == PendingAction::Pop) {
       RenderLock lock;
 
@@ -355,6 +368,7 @@ void ActivityManager::loop() {
         currentActivity = std::move(stackActivities.back());
         stackActivities.pop_back();
         restoredActivityNeedsRender = true;
+        currentActivity->onResume();
 
         if (closedFrontlightPanel) currentActivity->onFrontlightPanelClosed();
 
@@ -550,6 +564,20 @@ void ActivityManager::notifyUserInput() {
   if (currentActivity) currentActivity->onUserInput();
 }
 
+bool ActivityManager::prepareForFolderMutation() {
+  if (pendingAction != PendingAction::None || !currentActivity || currentActivity->isReaderActivity()) return false;
+  for (const auto& activity : stackActivities)
+    if (activity->isReaderActivity()) return false;
+  // Cancellation happens before RenderLock; existing readiness hooks drain covers,
+  // prefetch and dictionary owners. A denied reader save is never overridden.
+  return prepareToSuspend();
+}
+
+bool ActivityManager::prepareToSuspend() { return prepareBackgroundSuspension<RenderLock>(currentActivity.get()); }
+bool ActivityManager::retrySuspensionAfterFailure() const {
+  return retryBackgroundSuspensionAfterFailure(currentActivity.get());
+}
+
 void ActivityManager::exitActivity(const RenderLock& lock) {
   // Note: lock must be held by the caller
   if (currentActivity) {
@@ -560,6 +588,11 @@ void ActivityManager::exitActivity(const RenderLock& lock) {
 }
 
 void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
+  if (BookFolderMutation::hasPending() && newActivity && newActivity->name != "Home" &&
+      newActivity->name != "FullScreenMessage") {
+    LOG_ERR("ACT", "Metadata recovery blocks navigation");
+    return;
+  }
   // Note: no lock here, this is usually called by loop() and we may run into deadlock
   if (currentActivity) {
     TouchRegistry::getInstance().clear();
@@ -567,6 +600,7 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
     // leading to the "delete this" problem
     pendingActivity = std::move(newActivity);
     pendingAction = PendingAction::Replace;
+    currentActivity->requestBackgroundCancellation();
   } else {
     // No current activity, safe to launch immediately
     TouchRegistry::getInstance().clear();
@@ -749,7 +783,8 @@ void ActivityManager::goToSleep(bool fromTimeout) {
 void ActivityManager::goToBoot() { replaceActivity(std::make_unique<BootActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToFullScreenMessage(std::string message, EpdFontFamily::Style style) {
-  replaceActivity(std::make_unique<FullScreenMessageActivity>(renderer, mappedInput, std::move(message), style));
+  replaceActivity(std::make_unique<FullScreenMessageActivity>(
+      renderer, mappedInput, std::move(message), style, HalDisplay::FAST_REFRESH, BookFolderMutation::hasPending()));
 }
 
 void ActivityManager::goHome(HomeMenuItem initialMenuItem, const HalDisplay::RefreshMode initialRefreshMode) {
@@ -782,6 +817,7 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, const HalDisplay::Ref
 void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<CrashActivity>(renderer, mappedInput)); }
 
 void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {
+  if (BookFolderMutation::hasPending()) return;
   if (pendingActivity) {
     // Should never happen in practice
     LOG_ERR("ACT", "pendingActivity while pushActivity is not expected");
@@ -790,6 +826,7 @@ void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {
   TouchRegistry::getInstance().clear();
   pendingActivity = std::move(activity);
   pendingAction = PendingAction::Push;
+  if (currentActivity) currentActivity->requestBackgroundCancellation();
 }
 
 void ActivityManager::popActivity() {
@@ -800,6 +837,7 @@ void ActivityManager::popActivity() {
   }
   TouchRegistry::getInstance().clear();
   pendingAction = PendingAction::Pop;
+  if (currentActivity) currentActivity->requestBackgroundCancellation();
 }
 
 bool ActivityManager::preventAutoSleep() const { return currentActivity && currentActivity->preventAutoSleep(); }
