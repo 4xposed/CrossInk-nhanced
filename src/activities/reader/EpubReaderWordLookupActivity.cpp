@@ -1806,22 +1806,22 @@ void EpubReaderWordLookupActivity::renderReaderBackground() {
 
   const bool dictionaryFontWasSelected = dictionaryFontActive_;
   if (dictionaryFontWasSelected) sdFontSystem.restoreReaderFont(renderer);
-  if (readerBackgroundRender_) {
-    readerBackgroundRender_(readerContext_);
-  } else if (page_) {
+  // Reuse the page owned by this overlay. Reloading another copy can exhaust
+  // the C3 heap while dictionary indexes and the definition are resident.
+  if (page_) {
     renderer.clearScreen(ReaderUtils::readerBackgroundColor());
     if (auto* cache = renderer.getFontCacheManager()) {
       auto scope = cache->createPrewarmScope();
       page_->render(renderer, SETTINGS.getReaderFontId(), marginLeft_, marginTop_,
                     ReaderUtils::readerForegroundBlack());
-      if (scope.endScanAndPrewarm()) {
-        page_->render(renderer, SETTINGS.getReaderFontId(), marginLeft_, marginTop_,
-                      ReaderUtils::readerForegroundBlack());
-      }
+      page_->render(renderer, SETTINGS.getReaderFontId(), marginLeft_, marginTop_,
+                    ReaderUtils::readerForegroundBlack());
     } else {
       page_->render(renderer, SETTINGS.getReaderFontId(), marginLeft_, marginTop_,
                     ReaderUtils::readerForegroundBlack());
     }
+  } else if (readerBackgroundRender_) {
+    readerBackgroundRender_(readerContext_);
   }
   if (dictionaryFontWasSelected) {
     const DictionaryFontActivation activation =

@@ -257,6 +257,7 @@ void ActivityManager::renderTaskLoop() {
       // Apply Night Mode to each activity's normal-polarity frame. SleepActivity
       // preserves it only for Quick Resume and clears it for other sleep screens.
       display.setInverted(SETTINGS.screenInverted != 0);
+      const uint32_t started = millis();
       currentActivity->render(std::move(lock));
       restoredActivityNeedsRender = false;
     }

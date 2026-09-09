@@ -1605,11 +1605,13 @@ void loop() {
 
   if (Serial && millis() - lastMemPrint >= 10000) {
     logMemoryStats("Periodic");
+            activityManager.isHomeActivity(), activityManager.isReaderActivity());
     lastMemPrint = millis();
   }
 
   if (!buttonShortcutController.isQuickLocked() && UsbSerialFileTransfer::process(activityManager.isHomeActivity()) ==
                                                        UsbSerialFileTransfer::ProcessResult::ScreenshotRequested) {
+    RenderLock screenshotLock;
     const uint32_t bufferSize = display.getBufferSize();
     logSerial.printf("SCREENSHOT_START:%d\n", bufferSize);
     uint8_t* buf = display.getFrameBuffer();

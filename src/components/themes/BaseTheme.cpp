@@ -1035,6 +1035,11 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
 
   // Draw Title
   if (title && title[0] != '\0') {
+    if (renderer.isFontCacheScanning()) {
+      renderer.drawText(SMALL_FONT_ID, 0, 0, title, foregroundBlack);
+      renderer.drawText(SMALL_FONT_ID, 0, 0, "\xe2\x80\xa6", foregroundBlack);
+      return;
+    }
     textY -= textYOffset;
     // Centered chapter title text
     // Page width minus existing content with 30px padding on each side

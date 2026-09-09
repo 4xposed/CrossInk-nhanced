@@ -411,6 +411,19 @@ JapaneseDictStatus findMatch(SourceState& source, const char* key, size_t& match
     if (narrowWithSparseIndex(source, key, lo, hi)) {
       const JapaneseDictStatus narrowed = binarySearch(source, key, lo, hi, match);
       if (narrowed != JapaneseDictStatus::NotFound) return narrowed;
+      DictIndexRecord boundary{};
+      bool completeRange = true;
+      if (lo > 0) {
+        const auto status = readRecord(source, lo - 1, boundary);
+        if (status != JapaneseDictStatus::Found) return status;
+        completeRange = std::memcmp(boundary.headword, key, SPX_KEY_SIZE) < 0;
+      }
+      if (completeRange && hi < source.recordCount) {
+        const auto status = readRecord(source, hi, boundary);
+        if (status != JapaneseDictStatus::Found) return status;
+        completeRange = std::memcmp(boundary.headword, key, SPX_KEY_SIZE) > 0;
+      }
+      if (completeRange) return JapaneseDictStatus::NotFound;
       // A damaged checkpoint must cost performance, never correctness.
     }
   }

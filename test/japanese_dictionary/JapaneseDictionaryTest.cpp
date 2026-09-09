@@ -2429,6 +2429,23 @@ TEST_F(JapaneseDictionaryTest, MissingAndStaleSparseIndexesFallBackToBinarySearc
   EXPECT_EQ(entry.definitionView(), "stale spx");
 }
 
+TEST_F(JapaneseDictionaryTest, ValidSparseIndexMissDoesNotSearchTheWholeDictionary) {
+  std::vector<InputRecord> records;
+  records.reserve(8192);
+  for (unsigned i = 0; i < 8192; ++i) {
+    char word[16];
+    std::snprintf(word, sizeof(word), "word%05u", i * 2);
+    records.push_back({word, "definition"});
+  }
+  writeVocab(std::move(records), true);
+  DictIndex index;
+  ASSERT_EQ(index.open(), JapaneseDictStatus::Found);
+  const auto before = hal_storage_test::readCount;
+  DictProbe result;
+  EXPECT_EQ(index.probeExact("word08193", result), JapaneseDictStatus::NotFound);
+  EXPECT_LE(hal_storage_test::readCount - before, 4u);
+}
+
 TEST_F(JapaneseDictionaryTest, ValidSparseIndexFindsLastCheckpointWindow) {
   std::vector<InputRecord> records;
   records.reserve(97);
@@ -2443,6 +2460,35 @@ TEST_F(JapaneseDictionaryTest, ValidSparseIndexFindsLastCheckpointWindow) {
   DictEntry entry;
   ASSERT_EQ(index.lookupExact("k096", entry), JapaneseDictStatus::Found);
   EXPECT_EQ(entry.definitionView(), "k096");
+}
+
+TEST_F(JapaneseDictionaryTest, DamagedSparseCheckpointsCannotHideExistingWords) {
+  std::vector<InputRecord> records;
+  records.reserve(144);
+  for (unsigned i = 0; i < 144; ++i) {
+    char word[8];
+    std::snprintf(word, sizeof(word), "k%03u", i);
+    records.push_back({word, word});
+  }
+  auto [idx, dat] = writeSource("/dictionaries/jp/vocab", std::move(records));
+  for (const char fill : {'a', 'z'}) {
+    auto spx = makeSpx(idx);
+    for (size_t offset = 32; offset < spx.size(); offset += 32) {
+      std::fill_n(spx.data() + offset, 32, 0);
+      spx[offset] = fill;
+    }
+    writeBytes(resolve("/dictionaries/jp/vocab.spx"), spx);
+    DictIndex index;
+    ASSERT_EQ(index.open(), JapaneseDictStatus::Found);
+    for (const char* word : {"k000", "k047", "k048", "k095", "k096", "k143"}) {
+      DictEntry entry;
+      ASSERT_EQ(index.lookupExact(word, entry), JapaneseDictStatus::Found) << word << fill;
+      EXPECT_EQ(entry.definitionView(), word);
+    }
+    DictProbe result;
+    EXPECT_EQ(index.probeExact("k050x", result), JapaneseDictStatus::NotFound);
+    index.close();
+  }
 }
 
 TEST_F(JapaneseDictionaryTest, MergesDuplicateDefinitionsInDescendingPriorityOrder) {

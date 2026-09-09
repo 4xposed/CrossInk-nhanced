@@ -1,5 +1,6 @@
 #include "LyraTheme.h"
 
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
 #include <HalPowerManager.h>
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -586,6 +588,12 @@ void LyraTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
                                hPaddingInSelection, cornerRadius, false, false, true, true, Color::LightGray);
     }
 
+    std::optional<FontCacheManager::PrewarmScope> prewarm;
+    if (auto* cache = renderer.getFontCacheManager()) {
+      prewarm.emplace(cache->createPrewarmScope());
+      renderer.drawText(UI_12_FONT_ID, 0, 0, book.title.c_str(), true, EpdFontFamily::BOLD);
+      renderer.drawText(UI_10_FONT_ID, 0, 0, book.author.c_str());
+    }
     auto titleLines = renderer.wrappedText(UI_12_FONT_ID, book.title.c_str(), textWidth, 3, EpdFontFamily::BOLD);
 
     auto author = renderer.truncatedText(UI_10_FONT_ID, book.author.c_str(), textWidth);
