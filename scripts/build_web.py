@@ -1,4 +1,4 @@
-"""Build the CrossInk web portal: compose pages from shared templates/assets,
+"""Build the CrossInknhanced web portal: compose pages from shared templates/assets,
 minify, gzip, and emit the C headers that the firmware serves from flash.
 
 Source of truth lives under web/:
@@ -26,11 +26,11 @@ JS_OUT = os.path.join(OUT, "js")
 
 # slug -> (generated identifier, <title>, active nav, extra <head> markup)
 PAGES = {
-    "home":     ("HomePageHtml",     "CrossInk",                   "home",     ""),
-    "files":    ("FilesPageHtml",    "Files - CrossInk",           "files",    '  <script src="/js/jszip.min.js"></script>'),
-    "anki":     ("AnkiPageHtml",     "Anki - CrossInk",            "anki",     '  <script src="/js/jszip.min.js"></script>\n  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.14.2/sql-wasm.js"></script>'),
-    "settings": ("SettingsPageHtml", "Settings - CrossInk Reader", "settings", ""),
-    "fonts":    ("FontsPageHtml",    "Fonts - CrossInk",           "fonts",    ""),
+    "home":     ("HomePageHtml",     "CrossInknhanced",                   "home",     ""),
+    "files":    ("FilesPageHtml",    "Files - CrossInknhanced",           "files",    '  <script src="/js/jszip.min.js"></script>'),
+    "anki":     ("AnkiPageHtml",     "Anki - CrossInknhanced",            "anki",     '  <script src="/js/jszip.min.js"></script>\n  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.14.2/sql-wasm.js"></script>'),
+    "settings": ("SettingsPageHtml", "Settings - CrossInknhanced Reader", "settings", ""),
+    "fonts":    ("FontsPageHtml",    "Fonts - CrossInknhanced",           "fonts",    ""),
 }
 
 PRESERVE_TAGS = "pre|code|textarea|script|style"

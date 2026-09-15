@@ -174,11 +174,11 @@ def inject_version(env):
     if pioenv in {'default', 'sticky', 'x4-pro', 'x4-classic'}:
         version_string = get_hardware_version(project_dir, pioenv)
         if os.environ.get('CROSSINK_RC_HASH'):
-            print(f'CrossInk RC build version: {version_string}')
+            print(f'CrossInknhanced RC build version: {version_string}')
         elif os.environ.get('CROSSINK_RELEASE_VERSION'):
-            print(f'CrossInk production build version: {version_string}')
+            print(f'CrossInknhanced production build version: {version_string}')
         else:
-            print(f'CrossInk build version: {version_string}')
+            print(f'CrossInknhanced build version: {version_string}')
         env.Append(CPPDEFINES=[('CROSSINK_VERSION', f'\\"{version_string}\\"')])
 
     elif pioenv == 'debug':
@@ -191,7 +191,7 @@ def inject_version(env):
             ('CROSSINK_BUILD_ENV', '\\"debug\\"'),
             'CROSSINK_SHOW_SLEEP_BUILD_INFO',
         ])
-        print(f'CrossInk test build version: {ci_version}{suffix}')
+        print(f'CrossInknhanced test build version: {ci_version}{suffix}')
 
     elif pioenv == 'sticky-debug':
         branch = get_git_branch(project_dir)
@@ -203,7 +203,7 @@ def inject_version(env):
             ('CROSSINK_BUILD_ENV', '\\"debug\\"'),
             'CROSSINK_SHOW_SLEEP_BUILD_INFO',
         ])
-        print(f'CrossInk test build version: {ci_version}{suffix}')
+        print(f'CrossInknhanced test build version: {ci_version}{suffix}')
 
     elif pioenv in {'x4-pro-debug', 'x4-classic-debug'}:
         branch = get_git_branch(project_dir)
@@ -215,7 +215,7 @@ def inject_version(env):
             ('CROSSINK_BUILD_ENV', '\\"debug\\"'),
             'CROSSINK_SHOW_SLEEP_BUILD_INFO',
         ])
-        print(f'CrossInk test build version: {ci_version}{suffix}')
+        print(f'CrossInknhanced test build version: {ci_version}{suffix}')
 
     elif pioenv == 'test':
         branch = get_git_branch(project_dir)
@@ -225,7 +225,7 @@ def inject_version(env):
         env.Append(CPPDEFINES=[
             ('CROSSINK_VERSION', f'\\"{ci_version}{suffix}\\"'),
         ])
-        print(f'CrossInk test build version: {ci_version}{suffix}')
+        print(f'CrossInknhanced test build version: {ci_version}{suffix}')
 
     elif pioenv == 'gh_release_rc':
         # CI passes CROSSINK_RC_HASH as an env var; locally we derive it from git.
@@ -233,7 +233,7 @@ def inject_version(env):
         env.Append(CPPDEFINES=[
             ('CROSSINK_VERSION', f'\\"{version_string}\\"'),
         ])
-        print(f'CrossInk RC build version: {version_string}')
+        print(f'CrossInknhanced RC build version: {version_string}')
 
 
 # PlatformIO/SCons entry point — Import and env are SCons builtins injected at runtime.
