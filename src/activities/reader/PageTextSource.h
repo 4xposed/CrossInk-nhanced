@@ -7,6 +7,7 @@
 #include <memory>
 #include <utility>
 
+#include "PageTextBounds.h"
 #include "util/DictionaryEngineTypes.h"
 
 class GfxRenderer;
@@ -57,13 +58,6 @@ struct OwnedLookupTextSource {
     contentHash = 0;
     truncated = false;
   }
-};
-
-struct PageTextBounds {
-  int16_t x = 0;
-  int16_t y = 0;
-  int16_t width = 0;
-  int16_t height = 0;
 };
 
 // Unions the rendered source-word rectangles for a scanner candidate. Synthetic

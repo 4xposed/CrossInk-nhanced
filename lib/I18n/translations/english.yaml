@@ -887,3 +887,6 @@ STR_MANGA_AUTO_SIX: "6 per minute"
 STR_MANGA_AUTO_TWELVE: "12 per minute"
 STR_MANGA_PANELS_HINT: "Panels"
 STR_MANGA_SCREENSHOT_FAILED: "Could not save screenshot. Check SD card."
+
+STR_PREV: "Prev"
+STR_NEXT: "Next"

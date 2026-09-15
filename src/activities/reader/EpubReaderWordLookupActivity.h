@@ -175,6 +175,7 @@ class EpubReaderWordLookupActivity final : public Activity {
   bool sourceTruncated() const { return externalMode_ ? externalSource_.truncated : pageSource_.truncated(); }
   bool externalMode_ = false;
   OwnedLookupTextSource externalSource_;
+  PageTextBounds externalTextViewport_;
   std::string externalScanCachePath_;
   void (*externalBackgroundRender_)(void*, PageTextSourceView) = nullptr;
   std::unique_ptr<Page> page_;

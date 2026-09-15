@@ -1,12 +1,12 @@
-# CrossInk Mokuro book format v2
+# CrossInk Mokuro book format v3
 
-One reading unit is one cropped panel. Images are named `page_0000.bmp`, `page_0001.bmp`, etc. Each is a standard uncompressed 1-bit BMP (black palette entry 0, white entry 1), aspect-fitted inside the selected portrait profile: X3 528x792, X4/X4 Pro 480x800. Width/height are actual image dimensions; no stretching or padding is implied. Integers below are unsigned little endian. Files are immutable after publication.
+One reading unit is one cropped panel. Images are named `page_0000.bmp`, `page_0001.bmp`, etc. Each is a standard uncompressed 1-bit BMP (black palette entry 0, white entry 1), aspect-fitted inside the selected profile: X3 528x792, X4/X4 Pro 480x800, with the bounds swapped for landscape crops. Width/height are actual image dimensions; no stretching or padding is implied. Integers below are unsigned little endian. Files are immutable after publication. New exports default to Floyd–Steinberg dithering; `--dither bayer` retains the previous method. This changes pixel content only, not the v3 wire format.
 
-Version 2 expands the permitted image width for X3; binary field layouts and OCR limits are unchanged. Readers accept versions 1 and 2, applying each version's width limit. New exports use version 2 for all profiles; old readers reject them explicitly. The `CMI1` magic identifies the format family, not its version.
+Version 3 permits landscape dimensions, preserving source orientation and fitting before dithering. Version 2 expanded the permitted image width for X3. Binary field layouts and OCR limits are unchanged. Readers accept versions 1, 2, and 3, applying each version's limits. New exports use version 3 for all profiles; older firmware rejects them explicitly and must be updated. The `CMI1` magic identifies the format family, not its version.
 
 ## book.mki
 
-12-byte header: ASCII `CMI1`, u32 version=2, u32 panelCount (1..10000).
+12-byte header: ASCII `CMI1`, u32 version=3, u32 panelCount (1..10000).
 Exactly panelCount 20-byte records follow:
 
 | Field | Bytes |
@@ -18,7 +18,7 @@ Exactly panelCount 20-byte records follow:
 | Panel within original page, zero based | 2 |
 | Reserved (zero) | 2 |
 
-Image dimensions must be positive and at most 528x800 for version 2 (480x800 for version 1). Each OCR extent must fit within book.mkd; records are contiguous in output. No full index needs to be held in firmware memory.
+Image dimensions must be positive and fit within 528x800 or 800x528 for version 3. Version 2 permits only 528x800; version 1 permits only 480x800. Exporters apply the tighter selected device bounds, preserve aspect ratio, and do not enlarge low-resolution sources. Image pixels and OCR coordinates retain the original orientation; the reader automatically rotates landscape views. Each OCR extent must fit within book.mkd; records are contiguous in output. No full index needs to be held in firmware memory.
 
 ## book.mkd
 
@@ -28,7 +28,7 @@ Each panel record starts with u16 blockCount (0..255) and u16 reserved=0. Each b
 
 `meta.bin` uses the existing simple metadata v1 encoding (u32 1, u16 titleBytes, u16 authorBytes, title, author, u16 languageBytes, language), with writer limits of 1024 title bytes, 1024 author bytes and 16 language bytes. Language defaults to ja. This shares metadata encoding, not the Matcha panel format.
 
-`manifest.json` is a host-readable version=1 manifest containing source page relative paths and hashes, source dimensions, crop rectangles, original page/panel ordinals, exported dimensions, preparation settings, and a `device` export profile (`x3`, `x4`, or `x4-pro`). It is not parsed during firmware page navigation. Source crop images and original `.mokuro` stay in a sibling work directory; final output contains only files needed for reading plus this manifest.
+`manifest.json` is a host-readable version=1 manifest containing source page relative paths and hashes, source dimensions, crop rectangles, original page/panel ordinals, exported dimensions, preparation settings, and a `device` export profile (`x3`, `x4`, or `x4-pro`). The optional `dither` field records `floyd-steinberg` or `bayer`; older exports omit it. It is not parsed during firmware page navigation. Source crop images and original `.mokuro` stay in a sibling work directory; final output contains only files needed for reading plus this manifest.
 
 ## Firmware integration
 

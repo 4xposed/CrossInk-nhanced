@@ -19,6 +19,7 @@ pub struct Options {
     pub backend: crate::native::Backend,
     pub models: Option<PathBuf>,
     pub device: crate::device::Device,
+    pub dither: format::Dither,
     pub mokuro: Option<PathBuf>,
     pub panel_map: Option<PathBuf>,
     pub uv: Option<PathBuf>,
@@ -49,6 +50,8 @@ pub struct Manifest {
     pub ocr: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<crate::device::Device>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dither: Option<format::Dither>,
     pub version: u32,
     pub fingerprint: String,
     #[serde(default)]
@@ -205,6 +208,7 @@ pub fn prepare(input_path: &Path, output: &Path, options: &Options) -> Result<Pa
     let mut manifest = Manifest {
         ocr: BTreeMap::new(),
         device: None,
+        dither: None,
         version: 1,
         fingerprint,
         preparation: BTreeMap::from([
@@ -432,10 +436,11 @@ pub fn convert(input_path: &Path, output: &Path, options: &Options) -> Result<()
     let mut index = fs::File::create(staged.path().join("book.mki"))?;
     let mut data = fs::File::create(staged.path().join("book.mkd"))?;
     index.write_all(b"CMI1")?;
-    index.write_all(&2u32.to_le_bytes())?;
+    index.write_all(&3u32.to_le_bytes())?;
     index.write_all(&(manifest.panels.len() as u32).to_le_bytes())?;
     let mut offset = 0u32;
     manifest.device = Some(options.device);
+    manifest.dither = Some(options.dither);
     let total_panels = manifest.panels.len();
     for (ordinal, panel) in manifest.panels.iter_mut().enumerate() {
         eprintln!("Exporting panel {}/{}", ordinal + 1, total_panels);
@@ -469,7 +474,11 @@ pub fn convert(input_path: &Path, output: &Path, options: &Options) -> Result<()
         let gray = image
             .resize_exact(width, height, image::imageops::FilterType::Lanczos3)
             .to_luma8();
-        format::write_bmp(&staged.path().join(format!("page_{ordinal:04}.bmp")), &gray)?;
+        format::write_bmp_with_dither(
+            &staged.path().join(format!("page_{ordinal:04}.bmp")),
+            &gray,
+            options.dither,
+        )?;
     }
     index.sync_all()?;
     data.sync_all()?;
@@ -550,7 +559,7 @@ mod tests {
         )
         .unwrap();
         let idx = std::fs::read(out.join("book.mki")).unwrap();
-        assert_eq!(&idx[..12], b"CMI1\x02\0\0\0\x01\0\0\0");
+        assert_eq!(&idx[..12], b"CMI1\x03\0\0\0\x01\0\0\0");
         assert_eq!(
             image::image_dimensions(out.join("page_0000.bmp")).unwrap(),
             (480, 720)
@@ -602,6 +611,88 @@ mod tests {
             image::image_dimensions(work.join("crops/panel_0000.png")).unwrap(),
             (1200, 1800)
         );
+    }
+
+    #[test]
+    fn landscape_export_keeps_image_and_ocr_in_the_same_coordinate_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, ocr) = source(dir.path());
+        GrayImage::from_pixel(1600, 800, Luma([0]))
+            .save(input.join("001.png"))
+            .unwrap();
+        std::fs::write(&ocr, serde_json::to_vec(&json!({
+            "version": "0.2.5", "pages": [{
+                "img_path": "panel_0000.png", "img_width": 1600, "img_height": 800,
+                "blocks": [{"box": [100, 200, 300, 600], "font_size": 40,
+                    "vertical": true, "lines": ["猫"], "lines_coords": [[[100,200],[300,200],[300,600],[100,600]]]}]
+            }]
+        })).unwrap()).unwrap();
+        let out = dir.path().join("landscape");
+        convert(
+            &input,
+            &out,
+            &Options {
+                mokuro: Some(ocr),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            image::image_dimensions(out.join("page_0000.bmp")).unwrap(),
+            (800, 400)
+        );
+        let index = std::fs::read(out.join("book.mki")).unwrap();
+        assert_eq!(&index[4..8], &3u32.to_le_bytes());
+        let data = std::fs::read(out.join("book.mkd")).unwrap();
+        assert_eq!(&data[4..12], &[50, 0, 100, 0, 100, 0, 200, 0]);
+        crate::validate::validate(&out).unwrap();
+        // Older format bounds and malformed v3 geometry must still be rejected.
+        let mut old = index.clone();
+        old[4] = 2;
+        std::fs::write(out.join("book.mki"), &old).unwrap();
+        assert!(crate::validate::validate(&out).is_err());
+        old[4] = 3;
+        old[22..24].copy_from_slice(&529u16.to_le_bytes());
+        std::fs::write(out.join("book.mki"), &old).unwrap();
+        assert!(crate::validate::validate(&out).is_err());
+    }
+
+    #[test]
+    fn changing_dither_reuses_preparation_and_preserves_ocr() {
+        let dir = tempfile::tempdir().unwrap();
+        let (input, ocr) = source(dir.path());
+        GrayImage::from_pixel(1200, 1800, Luma([127]))
+            .save(input.join("001.png"))
+            .unwrap();
+        let work = dir.path().join("shared.work");
+        let mut options = Options {
+            mokuro: Some(ocr),
+            work: Some(work.clone()),
+            ..Default::default()
+        };
+        let default_out = dir.path().join("default");
+        convert(&input, &default_out, &options).unwrap();
+        let prepared = fs::read(work.join("prepared.json")).unwrap();
+        let bayer_out = dir.path().join("bayer");
+        options.dither = format::Dither::Bayer;
+        convert(&input, &bayer_out, &options).unwrap();
+        assert_eq!(fs::read(work.join("prepared.json")).unwrap(), prepared);
+        for name in ["book.mki", "book.mkd"] {
+            assert_eq!(
+                fs::read(default_out.join(name)).unwrap(),
+                fs::read(bayer_out.join(name)).unwrap()
+            );
+        }
+        assert_ne!(
+            fs::read(default_out.join("page_0000.bmp")).unwrap(),
+            fs::read(bayer_out.join("page_0000.bmp")).unwrap()
+        );
+        for (folder, expected) in [(&default_out, "floyd-steinberg"), (&bayer_out, "bayer")] {
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(folder.join("manifest.json")).unwrap()).unwrap();
+            assert_eq!(manifest["dither"], expected);
+            crate::validate::validate(folder).unwrap();
+        }
     }
 
     #[test]

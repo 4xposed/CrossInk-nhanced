@@ -2135,14 +2135,18 @@ void HomeActivity::loop() {
     }
 
     const int menuCount = getMenuItemCount();
-    buttonNavigator.onNext([this, menuCount] {
+    const auto moveNext = [this, menuCount] {
       selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
       requestUpdate();
-    });
-    buttonNavigator.onPrevious([this, menuCount] {
+    };
+    const auto movePrevious = [this, menuCount] {
       selectorIndex = ButtonNavigator::previousIndex(selectorIndex, menuCount);
       requestUpdate();
-    });
+    };
+    buttonNavigator.onNextRelease(moveNext);
+    buttonNavigator.onPreviousRelease(movePrevious);
+    buttonNavigator.onNextContinuous(moveNext);
+    buttonNavigator.onPreviousContinuous(movePrevious);
   }
 
   if (getHighlightedBookIndex() != previousHighlightedBookIdx) {

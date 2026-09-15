@@ -43,6 +43,9 @@ struct ConvertArgs {
     output: PathBuf,
     #[arg(long, value_enum, default_value = "x4")]
     device: Device,
+    /// Final image dithering; Bayer reproduces earlier exports.
+    #[arg(long, value_enum, default_value = "floyd-steinberg")]
+    dither: crossink_manga::format::Dither,
     /// Ordered source-coordinate rectangles, keyed by relative source filename.
     #[arg(long)]
     panel_map: Option<PathBuf>,
@@ -65,6 +68,7 @@ impl ConvertArgs {
             backend: self.backend,
             models: self.models.clone(),
             device: self.device,
+            dither: self.dither,
             mokuro: self.mokuro.clone(),
             panel_map: self.panel_map.clone(),
             uv: self.uv.clone(),
@@ -121,5 +125,39 @@ fn main() -> ExitCode {
             eprintln!("Error: {error:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dither_cli_defaults_and_override() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec![
+                "crossink-manga",
+                "convert",
+                "source.cbz",
+                "--output",
+                "book",
+            ];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args)
+        };
+        for (args, expected) in [
+            (&[][..], crossink_manga::format::Dither::FloydSteinberg),
+            (
+                &["--dither", "bayer"][..],
+                crossink_manga::format::Dither::Bayer,
+            ),
+        ] {
+            let cli = parse(args).unwrap();
+            let Command::Convert(convert) = cli.command else {
+                panic!("wrong command");
+            };
+            assert_eq!(convert.options().dither, expected);
+        }
+        assert!(parse(&["--dither", "unknown"]).is_err());
     }
 }

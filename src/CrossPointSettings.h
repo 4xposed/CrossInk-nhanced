@@ -597,7 +597,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
   // Long-press Confirm (menu button) quick action in reader (0 = off)
-  uint8_t longPressMenuAction = LONG_MENU_OFF;
+  uint8_t longPressMenuAction = LONG_MENU_LOOKUP_WORD;
   // Long-press Back quick action in reader (defaults to the historical file browser shortcut)
   uint8_t longPressBackAction = LONG_MENU_FILE_BROWSER;
   // Five reusable reader commands and their single owning shortcut. Keep these

@@ -9,7 +9,7 @@ crossink-manga convert volume.cbz --device x4-pro --output ./Volume-Pro
 crossink-manga validate ./Volume
 ```
 
-Copy the resulting `Volume` folder to the SD card and open it from Books using firmware with the CMI1 version 2 adapter. Each panel is a reading unit. The `x3` profile fits within 528×792; `x4` (the default) and `x4-pro` fit within 480×800. Output preserves aspect ratio without upscaling, and uses 1-bit dithered BMPs plus indexed OCR. Existing Matcha-format books remain supported.
+Copy the resulting `Volume` folder to the SD card and open it from Books using firmware with the CMI1 version 3 adapter. Each panel is a reading unit. The `x3` profile fits within 528×792; `x4` (the default) and `x4-pro` fit within 480×800. For landscape crops those bounds are swapped before resizing, so wide X4 panels can use up to 800×480 pixels. Updating the firmware is required for these version 3 books; older books remain readable. Output preserves aspect ratio without upscaling, and uses 1-bit BMPs with Floyd–Steinberg dithering by default, plus indexed OCR. Pass `--dither bayer` to reproduce the earlier ordered dithering. Dithering changes only final image export: original crops and OCR remain reusable, and no firmware update is required for this choice. The selected method is recorded in `manifest.json`. Existing Matcha-format books remain supported.
 
 The native backend runs detection and recognition in Rust through ONNX Runtime. It does not invoke uv or Python. It needs the native runtime library and exported model files; these are host-side assets, never copied to the e-reader. Development builds can select them with `--models PATH` and `ORT_DYLIB_PATH`. Release bundles include these assets alongside the executable.
 

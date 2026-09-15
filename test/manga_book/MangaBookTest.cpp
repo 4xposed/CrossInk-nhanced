@@ -806,6 +806,33 @@ TEST_F(MangaBookTest, MokuroVersionTwoSupportsX3AndKeepsVersionOneBounds) {
   EXPECT_FALSE(book.open(dir.c_str()));
 }
 
+TEST_F(MangaBookTest, MokuroVersionThreeAcceptsLandscapeAndPreservesOlderBounds) {
+  std::vector<uint8_t> index = {
+      'C', 'M', 'I', '1', 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0x20, 3, 0x90, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+  };
+  write("book.mki", index);
+  write("book.mkd", {0, 0, 0, 0});
+  MangaBook book;
+  ASSERT_TRUE(book.open(dir.c_str()));
+  manga::format::PageView page;
+  ASSERT_TRUE(book.loadPage(0, page));
+  manga::format::PanelView panel;
+  ASSERT_EQ(page.panels.next(panel), manga::format::Error::None);
+  EXPECT_EQ(panel.box.w, 800u);
+  EXPECT_EQ(panel.box.h, 400u);
+  book.close();
+  for (uint8_t version : {1, 2, 4}) {
+    index[4] = version;
+    write("book.mki", index);
+    EXPECT_FALSE(book.open(dir.c_str()));
+  }
+  index[4] = 3;
+  index[22] = 0x11;
+  index[23] = 2;  // 800x529 exceeds the landscape short edge.
+  write("book.mki", index);
+  EXPECT_FALSE(book.open(dir.c_str()));
+}
+
 TEST_F(MangaBookTest, MokuroOpenRejectsMalformedIndexRecordsAndExactSizeViolations) {
   fs::remove(dir / "panels.idx");
   fs::remove(dir / "panels.dat");
@@ -824,7 +851,7 @@ TEST_F(MangaBookTest, MokuroOpenRejectsMalformedIndexRecordsAndExactSizeViolatio
   invalid[0] = 'X';
   rejected(invalid);
   invalid = valid;
-  invalid[4] = 3;
+  invalid[4] = 4;
   rejected(invalid);
   invalid = valid;
   invalid[8] = 0;

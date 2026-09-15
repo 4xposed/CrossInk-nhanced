@@ -18,6 +18,7 @@
 
 #include "CrossPointSettings.h"
 #include "DictionarySuggestionsActivity.h"
+#include "PageTextViewport.h"
 #include "ReaderUtils.h"
 #include "SdCardFontSystem.h"
 #include "activities/settings/DictionarySelectActivity.h"
@@ -204,6 +205,7 @@ void EpubReaderWordLookupActivity::initializeRequest(EpubLookupPageRequest&& req
   bookCachePath_ = std::move(request.bookCachePath);
   externalScanCachePath_ = std::move(request.scanCacheFilePath);
   externalBackgroundRender_ = request.renderExternalBackground;
+  externalTextViewport_ = request.externalTextViewport;
   spineIndex_ = request.spineIndex;
   pageIndex_ = request.pageIndex;
   marginLeft_ = request.marginLeft;
@@ -893,6 +895,11 @@ void EpubReaderWordLookupActivity::publishRenderSnapshot(const bool requestRende
     renderSnapshot_.selectionValid = presentation.selectionValid;
     renderSnapshot_.definitionPage = flow_.definitionPage();
     renderSnapshot_.definitionPageCount = flow_.definitionPageCount();
+    if (externalMode_ && externalTextViewport_.height > 0) {
+      const auto* candidate = selectedCandidate();
+      if (candidate)
+        scrollPageTextToSelection(externalSource_, externalTextViewport_, candidate->firstGlyph, candidate->glyphCount);
+    }
     updateHighlightSnapshot(renderSnapshot_);
   }
   const bool awaitingFirstDefinition = !readyTimeLogged_ && !flow_.openDeadlineReached(millis());
@@ -1217,7 +1224,11 @@ uint16_t EpubReaderWordLookupActivity::candidateAtPoint(const int x, const int y
     if (!candidate || !unionPageTextGlyphBounds(sourceView(), candidate->firstGlyph, candidate->glyphCount, bounds)) {
       continue;
     }
-    if (x >= bounds.x && x < bounds.x + bounds.width && y >= bounds.y && y < bounds.y + bounds.height) return index;
+    if (externalMode_ && externalTextViewport_.height > 0) {
+      if (pageTextRangeContains(sourceView(), candidate->firstGlyph, candidate->glyphCount, x, y)) return index;
+    } else if (x >= bounds.x && x < bounds.x + bounds.width && y >= bounds.y && y < bounds.y + bounds.height) {
+      return index;
+    }
     if (exactOnly) continue;
     const int64_t centerX = bounds.x + bounds.width / 2;
     const int64_t centerY = bounds.y + bounds.height / 2;
@@ -1737,6 +1748,20 @@ void EpubReaderWordLookupActivity::loop() {
   int touchX = 0;
   int touchY = 0;
   if (mappedInput.wasScreenTapped(touchX, touchY)) {
+    if (externalMode_ && pageTextViewportContains(externalTextViewport_, touchX, touchY)) {
+      const auto candidate = candidateAtPoint(touchX, touchY, true);
+      if (candidate != UINT16_MAX && flow_.moveCursor(int(candidate) - flow_.cursor())) {
+        resetDefinitionBackChain();
+        recordLookupHistory_ = true;
+        {
+          RenderLock lock(*this);
+          clearDefinitionSelection();
+        }
+        executeFlowCommands();
+        publishRenderSnapshot();
+      }
+      return;
+    }
     bool insidePanel = false;
     bool insideFooter = false;
     bool insideBody = false;
@@ -1999,10 +2024,10 @@ void EpubReaderWordLookupActivity::drawButtonHints() const {
   const bool logicalLeftScrollsUp = scrollButtons.up == DictionaryLookupNavigationButton::Left;
   const char* sideLeftLabel = logicalLeftScrollsUp ? tr(STR_DIR_UP) : tr(STR_DIR_DOWN);
   const char* sideRightLabel = logicalLeftScrollsUp ? tr(STR_DIR_DOWN) : tr(STR_DIR_UP);
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)),
-                                            definitionMultiSelectMode_ ? tr(STR_DONE) : tr(STR_LOOKUP_SHORT),
-                                            sideButtonsForLookup ? sideLeftLabel : tr(STR_DIR_LEFT),
-                                            sideButtonsForLookup ? sideRightLabel : tr(STR_DIR_RIGHT));
+  const auto labels = mappedInput.mapLabels(
+      mappedInput.withBackArrow(tr(STR_BACK)), definitionMultiSelectMode_ ? tr(STR_DONE) : tr(STR_LOOKUP_SHORT),
+      sideButtonsForLookup && !definitionSelectionMode_ ? sideLeftLabel : tr(STR_PREV),
+      sideButtonsForLookup && !definitionSelectionMode_ ? sideRightLabel : tr(STR_NEXT));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
@@ -2038,8 +2063,14 @@ void EpubReaderWordLookupActivity::render(RenderLock&&) {
   const bool framebufferContainedPage = initialRender_ && framebufferContainsPage_;
   renderReaderBackground();
   if (snapshot.highlightValid) {
-    renderer.invertRect(snapshot.highlight.x - 2, snapshot.highlight.y - 2, snapshot.highlight.width + 4,
-                        snapshot.highlight.height + 4);
+    auto highlight = snapshot.highlight;
+    if (externalMode_ && externalTextViewport_.height > 0) {
+      highlight = clipPageTextBounds(highlight, externalTextViewport_);
+      if (highlight.width > 0 && highlight.height > 0)
+        renderer.invertRect(highlight.x, highlight.y, highlight.width, highlight.height);
+    } else {
+      renderer.invertRect(highlight.x - 2, highlight.y - 2, highlight.width + 4, highlight.height + 4);
+    }
   }
 
   const PanelLayout layout = panelLayoutLocked();

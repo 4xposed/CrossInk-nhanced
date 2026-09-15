@@ -57,7 +57,12 @@ pub fn fitted(width: u32, height: u32, device: crate::device::Device) -> (u32, u
     if width == 0 || height == 0 {
         return (0, 0);
     }
-    let (max_width, max_height) = device.dimensions();
+    let (short_edge, long_edge) = device.dimensions();
+    let (max_width, max_height) = if width > height {
+        (long_edge, short_edge)
+    } else {
+        (short_edge, long_edge)
+    };
     let scale = (f64::from(max_width) / f64::from(width))
         .min(f64::from(max_height) / f64::from(height))
         .min(1.0);
@@ -111,6 +116,16 @@ mod tests {
     #[test]
     fn square_fits_without_stretching() {
         assert_eq!(fitted(1000, 1000, crate::device::Device::X4), (480, 480));
+    }
+    #[test]
+    fn landscape_uses_long_screen_edge_for_all_profiles() {
+        for (device, expected) in [
+            (crate::device::Device::X4, (800, 400)),
+            (crate::device::Device::X4Pro, (800, 400)),
+            (crate::device::Device::X3, (792, 396)),
+        ] {
+            assert_eq!(fitted(1600, 800, device), expected);
+        }
     }
     #[test]
     fn small_image_is_not_enlarged() {

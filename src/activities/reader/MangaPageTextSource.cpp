@@ -45,6 +45,7 @@ struct Item {
   manga::format::Rect box;
   std::string_view block;
   size_t offset = 0, length = 0, runOffset = 0;
+  int region = 0;
 };
 // One ordinal/boundary policy for building and reconstruction; no temporary text
 // allocations, no strlen on borrowed format bytes. Return false for malformed views.
@@ -52,6 +53,7 @@ template <class Sink>
 bool walk(manga::format::PageView page, int scope, Sink sink) {
   if (scope < -1 || (scope >= 0 && scope >= page.panels.remaining)) return false;
   uint16_t paragraph = 0, nextWord = 0;
+  int region = 0;
   auto panels = page.panels;
   for (int panelIndex = 0; panels.remaining; ++panelIndex) {
     manga::format::PanelView panel;
@@ -76,6 +78,7 @@ bool walk(manga::format::PageView page, int scope, Sink sink) {
           runOffset = 0;
         }
         Item item;
+        item.region = region;
         item.glyph.codepoint = d.valid ? d.cp : 0xfffd;
         item.glyph.paragraph = paragraph;
         item.glyph.pageWord = separator ? PageTextGlyph::kSyntheticPageWord : word;
@@ -90,6 +93,7 @@ bool walk(manga::format::PageView page, int scope, Sink sink) {
         offset += d.bytes;
       }
       Item end;
+      end.region = region++;
       end.glyph.codepoint = '\n';
       end.glyph.paragraph = paragraph++;
       sink(end);
@@ -148,8 +152,60 @@ bool mapMangaLookupBlock(manga::format::Rect box, const MangaLookupGeometry& g, 
   return true;
 }
 
+namespace {
+template <class Sink>
+bool visitRegions(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, Sink sink) {
+  int previous = -1;
+  return walk(page, panel, [&](const Item& item) {
+    if (item.region == previous || item.glyph.pageWord == PageTextGlyph::kSyntheticPageWord) return;
+    previous = item.region;
+    PageTextBounds bounds;
+    if (mapMangaLookupBlock(item.box, geometry, bounds)) sink(item.region, bounds);
+  });
+}
+}  // namespace
+
+bool mangaLookupRegionBounds(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int region,
+                             PageTextBounds& out) {
+  out = {};
+  const bool valid = visitRegions(page, panel, geometry, [&](int index, const PageTextBounds& bounds) {
+    if (index == region) out = bounds;
+  });
+  if (!valid) out = {};
+  return out.width > 0 && out.height > 0;
+}
+
+int nextMangaLookupRegion(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int current,
+                          bool forward) {
+  int first = -1, last = -1, before = -1, after = -1;
+  if (!visitRegions(page, panel, geometry, [&](int index, const PageTextBounds&) {
+        if (first < 0) first = index;
+        last = index;
+        if (index < current) before = index;
+        if (index > current && after < 0) after = index;
+      }))
+    return -1;
+  return forward ? (after >= 0 ? after : first) : (before >= 0 ? before : last);
+}
+
+int mangaLookupRegionAtPoint(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int x,
+                             int y) {
+  int selected = -1;
+  int32_t area = INT32_MAX;
+  if (!visitRegions(page, panel, geometry, [&](int index, const PageTextBounds& b) {
+        const int32_t candidateArea = int32_t(b.width) * b.height;
+        if (x >= b.x && y >= b.y && x < b.x + b.width && y < b.y + b.height && candidateArea < area) {
+          selected = index;
+          area = candidateArea;
+        }
+      }))
+    return -1;
+  return selected;
+}
+
 DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int panel,
-                                            const MangaLookupGeometry& geometry, OwnedLookupTextSource& out) {
+                                            const MangaLookupGeometry& geometry, OwnedLookupTextSource& out,
+                                            const int region) {
   out.clear();
   if (geometry.textOnly &&
       (!validRect(geometry.views.base) || geometry.cellWidth <= 0 || geometry.lineHeight <= 0 ||
@@ -167,7 +223,11 @@ DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int pa
     return DictionaryStatus::ReadError;
   }
   size_t count = 0;
-  if (!walk(page, panel, [&](const Item&) { ++count; })) {
+  if (region < -1 || !walk(
+                         page, panel,
+                         [&](const Item& item) {
+                           if (region < 0 || item.region == region) ++count;
+                         })) {
     LOG_ERR("MLO", "Invalid OCR page/scope");
     return DictionaryStatus::ReadError;
   }
@@ -191,9 +251,11 @@ DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int pa
   bool stopped = false;
   int column = 0, row = 0;
   const int columns = geometry.textOnly ? geometry.views.base.width / geometry.cellWidth : 0;
-  const int rows = geometry.textOnly ? geometry.views.base.height / geometry.lineHeight : 0;
+  const int textHeight = region >= 0 ? INT16_MAX - geometry.views.base.y : geometry.views.base.height;
+  const int rows = geometry.textOnly ? textHeight / geometry.lineHeight : 0;
   uint16_t previousWord = PageTextGlyph::kSyntheticPageWord;
   walk(page, panel, [&](const Item& item) {
+    if (region >= 0 && item.region != region) return;
     if (stopped) return;
     if (item.glyph.pageWord != previousWord || item.glyph.pageWord == PageTextGlyph::kSyntheticPageWord)
       complete = used;
@@ -249,6 +311,7 @@ DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int pa
   uint32_t hash = 2166136261u;
   hashValue(hash, 0x4d4f0001);
   hashValue(hash, uint32_t(panel));
+  if (region >= 0) hashValue(hash, uint32_t(region) ^ 0x52454700u);
   for (size_t i = 0; i < used; ++i) {
     hashValue(hash, glyphs[i].codepoint);
     hashValue(hash, glyphs[i].paragraph);

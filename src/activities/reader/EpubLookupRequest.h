@@ -5,6 +5,8 @@
 #include <string>
 #include <utility>
 
+#include "PageTextBounds.h"
+
 class Page;
 struct PageTextSourceView;
 
@@ -49,6 +51,7 @@ struct EpubLookupPageRequest {
   bool autoLookupInitialWord = false;
   bool framebufferContainsPage = false;
   bool recordLookupHistory = true;
+  PageTextBounds externalTextViewport;
   const char* dictionaryFontFamilyName = nullptr;
   uint8_t dictionaryFontPointSize = 0;
   void* readerContext = nullptr;

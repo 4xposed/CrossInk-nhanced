@@ -1042,6 +1042,8 @@ class SimulatorSmokeTest {
     } else {
       inputScript.push_back({ScriptActionType::MangaReviewInterleave, {}, nullptr, 0, 5, mode == "finished" ? 1 : 0});
       inputScript.push_back(render("One-shot manga lookup after worker drain", 6));
+      inputScript.push_back(assertActivity("MangaRegionSelection"));
+      addTap(MappedInputManager::Button::Confirm);
       inputScript.push_back(assertActivity("EpubReaderWordLookup"));
       addTap(MappedInputManager::Button::Back);
       inputScript.push_back(render("One-shot shortcut restores same view", 4));
@@ -1320,6 +1322,34 @@ class SimulatorSmokeTest {
     }
     inputScript.push_back(render("Manga first panel from overview", 4));
     if (std::getenv("CROSSINK_SIMULATOR_MANGA_OCR")) {
+      for (const int scope : {-1, 0}) {
+        inputScript.push_back({ScriptActionType::MangaBoundaryJump, {}, nullptr, 0, 0, scope});
+        inputScript.push_back(render("Manga held Menu view prepared", 4));
+        inputScript.push_back({ScriptActionType::MangaQueueCurrentSource, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(press(MappedInputManager::Button::Confirm));
+        inputScript.push_back({ScriptActionType::MangaReadingDwell, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(render("Manga held Menu opens lookup", 4));
+        inputScript.push_back(assertActivity("MangaRegionSelection"));
+        inputScript.push_back(release(MappedInputManager::Button::Confirm));
+        inputScript.push_back(render("Manga held Menu release stays in selection", 4));
+        inputScript.push_back(assertActivity("MangaRegionSelection"));
+        addTap(MappedInputManager::Button::Back);
+        inputScript.push_back(render("Manga held Menu returns to view", 4));
+        inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, scope});
+      }
+      const auto selectRegion = [this] {
+        inputScript.push_back(render("Manga OCR region selection", 4));
+        inputScript.push_back(assertActivity("MangaRegionSelection"));
+#if CROSSINK_APP_CAP_TOUCH
+        if (mappedInputManager.hasTouch()) {
+          const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+          const int x = safe.x + safe.width * 3 / 8, y = safe.y + safe.height - 10;
+          inputScript.push_back(touchDown(x, y));
+          inputScript.push_back(touchRelease(x, y));
+        } else
+#endif
+          addTap(MappedInputManager::Button::Confirm);
+      };
       const auto openMenuRow = [this](int index) {
 #if CROSSINK_APP_CAP_TOUCH
         if (mappedInputManager.hasTouch()) {
@@ -1338,15 +1368,26 @@ class SimulatorSmokeTest {
       inputScript.push_back({ScriptActionType::MangaRememberFont, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
       inputScript.push_back({ScriptActionType::MangaQueueCurrentSource, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
       addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga region cancel prepared", 4));
+      inputScript.push_back(assertActivity("MangaRegionSelection"));
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("Manga region cancel restored image", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+      addTap(MappedInputManager::Button::Confirm);
+      selectRegion();
       inputScript.push_back(render("Manga panel shared lookup", 4));
       inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
       inputScript.push_back({ScriptActionType::MangaAssertScanCache, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
 #if CROSSINK_APP_CAP_TOUCH
       if (mappedInputManager.hasTouch()) {
-        const int w = renderer.getScreenWidth(), y = renderer.getScreenHeight() / 4;
-        inputScript.push_back(touchDown(w * 3 / 4, y));
-        inputScript.push_back(touchMove(w / 4, y));
-        inputScript.push_back(touchRelease(w / 4, y));
+        const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+        const int line = renderer.getLineHeight(SETTINGS.getReaderFontId());
+        const int cell = std::max(line, renderer.getTextWidth(SETTINGS.getReaderFontId(), "W"));
+        const int columns = (safe.width - 16) / cell;
+        const int x = safe.x + 8 + (7 % columns) * cell + cell / 2;
+        const int y = safe.y + 8 + (7 / columns) * line + line / 2;
+        inputScript.push_back(touchDown(x, y));
+        inputScript.push_back(touchRelease(x, y));
       } else
 #endif
         addTap(MappedInputManager::Button::Right);
@@ -1357,6 +1398,7 @@ class SimulatorSmokeTest {
       inputScript.push_back(render("Manga image restored after OCR child", 4));
       inputScript.push_back({ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
       addTap(MappedInputManager::Button::Confirm);
+      selectRegion();
       inputScript.push_back(render("Manga warm panel shared lookup", 4));
       inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, nullptr, 0, 1, 0});
       inputScript.push_back({ScriptActionType::MangaAssertScanCache, MappedInputManager::Button::Back, nullptr, 0, 1, 1});
@@ -1439,6 +1481,7 @@ class SimulatorSmokeTest {
       inputScript.push_back(assertActivity("MangaReader"));
       inputScript.push_back({ScriptActionType::MangaWaitCompletion, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
       inputScript.push_back({ScriptActionType::MangaReleaseCompletion, MappedInputManager::Button::Confirm, nullptr, 0, 0, 0});
+      selectRegion();
       inputScript.push_back(render("Manga lookup after repeated pending Confirm", 4));
       inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "Reader", 0, 0, 0});
       inputScript.push_back({ScriptActionType::MangaForceLookupExit, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
@@ -1498,6 +1541,9 @@ class SimulatorSmokeTest {
     if (std::getenv("CROSSINK_SIMULATOR_MANGA_OCR")) {
       addTap(MappedInputManager::Button::Confirm);
       for (int i = 0; i < 8; ++i) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga overview region selection", 4));
+      inputScript.push_back(assertActivity("MangaRegionSelection"));
       addTap(MappedInputManager::Button::Confirm);
       inputScript.push_back(render("Manga overview shared lookup", 4));
       inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, nullptr, 0, 0, 0});

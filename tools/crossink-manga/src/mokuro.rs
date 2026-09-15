@@ -55,8 +55,7 @@ pub fn transform(page: &Page, width: u32, height: u32) -> Result<Vec<TextBlock>>
             && page.img_height > 0
             && width > 0
             && height > 0
-            && width <= 528
-            && height <= 800,
+            && ((width <= 528 && height <= 800) || (width <= 800 && height <= 528)),
         "invalid panel dimensions"
     );
     ensure!(

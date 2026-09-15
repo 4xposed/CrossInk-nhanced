@@ -23,7 +23,7 @@ pub fn validate(folder: &Path) -> Result<()> {
     index.read_exact(&mut magic)?;
     let version = u32_from(&mut index)?;
     ensure!(
-        &magic == b"CMI1" && (1..=2).contains(&version),
+        &magic == b"CMI1" && (1..=3).contains(&version),
         "unsupported book index"
     );
     let count = u32_from(&mut index)?;
@@ -43,8 +43,10 @@ pub fn validate(folder: &Path) -> Result<()> {
         let _panel = u16_from(&mut index)?;
         ensure!(u16_from(&mut index)? == 0, "nonzero index reserved field");
         ensure!(
-            (1..=if version == 1 { 480 } else { 528 }).contains(&width)
-                && (1..=800).contains(&height),
+            width > 0
+                && height > 0
+                && ((width <= if version == 1 { 480 } else { 528 } && height <= 800)
+                    || (version == 3 && width <= 800 && height <= 528)),
             "invalid image dimensions"
         );
         ensure!(

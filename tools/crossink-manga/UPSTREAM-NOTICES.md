@@ -12,3 +12,5 @@ Sources:
 Model export scripts under dev/ describe the transformations. Model bundles include checkpoint/export hashes and applicable upstream notices. ONNX Runtime is a separately provided native runtime with its own notices. Release artifacts include buildable tool source and vendored dependency sources. Do not remove notices from downstream distributions.
 
 Recognition preprocessing includes a Rust adaptation of Pillow’s fixed-point bilinear resizing. Pillow retains its HPND license; see third-party-licenses/Pillow-LICENSE (copied into licenses in binary bundles). Source: https://github.com/python-pillow/Pillow/blob/12.3.0/src/libImaging/Resample.c .
+
+The monochrome Floyd–Steinberg exporter adapts the grayscale `tobilevel` routine from Pillow 12.3.0 `src/libImaging/Convert.c`, preserving signed rounding, clipping, threshold, and traversal behavior. Copyright (c) 1997–2005 Secret Labs AB; Copyright (c) 1995–1997 Fredrik Lundh. Covered by the included Pillow HPND license in `third-party-licenses/Pillow-LICENSE`.

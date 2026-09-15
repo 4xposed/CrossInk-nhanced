@@ -1643,7 +1643,6 @@ void loop() {
 
   if (Serial && millis() - lastMemPrint >= 10000) {
     logMemoryStats("Periodic");
-            activityManager.isHomeActivity(), activityManager.isReaderActivity());
     lastMemPrint = millis();
   }
 

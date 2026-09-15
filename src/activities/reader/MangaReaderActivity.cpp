@@ -20,8 +20,10 @@
 #include "LookedUpWordsActivity.h"
 #include "MangaQrPayload.h"
 #include "MangaReaderSelectionActivity.h"
+#include "MangaRegionSelectionActivity.h"
 #include "MangaStatus.h"
 #include "MangaTranslationActivity.h"
+#include "PageTextViewport.h"
 #include "QrDisplayActivity.h"
 #include "ReaderOptionsActivity.h"
 #include "ReaderUtils.h"
@@ -38,6 +40,7 @@
 namespace {
 using manga::MenuAction;
 constexpr unsigned long MIN_READING_STATS_PAGE_MS = 2000UL;
+constexpr unsigned long LONG_PRESS_MENU_MS = 600UL;
 
 std::string bookmarkMetadataLabel(std::string_view text) {
   // Portable metadata fields can be 64 KiB each. Bookmark headers need only a
@@ -619,19 +622,31 @@ void MangaReaderActivity::lookupBackgroundLocked(PageTextSourceView source) {
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
   renderer.setRenderMode(GfxRenderer::BW);
   renderer.clearScreen();
-  if (!lookupGeometry.textOnly) {
+  if (!lookupGeometry.textOnly || lookupTextPopup) {
     position.panel = -1;
-    if (!drawImageLocked()) {
+    if (!drawImageLocked(lookupTextPopup ? nullptr : &lookupGeometry.views)) {
       LOG_ERR("MANGA", "Cannot redraw OCR overview background");
       renderer.drawCenteredText(UI_10_FONT_ID, renderer.getScreenHeight() / 2, tr(STR_PAGE_LOAD_ERROR));
     }
     pixelCache.close();
-  } else {
+  }
+  if (lookupGeometry.textOnly) {
+    if (lookupTextPopup) {
+      const auto& box = lookupGeometry.views.base;
+      renderer.fillRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8, false);
+      renderer.drawRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8);
+    }
     // The child passes its live view only for this call; no borrowed glyph
     // pointer survives source release or a dictionary change.
     for (uint16_t i = 0; i < source.glyphCount; ++i) {
       const auto& glyph = source.glyphs[i];
       if (glyph.pageWord == PageTextGlyph::kSyntheticPageWord || glyph.width <= 0 || glyph.height <= 0) continue;
+      PageTextBounds clip{glyph.x, glyph.y, glyph.width, glyph.height};
+      if (lookupTextPopup) {
+        const auto& box = lookupGeometry.views.base;
+        clip = clipPageTextBounds(clip, {int16_t(box.x), int16_t(box.y), int16_t(box.width), int16_t(box.height)});
+        if (clip.width <= 0 || clip.height <= 0) continue;
+      }
       const uint32_t cp = glyph.codepoint;
       char text[5]{};
       if (cp < 0x80)
@@ -649,7 +664,7 @@ void MangaReaderActivity::lookupBackgroundLocked(PageTextSourceView source) {
         text[2] = 0x80 | ((cp >> 6) & 63);
         text[3] = 0x80 | (cp & 63);
       }
-      renderer.beginTextClip(glyph.x, glyph.y, glyph.width, glyph.height);
+      renderer.beginTextClip(clip.x, clip.y, clip.width, clip.height);
       renderer.drawText(SETTINGS.getReaderFontId(), glyph.x, glyph.y, text);
       renderer.endTextClip();
     }
@@ -659,8 +674,9 @@ void MangaReaderActivity::lookupBackgroundLocked(PageTextSourceView source) {
   imageDirty = true;
 }
 
-void MangaReaderActivity::openLookup() {
+void MangaReaderActivity::openLookup(const int region) {
   OwnedLookupTextSource source;
+  std::unique_ptr<MangaRegionSelectionActivity> selection;
   DictionaryStatus status;
   const auto scope = position;
   {
@@ -675,6 +691,7 @@ void MangaReaderActivity::openLookup() {
     ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
     captureViewportsLocked();
     lookupGeometry = {};
+    lookupTextPopup = false;
     lookupGeometry.views = viewports;
     manga::format::IndexRecord info;
     const bool metadataReady = book.readPageInfo(scope.page, info);
@@ -682,10 +699,17 @@ void MangaReaderActivity::openLookup() {
     lookupGeometry.sourceHeight = info.imageHeight;
     lookupGeometry.textOnly = !available.overview || !metadataReady || !info.imageWidth || !info.imageHeight;
     if (!lookupGeometry.textOnly) {
+      if (region < 0) {
+        const auto bar = MangaRegionSelectionActivity::toolbar(renderer);
+        auto& viewport = lookupGeometry.views.base;
+        viewport.height = std::min(viewport.height, std::max(1, bar.y - 4 - viewport.y));
+        lookupGeometry.views.rotated = {viewport.y, lookupGeometry.views.screenWidth - viewport.x - viewport.width,
+                                        viewport.height, viewport.width};
+      }
       position.panel = -1;
       renderer.setRenderMode(GfxRenderer::BW);
       renderer.clearScreen();
-      const bool drawn = drawImageLocked();
+      const bool drawn = drawImageLocked(&lookupGeometry.views);
       position = scope;
       pixelCache.close();
       lookupGeometry.textOnly = !drawn;
@@ -696,14 +720,35 @@ void MangaReaderActivity::openLookup() {
       lookupGeometry.layout.screenHeight =
           imageOrientation == renderer.getOrientation() ? viewports.screenHeight : viewports.screenWidth;
     }
+    if (region >= 0) {
+      lookupTextPopup = true;
+      lookupGeometry.textOnly = true;
+      const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+      lookupGeometry.views.base = {safe.x + 8, safe.y + 8, std::max(1, safe.width - 16),
+                                   std::max(1, safe.height / 4 - 16)};
+    }
     if (lookupGeometry.textOnly) {
       lookupGeometry.lineHeight = std::max(1, renderer.getLineHeight(SETTINGS.getReaderFontId()));
       lookupGeometry.cellWidth =
           std::max(lookupGeometry.lineHeight, renderer.getTextWidth(SETTINGS.getReaderFontId(), "W"));
-      // Keep selectable fallback text above the shared definition panel.
-      lookupGeometry.views.base.height /= 2;
+      if (!lookupTextPopup) lookupGeometry.views.base.height /= 2;
     }
-    status = buildMangaLookupTextSource(page, scope.panel, lookupGeometry, source);
+    if (region < 0 && !lookupGeometry.textOnly) {
+      const int first = nextMangaLookupRegion(page, scope.panel, lookupGeometry, -1, true);
+      status = first < 0 ? DictionaryStatus::NotFound : DictionaryStatus::Found;
+      if (first >= 0) {
+        selection = makeUniqueNoThrow<MangaRegionSelectionActivity>(
+            renderer, mappedInput, page, scope.panel, lookupGeometry, first,
+            [](void* parent) { static_cast<MangaReaderActivity*>(parent)->lookupBackgroundLocked({}); }, this);
+        if (!selection) {
+          LOG_ERR("MANGA", "Cannot allocate OCR region selection (%u bytes)",
+                  unsigned(sizeof(MangaRegionSelectionActivity)));
+          status = DictionaryStatus::OutOfMemory;
+        }
+      }
+    } else {
+      status = buildMangaLookupTextSource(page, scope.panel, lookupGeometry, source, region);
+    }
     imageDirty = true;
   }
   if (status != DictionaryStatus::Found) {
@@ -717,14 +762,35 @@ void MangaReaderActivity::openLookup() {
                                                                 : tr(STR_PAGE_LOAD_ERROR));
     return;
   }
+  if (selection) {
+    childActive = true;
+    autoTurn.cancel();
+    startActivityForResult(std::move(selection), [this](const ActivityResult& result) {
+      childReturned();
+      const auto* selected = std::get_if<MenuResult>(&result.data);
+      if (!result.isCancelled && selected && selected->action >= 0) openLookup(selected->action);
+    });
+    return;
+  }
   EpubLookupPageRequest request;
+  if (lookupTextPopup) {
+    const auto& box = lookupGeometry.views.base;
+    request.externalTextViewport = {int16_t(box.x), int16_t(box.y), int16_t(box.width), int16_t(box.height)};
+  }
   request.bookLanguage = bookmarkMetadataLabel(book.language());
   request.bookCachePath = statsCachePath;
   request.spineIndex = static_cast<uint16_t>(scope.page);
   request.pageIndex = static_cast<uint16_t>(scope.panel + 1);
   char leaf[64];
-  if (!statsCachePath.empty() && mangaLookupCacheFileName(scope.page, scope.panel, leaf, sizeof(leaf)))
-    request.scanCacheFilePath = statsCachePath + "/" + leaf;
+  if (!statsCachePath.empty()) {
+    if (region >= 0) {
+      snprintf(leaf, sizeof(leaf), "ocr_%lu_%d_region%d.scan", static_cast<unsigned long>(scope.page), scope.panel,
+               region);
+      request.scanCacheFilePath = statsCachePath + "/" + leaf;
+    } else if (mangaLookupCacheFileName(scope.page, scope.panel, leaf, sizeof(leaf))) {
+      request.scanCacheFilePath = statsCachePath + "/" + leaf;
+    }
+  }
   request.dictionaryFontFamilyName = SETTINGS.dictionarySdFontFamilyName;
   request.dictionaryFontPointSize = SETTINGS.dictionaryFontPointSize;
   request.readerContext = this;
@@ -925,7 +991,21 @@ void MangaReaderActivity::loop() {
     openReaderSettingsMenu();
     return;
   }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+  const bool confirmReleased = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
+  if (longPressMenuHandled) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) longPressMenuHandled = false;
+    return;
+  }
+  if (SETTINGS.longPressMenuAction == CrossPointSettings::LONG_MENU_LOOKUP_WORD &&
+      (mappedInput.isPressed(MappedInputManager::Button::Confirm) || confirmReleased) &&
+      mappedInput.getHeldTime() >= LONG_PRESS_MENU_MS) {
+    if (queueShortcut(MenuAction::Lookup)) {
+      longPressMenuHandled = !confirmReleased;
+      if (!confirmReleased) mappedInput.suppressNextConfirmRelease();
+    }
+    return;
+  }
+  if (confirmReleased) {
     bool panelLookup = false;
     {
       RenderLock lock(*this);
@@ -1075,7 +1155,7 @@ bool MangaReaderActivity::drawCachedPixelsLocked() {
   return true;
 }
 
-bool MangaReaderActivity::drawImageLocked() {
+bool MangaReaderActivity::drawImageLocked(const manga::ImageViewports* lookupViews) {
   pixelCache.close();
   pixelsReady = false;
   const auto found = position.panel < 0 ? book.pageImagePath(position.page, path.get(), pathCapacity)
@@ -1127,6 +1207,7 @@ bool MangaReaderActivity::drawImageLocked() {
   }
   const auto base = renderer.getOrientation();
   captureViewportsLocked();
+  if (lookupViews) viewports = *lookupViews;
   manga::ImageLayout layout;
   if (!manga::buildImageLayout(dimensions.width, dimensions.height, viewports,
                                position.panel < 0 || progress.rotatePanels, bmp, layout))

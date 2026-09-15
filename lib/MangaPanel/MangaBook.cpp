@@ -51,7 +51,7 @@ void putU16(uint8_t* p, uint16_t value) {
 
 bool decodeMokuroHeader(const uint8_t* bytes, uint64_t indexSize, format::IndexHeader& out) {
   out = {};
-  if (memcmp(bytes, "CMI1", 4) != 0 || (u32(bytes + 4) != 1 && u32(bytes + 4) != 2)) return false;
+  if (memcmp(bytes, "CMI1", 4) != 0 || (u32(bytes + 4) < 1 || u32(bytes + 4) > 3)) return false;
   const uint32_t count = u32(bytes + 8);
   if (count == 0 || count > format::kMaxPages) return false;
   if (indexSize != kMokuroIndexHeaderBytes + uint64_t(count) * kMokuroIndexRecordBytes) return false;
@@ -62,10 +62,13 @@ bool decodeMokuroHeader(const uint8_t* bytes, uint64_t indexSize, format::IndexH
 bool decodeMokuroRecord(const uint8_t* bytes, uint64_t dataSize, uint32_t version, format::IndexRecord& out) {
   out = {};
   const format::IndexRecord record{u32(bytes), u32(bytes + 4), u16(bytes + 8), u16(bytes + 10)};
+  const bool portraitBounds =
+      record.imageWidth <= (version == 1 ? 480 : kMokuroMaxWidth) && record.imageHeight <= kMokuroMaxHeight;
+  const bool landscapeBounds =
+      version == 3 && record.imageWidth <= kMokuroMaxHeight && record.imageHeight <= kMokuroMaxWidth;
   if (record.dataLength < 4 || record.dataLength > kMokuroMaxRecordBytes || record.imageWidth == 0 ||
-      record.imageWidth > (version == 1 ? 480 : kMokuroMaxWidth) || record.imageHeight == 0 ||
-      record.imageHeight > kMokuroMaxHeight || u16(bytes + 18) != 0 || record.dataOffset > dataSize ||
-      record.dataLength > dataSize - record.dataOffset) {
+      record.imageHeight == 0 || (!portraitBounds && !landscapeBounds) || u16(bytes + 18) != 0 ||
+      record.dataOffset > dataSize || record.dataLength > dataSize - record.dataOffset) {
     return false;
   }
   out = record;

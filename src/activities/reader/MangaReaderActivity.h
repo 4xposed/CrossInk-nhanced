@@ -67,6 +67,7 @@ class MangaReaderActivity final : public Activity {
   bool pendingBack = false, pendingRender = false, suspended = false;
   bool foregroundDraining = false;
   bool pendingLookup = false;
+  bool longPressMenuHandled = false;
   bool inputLocked = false, childActive = false;
   bool pendingScreenshot = false, pendingCacheDelete = false, leaveAfterMessage = false;
   bool incrementalStats = false, suspensionPersistenceFailed = false;
@@ -127,7 +128,7 @@ class MangaReaderActivity final : public Activity {
   void jump(uint32_t number, int16_t panel = -1);
   bool saveProgressLocked();
   void observeProgressLocked();
-  bool drawImageLocked();
+  bool drawImageLocked(const manga::ImageViewports* lookupViews = nullptr);
   bool drawCachedPixelsLocked();
   bool displayImageGrayscaleLocked();
   void handleMenuAction(manga::MenuAction action);
@@ -138,13 +139,14 @@ class MangaReaderActivity final : public Activity {
   void deleteCacheWhenReady();
   bool queueShortcut(manga::MenuAction action);
   void drawStatusLocked(bool grayMask = false);
-  void openLookup();
+  void openLookup(int region = -1);
   void openTranslation();
   void openLookupHistory();
   void lookupBackgroundLocked(PageTextSourceView source);
   void showLookupMessage(const char* message);
   void childReturned();
   MangaLookupGeometry lookupGeometry;
+  bool lookupTextPopup = false;
   void toggleBookmark();
   void showSelection(bool bookmarks);
   void pauseReadingStatsTimer();

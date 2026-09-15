@@ -35,9 +35,10 @@
 #include "EpubLookupRequest.h"
 #include "GfxRenderer.h"
 #include "HalStorage.h"
-#include "Memory.h"
 #include "MangaPageTextSource.h"
+#include "Memory.h"
 #include "PageTextSource.h"
+#include "PageTextViewport.h"
 #include "PageWordScanCache.h"
 #include "PageWordScanner.h"
 #include "Utf8.h"
@@ -6256,6 +6257,110 @@ TEST(MangaPageTextSourceTest, OwnsLexicalRunsAndWholeBlockBounds) {
   EXPECT_EQ(source.view().glyphCount, 0);
   bytes.clear();
   EXPECT_EQ(moved.view().glyphs[0].codepoint, 'h');
+}
+
+TEST(MangaPageTextSourceTest, RegionPopupPreservesOriginalClippingOrdinals) {
+  auto bytes = mangaOcrFixture({{"first words", "猫犬", "last"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto geometry = mangaGeometry();
+  geometry.textOnly = true;
+  geometry.views.base = {3, 5, 80, 60};
+  geometry.cellWidth = 10;
+  geometry.lineHeight = 20;
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, geometry, source, 1), DictionaryStatus::Found);
+  ASSERT_EQ(source.glyphCount, 3);  // Two characters plus the block boundary.
+  EXPECT_EQ(source.view().glyphs[0].codepoint, 0x732b);
+  EXPECT_EQ(source.view().glyphs[0].pageWord, 2);
+  EXPECT_EQ(source.view().glyphs[0].x, 3);
+  EXPECT_EQ(source.view().glyphs[1].x, 13);
+  EXPECT_NE(source.view().glyphs[0].x, source.view().glyphs[1].x);
+  char out[16];
+  size_t written = 0;
+  ASSERT_TRUE(copyMangaLookupClipping(page, -1, {2, 2, 3, 6}, out, sizeof(out), written));
+  EXPECT_EQ(std::string(out, written), "犬");
+  EXPECT_EQ(buildMangaLookupTextSource(page, -1, geometry, source, 3), DictionaryStatus::NotFound);
+  EXPECT_EQ(source.glyphCount, 0);
+}
+
+TEST(MangaPageTextSourceTest, RegionNavigationSkipsEmptyBlocksAndWrapsWithinScope) {
+  auto bytes = mangaOcrFixture({{"", "cat", " \n", "dog"}, {"other"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  const auto geometry = mangaGeometry();
+  EXPECT_EQ(nextMangaLookupRegion(page, 0, geometry, -1, true), 1);
+  EXPECT_EQ(nextMangaLookupRegion(page, 0, geometry, 1, true), 3);
+  EXPECT_EQ(nextMangaLookupRegion(page, 0, geometry, 3, true), 1);
+  EXPECT_EQ(nextMangaLookupRegion(page, 0, geometry, 1, false), 3);
+  EXPECT_EQ(nextMangaLookupRegion(page, 1, geometry, -1, true), 0);
+  EXPECT_EQ(nextMangaLookupRegion(page, 2, geometry, -1, true), -1);
+  EXPECT_EQ(mangaLookupRegionAtPoint(page, 0, geometry, 15, 27), 1);
+  EXPECT_EQ(mangaLookupRegionAtPoint(page, 0, geometry, 45, 27), -1);
+  EXPECT_EQ(mangaLookupRegionAtPoint(page, 0, geometry, 0, 0), -1);
+}
+
+TEST(MangaPageTextSourceTest, RegionSelectionRejectsInvisibleAndMalformedViews) {
+  auto bytes = mangaOcrFixture({{"cat"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto geometry = mangaGeometry();
+  geometry.views.base = {90, 190, 10, 10};
+  EXPECT_EQ(nextMangaLookupRegion(page, -1, geometry, -1, true), -1);
+  geometry = mangaGeometry();
+  geometry.textOnly = true;
+  EXPECT_EQ(nextMangaLookupRegion(page, -1, geometry, -1, true), -1);
+  page.panels.bytes = page.panels.bytes.first(2);
+  EXPECT_EQ(nextMangaLookupRegion(page, -1, mangaGeometry(), -1, true), -1);
+}
+
+TEST(MangaPageTextSourceTest, RegionPopupKeepsTextBeyondTheVisibleRows) {
+  auto bytes = mangaOcrFixture({{"cat dog bird fish"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto g = mangaGeometry();
+  g.textOnly = true;
+  g.views.base = {3, 5, 40, 40};
+  g.cellWidth = 10;
+  g.lineHeight = 20;
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, g, source, 0), DictionaryStatus::Found);
+  EXPECT_FALSE(source.truncated);
+  EXPECT_EQ(source.glyphCount, 18);
+  const uint32_t hash = source.contentHash;
+  ASSERT_TRUE(scrollPageTextToSelection(source, {3, 5, 40, 40}, 13, 4));
+  EXPECT_EQ(source.glyphs[13].y, 5);
+  EXPECT_EQ(source.glyphs[16].y, 25);
+  EXPECT_EQ(source.glyphs[0].y, -55);
+  EXPECT_EQ(source.glyphs[13].pageWord, 3);
+  EXPECT_EQ(source.contentHash, hash);
+  ASSERT_TRUE(scrollPageTextToSelection(source, {3, 5, 40, 40}, 0, 3));
+  EXPECT_EQ(source.glyphs[0].y, 5);
+  EXPECT_EQ(source.glyphs[13].y, 65);
+  EXPECT_FALSE(scrollPageTextToSelection(source, {}, 13, 4));
+  EXPECT_EQ(source.glyphs[0].y, 5);
+  const auto clip = clipPageTextBounds({3, -5, 10, 20}, {3, 5, 40, 40});
+  EXPECT_EQ(clip.y, 5);
+  EXPECT_EQ(clip.height, 10);
+  EXPECT_FALSE(pageTextViewportContains({3, 5, 40, 40}, 43, 10));
+  EXPECT_TRUE(pageTextViewportContains({3, 5, 40, 40}, 42, 44));
+}
+
+TEST(MangaPageTextSourceTest, WrappedWordHitTestingDoesNotSelectAdjacentWords) {
+  auto bytes = mangaOcrFixture({{"a elephant b"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto g = mangaGeometry();
+  g.textOnly = true;
+  g.views.base = {3, 5, 40, 40};
+  g.cellWidth = 10;
+  g.lineHeight = 20;
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, g, source, 0), DictionaryStatus::Found);
+  EXPECT_FALSE(pageTextRangeContains(source.view(), 2, 8, 8, 15));
+  EXPECT_TRUE(pageTextRangeContains(source.view(), 2, 8, 28, 15));
+  EXPECT_FALSE(pageTextRangeContains(source.view(), 2, 8, 38, 55));
+  EXPECT_FALSE(pageTextRangeContains(source.view(), 65000, 8, 28, 15));
 }
 TEST(MangaPageTextSourceTest, FailsClosedOnBudgetAndAllocationFailure) {
   auto bytes = mangaOcrFixture({{std::string(1025, 'a')}});
