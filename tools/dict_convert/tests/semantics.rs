@@ -289,3 +289,27 @@ fn structured_content_preserves_layout_and_filters_annotations() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn usually_kana_tag_survives_in_reading_record() -> Result<()> {
+    let source = tempdir()?;
+    let output = tempdir()?;
+    let definitions = json!([{
+        "type": "structured-content",
+        "content": {"tag": "span", "data": {"content": "misc-info", "class": "tag"},
+                    "content": "kana"}
+    }]);
+    bank(
+        source.path(),
+        1,
+        &json!([["仮名", "かな", "", "n", 1, definitions, 1, ""]]),
+    )?;
+    let records = convert(source.path(), output.path())?;
+    let reading = records
+        .iter()
+        .find(|r| r.key == "かな")
+        .context("missing reading record")?;
+    assert!(String::from_utf8_lossy(&reading.definition).contains("[kana]"));
+    assert_ne!(reading.flags & 0x40, 0);
+    Ok(())
+}

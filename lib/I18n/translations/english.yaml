@@ -890,3 +890,5 @@ STR_MANGA_SCREENSHOT_FAILED: "Could not save screenshot. Check SD card."
 
 STR_PREV: "Prev"
 STR_NEXT: "Next"
+
+STR_GRAMMAR: "Grammar"

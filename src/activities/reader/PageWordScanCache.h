@@ -20,7 +20,7 @@ struct PageWordScanCacheIdentity {
 class PageWordScanCache {
  public:
   static constexpr uint32_t kMagic = UINT32_C(0x534c5743);
-  static constexpr uint8_t kVersion = 2;
+  static constexpr uint8_t kVersion = 3;
   static constexpr uint16_t kCompleteFlag = 1;
   static constexpr size_t kHeaderSize = 32;
   static constexpr size_t kRecordSize = 8;
@@ -52,10 +52,10 @@ class PageWordScanCache {
   uint16_t cursor_ = 0;
 };
 
-static_assert(PageWordScanCache::kHeaderSize == 32, "wlscan v2 header size is part of the disk contract");
+static_assert(PageWordScanCache::kHeaderSize == 32, "wlscan v3 header size is part of the disk contract");
 static_assert(PageWordScanCache::kRecordSize == sizeof(PageWordCandidate),
               "wlscan candidate record must remain eight bytes");
 static_assert(static_cast<uint8_t>(DictionaryBackendKind::StarDict) == 0,
-              "wlscan v2 freezes the StarDict backend byte");
+              "wlscan v3 freezes the StarDict backend byte");
 static_assert(static_cast<uint8_t>(DictionaryBackendKind::Japanese) == 1,
-              "wlscan v2 freezes the Japanese backend byte");
+              "wlscan v3 freezes the Japanese backend byte");

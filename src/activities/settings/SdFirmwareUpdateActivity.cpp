@@ -152,6 +152,13 @@ void SdFirmwareUpdateActivity::onConfirmationResult(const ActivityResult& result
 }
 
 void SdFirmwareUpdateActivity::performUpdate() {
+#ifdef SIMULATOR
+  LOG_ERR("FW", "SD firmware flashing is unavailable in the simulator");
+  errorMessage = tr(STR_FIRMWARE_WRITE_FAILED);
+  RenderLock lock(*this);
+  state = State::FAILED;
+  requestUpdate();
+#else
   LOG_INF("FW", "SD update: %s (%u bytes)", firmwarePath.c_str(), static_cast<unsigned>(firmwareSize));
 
   auto progressCb = +[](size_t written, size_t total, void* ctx) {
@@ -187,6 +194,7 @@ void SdFirmwareUpdateActivity::performUpdate() {
   requestUpdateAndWait();
   delay(1500);
   ESP.restart();
+#endif
 }
 
 void SdFirmwareUpdateActivity::loop() {

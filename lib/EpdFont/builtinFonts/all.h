@@ -12,11 +12,9 @@
 #include <builtinFonts/bitter_12_italic.h>
 #include <builtinFonts/bitter_12_regular.h>
 #include <builtinFonts/bitter_14_bold.h>
-#include <builtinFonts/bitter_14_bolditalic.h>
 #include <builtinFonts/bitter_14_italic.h>
 #include <builtinFonts/bitter_14_regular.h>
 #include <builtinFonts/bitter_16_bold.h>
-#include <builtinFonts/bitter_16_bolditalic.h>
 #include <builtinFonts/bitter_16_italic.h>
 #include <builtinFonts/bitter_16_regular.h>
 
@@ -29,11 +27,9 @@
 #include <builtinFonts/lexenddeca_12_italic.h>
 #include <builtinFonts/lexenddeca_12_regular.h>
 #include <builtinFonts/lexenddeca_14_bold.h>
-#include <builtinFonts/lexenddeca_14_bolditalic.h>
 #include <builtinFonts/lexenddeca_14_italic.h>
 #include <builtinFonts/lexenddeca_14_regular.h>
 #include <builtinFonts/lexenddeca_16_bold.h>
-#include <builtinFonts/lexenddeca_16_bolditalic.h>
 #include <builtinFonts/lexenddeca_16_italic.h>
 #include <builtinFonts/lexenddeca_16_regular.h>
 
@@ -43,3 +39,6 @@
 #include <builtinFonts/inter_12_bold.h>
 #include <builtinFonts/inter_12_regular.h>
 #include <builtinFonts/inter_8_regular.h>
+
+#include <builtinFonts/notosansjp_joyo_8_regular.h>
+#include <builtinFonts/notosansjp_joyo_12_regular.h>

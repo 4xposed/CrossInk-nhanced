@@ -40,7 +40,10 @@ class JapaneseDictionaryBackend {
 
   DictIndex index_;
   WordLookup lookup_{index_};
+  void applyGrammar(const DictionaryQuery& query, const DictionaryResult& result);
   DictEntry activeEntry_;
+  DictEntry grammarEntry_;
+  DictionaryOwnedText grammarLabel_;
   DictionaryOwnedText syntheticNameDefinition_;
   DictionaryCapabilities capabilities_{};
   std::unique_ptr<char[]> bookCachePath_;

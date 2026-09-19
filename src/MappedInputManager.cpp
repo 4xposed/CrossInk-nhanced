@@ -1107,8 +1107,7 @@ void MappedInputManager::simulatorInjectRelease(Button button) {
   simulatorHeld[idx] = false;
   // A popup can select on press and suppress the matching release before it
   // opens a child activity. Injected events must honor that hardware contract.
-  if (button == Button::Confirm && suppressConfirmRelease) {
-    suppressConfirmRelease = false;
+  if (button == Button::Confirm && releaseSuppression.consumeConfirmRelease()) {
     simulatorReleased[idx] = false;
   }
 }

@@ -201,7 +201,7 @@ bool Bitmap::setDitheredOutputSize(const int targetWidth, const int targetHeight
   // helper costs about 3 KiB for an X3-wide custom sleep image, not a full BMP.
   auto resizedDitherer = makeUniqueNoThrow<AtkinsonDitherer>();
   if (!resizedDitherer || !resizedDitherer->begin(targetWidth, imageLevels)) {
-    LOG_ERR("BMP", "OOM for resized dither rows (%d pixels)", targetWidth);
+    LOG_ERR("BMP", "OOM resizing bitmap dither rows (%d pixels)", targetWidth);
     return false;
   }
 

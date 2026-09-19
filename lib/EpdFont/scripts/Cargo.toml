@@ -1,0 +1,12 @@
+[package]
+name = "crossink-font-scripts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "build-japanese-subsets"
+path = "build-japanese-subsets.rs"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -231,3 +231,6 @@ python fontconvert.py inter_8_regular 8 \
 echo ""
 echo "Running compression verification..."
 python verify_compression.py ../builtinFonts/
+
+# Japanese per-glyph fallbacks use a pinned subset and reproducible wrapper.
+cargo run --quiet --locked --manifest-path Cargo.toml --bin build-japanese-subsets --

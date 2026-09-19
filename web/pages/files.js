@@ -5252,8 +5252,27 @@ async function uploadFile() {
     };
 
     try {
-      // Convert EPUB if needed
-      if (needsConversion) {
+      let chapterOptimizationFailed = false;
+      if (isEpub) {
+        progressText.textContent = `Preparing chapters for ${file.name}...`;
+        try {
+          const prepared = await EpubChapters.optimize(file, {
+            cancelled: () => operationCancelled || uploadGeneration !== myGeneration,
+          });
+          file = prepared.file;
+          if (prepared.changed) log(`Prepared chapters for ${file.name}`, "info", "INFO");
+        } catch (chapterError) {
+          if (operationCancelled || uploadGeneration !== myGeneration) {
+            if (uploadGeneration === myGeneration) restoreAfterCancel();
+            return;
+          }
+          chapterOptimizationFailed = true;
+          log(`Chapter optimization skipped for ${file.name}: ${chapterError.message}. Uploading original content.`, "warning", "INFO");
+          showLog();
+        }
+      }
+      // A failed chapter rewrite uploads the intact original content.
+      if (needsConversion && !chapterOptimizationFailed) {
         progressFill.style.backgroundColor = "#9b59b6"; // Purple for conversion
         progressText.textContent = `Converting ${file.name} (${currentIndex + 1}/${files.length})...`;
 
@@ -5305,6 +5324,10 @@ async function uploadFile() {
         }
       }
 
+      if (operationCancelled || uploadGeneration !== myGeneration) {
+        if (uploadGeneration === myGeneration) restoreAfterCancel();
+        return;
+      }
       if (useWebSocket) {
         await uploadFileWebSocket(file, onProgress, null, null);
       } else {

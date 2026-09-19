@@ -42,8 +42,8 @@ class TextBlock {
   uint16_t wordTextLen(const uint16_t index) const { return static_cast<uint16_t>(words_[index].size()); }
   int16_t wordXpos(const uint16_t index) const { return positions_[index]; }
   EpdFontFamily::Style wordStyle(const uint16_t index) const { return styles_[index]; }
-  uint8_t bionicBoundary(const uint16_t index) const { return bionicBoundaries_[index]; }
-  uint16_t bionicRunOffset(const uint16_t index) const { return bionicOffsets_[index]; }
+  uint8_t focusBoundary(const uint16_t index) const { return bionicBoundaries_[index]; }
+  uint16_t focusRunOffset(const uint16_t index) const { return bionicOffsets_[index]; }
   bool wordEndsWithInsertedHyphen(const uint16_t index) const { return (flags_[index] & 0x02U) != 0; }
   const BlockStyle& getBlockStyle() const { return style_; }
   int getRubyShift(const int ascender) const { return ruby_ ? ascender / 2 : 0; }

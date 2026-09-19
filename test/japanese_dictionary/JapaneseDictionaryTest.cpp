@@ -35,6 +35,7 @@
 #include "EpubLookupRequest.h"
 #include "GfxRenderer.h"
 #include "HalStorage.h"
+#include "JapaneseLookupContext.h"
 #include "MangaPageTextSource.h"
 #include "Memory.h"
 #include "PageTextSource.h"
@@ -4150,7 +4151,7 @@ TEST_F(JapaneseDictionaryTest, StarDictProbeLeavesJapaneseOnlyFilterMetadataNeut
   EXPECT_EQ(probe.posFlags, 0);
 }
 
-TEST_F(JapaneseDictionaryTest, ScanCacheSaveWritesTheFrozenLittleEndianV2File) {
+TEST_F(JapaneseDictionaryTest, ScanCacheSaveWritesTheFrozenLittleEndianV3File) {
   auto glyphs = makeScannerGlyphs(U"猫犬");
   ScannerProbeRecorder recorder{{{"猫"}, {"犬"}}};
   PageWordScanner scanner;
@@ -4167,7 +4168,7 @@ TEST_F(JapaneseDictionaryTest, ScanCacheSaveWritesTheFrozenLittleEndianV2File) {
   ASSERT_TRUE(cache.save("/cache/wlscan.bin", identity, scanner, 1));
 
   const std::vector<uint8_t> expected{
-      0x43, 0x57, 0x4c, 0x53, 0x02, 0x01, 0x01, 0x00, 0x03, 0x00, 0x07, 0x00, 0x44, 0x33, 0x22, 0x11,
+      0x43, 0x57, 0x4c, 0x53, 0x03, 0x01, 0x01, 0x00, 0x03, 0x00, 0x07, 0x00, 0x44, 0x33, 0x22, 0x11,
       0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x02, 0x00, 0x01, 0x00, 0x8c, 0x18, 0x5c, 0x2b,
       0x00, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x00, 0x01, 0x00,
   };
@@ -4247,6 +4248,13 @@ TEST_F(JapaneseDictionaryTest, ScanCacheLoadRejectsWrongMagicVersionAndFlags) {
   PageWordScanCache writer;
   ASSERT_TRUE(writer.save("/cache/wlscan.bin", identity, scanner, 0));
   const auto valid = readBytes(resolve("/cache/wlscan.bin"));
+
+  auto versionTwo = valid;
+  versionTwo[4] = 2;
+  versionTwo[5] = 0;
+  writeBytes(resolve("/cache/wlscan.bin"), versionTwo);
+  PageWordScanCache oldVersion;
+  EXPECT_FALSE(oldVersion.load("/cache/wlscan.bin", identity));
 
   for (const size_t byte : {size_t{0}, size_t{4}, size_t{6}}) {
     SCOPED_TRACE(byte);
@@ -6712,8 +6720,12 @@ TEST(MangaPageTextSourceTest, EmptyInvalidScopeAndInvalidGeometryNeverPublishOld
 TEST_F(JapaneseDictionaryTest, MangaSmokeFixtureNeedsStarDictCaseInsensitiveIndexOrdering) {
   // Exact original generic smoke ordering. "This" precedes "text" in byte
   // order but sorts after it under StarDict's case-insensitive comparator.
-  writeStarDict({{"Alignment", "definition"}, {"Reader", "definition"}, {"This", "definition"},
-                 {"paragraph", "definition"}, {"text", "definition"}, {"the", "definition"}});
+  writeStarDict({{"Alignment", "definition"},
+                 {"Reader", "definition"},
+                 {"This", "definition"},
+                 {"paragraph", "definition"},
+                 {"text", "definition"},
+                 {"the", "definition"}});
   std::filesystem::remove(resolve("/dictionaries/en/dict-data.idx.oft"));
   DictionaryEngine engine;
   ASSERT_EQ(engine.open({"en", nullptr}), DictionaryStatus::Found);
@@ -6726,10 +6738,11 @@ TEST_F(JapaneseDictionaryTest, MangaSmokeFixtureNeedsStarDictCaseInsensitiveInde
   OwnedLookupTextSource source;
   ASSERT_EQ(buildMangaLookupTextSource(page, 0, mangaGeometry(), source), DictionaryStatus::Found);
   PageWordScanner scanner;
-  ASSERT_EQ(scanner.begin(source.view(), engine.backendKind(),
-      {&engine, [](void* p, const DictionaryQuery& q, DictionaryProbeResult& r) {
-        return static_cast<DictionaryEngine*>(p)->probe(q, r);
-      }}), DictionaryStatus::Found);
+  ASSERT_EQ(
+      scanner.begin(source.view(), engine.backendKind(),
+                    {&engine, [](void* p, const DictionaryQuery& q,
+                                 DictionaryProbeResult& r) { return static_cast<DictionaryEngine*>(p)->probe(q, r); }}),
+      DictionaryStatus::Found);
   scanToEnd(scanner);
   ASSERT_EQ(scanner.candidateCount(), 2);
   const auto* second = scanner.candidate(1);
@@ -6738,16 +6751,18 @@ TEST_F(JapaneseDictionaryTest, MangaSmokeFixtureNeedsStarDictCaseInsensitiveInde
   EXPECT_EQ(second->glyphCount, 4);
   EXPECT_EQ(second->firstPageWord, 1);
   std::string query;
-  for (int i = 0; i < second->glyphCount; ++i) query += static_cast<char>(source.view().glyphs[second->firstGlyph + i].codepoint);
+  for (int i = 0; i < second->glyphCount; ++i)
+    query += static_cast<char>(source.view().glyphs[second->firstGlyph + i].codepoint);
   EXPECT_EQ(query, "text");
   engine.close();
   // Rewrite ONLY record order, preserving definition offsets and bytes.
   const std::pair<const char*, int> ordered[] = {{"Alignment", 0}, {"paragraph", 3}, {"Reader", 1},
-                                                {"text", 4}, {"the", 5}, {"This", 2}};
+                                                 {"text", 4},      {"the", 5},       {"This", 2}};
   std::vector<uint8_t> index;
   for (const auto& [word, original] : ordered) {
     index.insert(index.end(), word, word + std::strlen(word) + 1);
-    appendBe32(index, original * 10); appendBe32(index, 10);
+    appendBe32(index, original * 10);
+    appendBe32(index, 10);
   }
   writeBytes(resolve("/dictionaries/en/dict-data.idx"), index);
   Dictionary::setLookupDictPathOverride("/dictionaries/en/dict-data");
@@ -7252,4 +7267,231 @@ TEST_F(JapaneseDictionaryTest, VerifiedScanIdentityStarMetadataWidthOptionalSour
   engine.beginScanIdentity(state);
   EXPECT_NE(finishIdentity(engine, state), synonym);
   EXPECT_EQ(hal_storage_test::readBytes[base + ".dict"], 0u);
+}
+
+TEST_F(JapaneseDictionaryTest, KanaMarkerSurvivesLowMergeBudgetAndChunkBoundary) {
+  writeVocab({{"かな", "reading", 190, DictIndexRecord::POS_READING},
+              {"かな", std::string(126, 'x') + "[kana] usual spelling", 180, DictIndexRecord::POS_READING}});
+  DictIndex index;
+  ASSERT_EQ(index.open(), JapaneseDictStatus::Found);
+  for (uint32_t largest : {48u * 1024u, 8u * 1024u}) {
+    dict_arduino_test::maxAllocHeap = largest;
+    bool found = false;
+    ASSERT_EQ(index.checkUsuallyKana("かな", found, DictIndex::DICT_JMDICT), JapaneseDictStatus::Found);
+    EXPECT_TRUE(found);
+  }
+}
+
+TEST_F(JapaneseDictionaryTest, KanaMarkerIgnoresSixthSenseAndReportsIncompleteReads) {
+  writeVocab({{"かな", "one", 199, DictIndexRecord::POS_READING},
+              {"かな", "two", 198, DictIndexRecord::POS_READING},
+              {"かな", "three", 197, DictIndexRecord::POS_READING},
+              {"かな", "four", 196, DictIndexRecord::POS_READING},
+              {"かな", "five", 195, DictIndexRecord::POS_READING},
+              {"かな", "[kana] six", 194, DictIndexRecord::POS_READING}});
+  DictIndex index;
+  ASSERT_EQ(index.open(), JapaneseDictStatus::Found);
+  bool found = true;
+  EXPECT_EQ(index.checkUsuallyKana("かな", found, DictIndex::DICT_JMDICT), JapaneseDictStatus::Found);
+  EXPECT_FALSE(found);
+  hal_storage_test::shortReadPath = "/dictionaries/jp/vocab.dat";
+  hal_storage_test::shortReadOffset = 0;
+  EXPECT_EQ(index.checkUsuallyKana("かな", found, DictIndex::DICT_JMDICT), JapaneseDictStatus::ReadError);
+  EXPECT_FALSE(found);
+  hal_storage_test::reset();
+  dict_memory_test::rejectAll = true;
+  EXPECT_EQ(index.checkUsuallyKana("かな", found, DictIndex::DICT_JMDICT), JapaneseDictStatus::OutOfMemory);
+  EXPECT_FALSE(found);
+}
+
+TEST_F(JapaneseDictionaryTest, KanaProbeCarriesMarkerAndRecoverableFailure) {
+  writeVocab({{"かな", "[kana] word", 100, DictIndexRecord::POS_READING}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryProbeResult result;
+  ASSERT_EQ(engine.probe({"かな"}, result), DictionaryStatus::Found);
+  EXPECT_TRUE(result.usuallyKana);
+  EXPECT_FALSE(result.markerCheckFailed);
+  dict_memory_test::rejectAll = true;
+  ASSERT_EQ(engine.probe({"かな"}, result), DictionaryStatus::Found);
+  EXPECT_FALSE(result.usuallyKana);
+  EXPECT_TRUE(result.markerCheckFailed);
+}
+
+TEST_F(JapaneseDictionaryTest, KanaFailureContinuesScanningWithoutPublishingCache) {
+  writeVocab({{"ふわり", "[kana] word", 100, DictIndexRecord::POS_READING}, {"猫", "cat", 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  const auto glyphs = makeScannerGlyphs(U"ふわり猫");
+  PageWordScanner scanner;
+  auto probe = [](void* context, const DictionaryQuery& query, DictionaryProbeResult& out) {
+    return static_cast<DictionaryEngine*>(context)->probe(query, out);
+  };
+  ASSERT_EQ(scanner.begin({glyphs.data(), 4, 0x11223344}, DictionaryBackendKind::Japanese, {&engine, probe}),
+            DictionaryStatus::Found);
+  hal_storage_test::shortReadPath = "/dictionaries/jp/vocab.dat";
+  hal_storage_test::shortReadOffset = 0;
+  scanToEnd(scanner);
+  EXPECT_TRUE(scanner.completedSuccessfully());
+  EXPECT_FALSE(scanner.cacheable());
+  ASSERT_EQ(scanner.candidateCount(), 1);
+  EXPECT_EQ(scanner.candidate(0)->firstGlyph, 3);
+  PageWordScanCache cache;
+  const auto identity = scanCacheIdentity(4);
+  EXPECT_FALSE(cache.save("/wlscan.bin", identity, scanner, 0));
+  EXPECT_FALSE(std::filesystem::exists(resolve("/wlscan.bin")));
+  hal_storage_test::reset();
+  DictionaryProbeResult recovered;
+  ASSERT_EQ(engine.probe({"ふわり"}, recovered), DictionaryStatus::Found);
+  EXPECT_TRUE(recovered.usuallyKana);
+  ASSERT_EQ(scanner.restart(), DictionaryStatus::Found);
+  scanToEnd(scanner);
+  EXPECT_TRUE(scanner.cacheable());
+  ASSERT_EQ(scanner.candidateCount(), 2);
+  EXPECT_EQ(scanner.candidate(0)->glyphCount, 3);
+  EXPECT_TRUE(cache.save("/wlscan.bin", identity, scanner, 0));
+}
+
+TEST_F(JapaneseDictionaryTest, ShortHiraganaPrefersCanonicalGrammarButNotDigitPrefix) {
+  writeVocab({{"こと", "vocabulary", 200}, {"する", "do", 200, DictIndexRecord::POS_VS}});
+  writeSource("/dictionaries/jp/grammar", {{"こと", "grammar koto", 200}, {"する", "grammar suru", 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  for (const auto& [surface, expected] :
+       std::vector<std::pair<std::string, std::string>>{{"こと", "grammar koto"}, {"した", "grammar suru"}}) {
+    DictionaryResult result;
+    ASSERT_EQ(engine.lookup({surface}, result), DictionaryStatus::Found);
+    std::string definition;
+    ASSERT_EQ(engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled,
+                                      {&definition, acceptDefinitionSpan}),
+              DictionaryStatus::Found);
+    EXPECT_EQ(definition, expected);
+    EXPECT_EQ(result.surface.view(), surface);
+  }
+  DictionaryQuery prefixed{"こと"};
+  prefixed.displayPrefix = "2";
+  DictionaryResult result;
+  ASSERT_EQ(engine.lookup(prefixed, result), DictionaryStatus::Found);
+  std::string definition;
+  ASSERT_EQ(
+      engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled, {&definition, acceptDefinitionSpan}),
+      DictionaryStatus::Found);
+  EXPECT_EQ(definition, "vocabulary");
+}
+
+TEST_F(JapaneseDictionaryTest, ContextGrammarUsesEarliestTieAndHeapGate) {
+  writeVocab({{"猫", "cat", 200}});
+  writeSource("/dictionaries/jp/grammar", {{"あいう", "earliest", 200}, {"いう猫", "later", 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryQuery query{"猫"};
+  query.grammarContext = "あいう猫";
+  query.grammarCursorByteOffset = 9;
+  query.grammarLabel = "Grammar";
+  for (uint32_t heap : {16384u, 16383u}) {
+    dict_arduino_test::maxAllocHeap = heap;
+    DictionaryResult result;
+    ASSERT_EQ(engine.lookup(query, result), DictionaryStatus::Found);
+    std::string definition;
+    ASSERT_EQ(engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled,
+                                      {&definition, acceptDefinitionSpan}),
+              DictionaryStatus::Found);
+    EXPECT_EQ(definition, heap == 16384u ? "cat\n\n— Grammar: あいう —\nearliest" : "cat");
+    EXPECT_EQ(result.headword.view(), "猫");
+  }
+}
+
+TEST_F(JapaneseDictionaryTest, ContextGrammarStopsAtDuplicateLongestHit) {
+  writeVocab({{"こと", "main", 200}});
+  writeSource("/dictionaries/jp/grammar", {{"こと", "preferred", 200}, {"ことになる", "context", 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryQuery query{"こと"};
+  query.grammarContext = "ことになる";
+  query.grammarLabel = "Grammar";
+  DictionaryResult result;
+  ASSERT_EQ(engine.lookup(query, result), DictionaryStatus::Found);
+  std::string definition;
+  ASSERT_EQ(
+      engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled, {&definition, acceptDefinitionSpan}),
+      DictionaryStatus::Found);
+  EXPECT_EQ(definition, "preferred\n\n— Grammar: ことになる —\ncontext");
+  query.grammarContext = "こと";
+  ASSERT_EQ(engine.lookup(query, result), DictionaryStatus::Found);
+  definition.clear();
+  ASSERT_EQ(
+      engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled, {&definition, acceptDefinitionSpan}),
+      DictionaryStatus::Found);
+  EXPECT_EQ(definition, "preferred");
+}
+
+TEST(JapaneseLookupContextTest, BoundsContextToParagraphAndUtf8Characters) {
+  auto glyphs = makeScannerGlyphs(U"abcことになる終端");
+  JapaneseLookupContext context;
+  ASSERT_TRUE(buildJapaneseLookupContext({glyphs.data(), static_cast<uint16_t>(glyphs.size()), 0}, 3, context));
+  EXPECT_EQ(context.cursorByteOffset, 3);
+  EXPECT_EQ(std::string_view(context.text, context.byteCount), "abcことになる終端");
+  glyphs[2].paragraph = 1;
+  ASSERT_TRUE(buildJapaneseLookupContext({glyphs.data(), static_cast<uint16_t>(glyphs.size()), 0}, 3, context));
+  EXPECT_EQ(context.cursorByteOffset, 0);
+  EXPECT_EQ(std::string_view(context.text, context.byteCount), "ことになる終端");
+  EXPECT_FALSE(buildJapaneseLookupContext({}, 0, context));
+  EXPECT_EQ(context.byteCount, 0);
+}
+
+TEST_F(JapaneseDictionaryTest, GrammarDefinitionSurvivesFailedLookup) {
+  writeVocab({{"猫", "cat", 200}});
+  writeSource("/dictionaries/jp/grammar", {{"ことになる", "pattern", 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryQuery query{"猫"};
+  query.grammarContext = "ことになる";
+  query.grammarLabel = "Grammar";
+  DictionaryResult retained;
+  ASSERT_EQ(engine.lookup(query, retained), DictionaryStatus::Found);
+  DictionaryResult failed;
+  ASSERT_EQ(engine.lookup({"未知語"}, failed), DictionaryStatus::NotFound);
+  std::string text;
+  ASSERT_EQ(
+      engine.streamDefinition(retained.definition, DictionaryDefinitionMode::Styled, {&text, acceptDefinitionSpan}),
+      DictionaryStatus::Found);
+  EXPECT_EQ(text, "cat\n\n— Grammar: ことになる —\npattern");
+}
+
+TEST_F(JapaneseDictionaryTest, EqualLongestGrammarHitSuppressesShorterAtThatStart) {
+  writeVocab({{"あいう", "main", 200}});
+  writeSource("/dictionaries/jp/grammar", {{"あいう", "preferred", 200}, {"あい", "must not append", 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryQuery query{"あいう"};
+  query.grammarContext = "あいう";
+  query.grammarLabel = "Grammar";
+  DictionaryResult result;
+  ASSERT_EQ(engine.lookup(query, result), DictionaryStatus::Found);
+  std::string text;
+  ASSERT_EQ(engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled, {&text, acceptDefinitionSpan}),
+            DictionaryStatus::Found);
+  EXPECT_EQ(text, "preferred");
+}
+
+TEST_F(JapaneseDictionaryTest, GrammarContextHonorsTenCharacterLimitAndCancellation) {
+  writeVocab({{"猫", "cat", 200}});
+  writeSource("/dictionaries/jp/grammar",
+              {{"あいうえおかきくけa", "ten", 200}, {"あいうえおかきくけab", "eleven", 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  DictionaryQuery query{"猫"};
+  query.grammarContext = "あいうえおかきくけab";
+  query.grammarLabel = "Grammar";
+  DictionaryResult result;
+  ASSERT_EQ(engine.lookup(query, result), DictionaryStatus::Found);
+  std::string text;
+  ASSERT_EQ(engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled, {&text, acceptDefinitionSpan}),
+            DictionaryStatus::Found);
+  EXPECT_EQ(text, "cat\n\n— Grammar: あいうえおかきくけa —\nten");
+  engine.cancel();
+  text.clear();
+  EXPECT_EQ(engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled, {&text, acceptDefinitionSpan}),
+            DictionaryStatus::Cancelled);
+  EXPECT_TRUE(text.empty());
 }

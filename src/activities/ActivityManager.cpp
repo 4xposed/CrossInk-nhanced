@@ -338,7 +338,6 @@ void ActivityManager::loop() {
       if (!retrySuspensionAfterFailure()) {
         pendingAction = PendingAction::None;
         pendingActivity.reset();
-        openReaderMenuAfterPop = false;
       }
       return;
     }

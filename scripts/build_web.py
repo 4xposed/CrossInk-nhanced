@@ -95,7 +95,7 @@ base = read(WEB, "templates", "base.html")
 for slug, (ident, title, active, head_extra) in PAGES.items():
     page_css = read(WEB, "pages", f"{slug}.css")
     page_html = read(WEB, "pages", f"{slug}.html")
-    page_js_files = ("anki-converter.js", "anki.js") if slug == "anki" else (f"{slug}.js",)
+    page_js_files = ("anki-converter.js", "anki.js") if slug == "anki" else (("epub-chapters.js", "files.js") if slug == "files" else (f"{slug}.js",))
     page_js = "\n".join(read(WEB, "pages", filename).strip() for filename in page_js_files)
     script = f"<script>\n{page_js}\n</script>" if page_js else ""
     values = {

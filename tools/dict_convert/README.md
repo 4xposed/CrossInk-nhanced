@@ -29,3 +29,29 @@ Build separately for each operating system and CPU architecture.
 
 JMdict JSON/archive conversion, automatic downloads, and MDict input are not supported.
 Only Yomitan exports are supported.
+
+## Rebuild sparse indexes
+
+Rebuild `.spx` files from existing `.idx` files without the original dictionary
+source or `.dat` files:
+
+```sh
+./crossink-dict --rebuild-spx /path/to/sdcard/dictionaries/jp
+```
+
+This processes `vocab`, `names`, `grammar`, and legacy `jmdict`/`jmnedict` indexes,
+reporting and skipping missing indexes. It preserves `.idx` and `.dat` files.
+Each sidecar is written to an exclusively created `.spx.tmp` file, synced and
+validated before replacing its `.spx` file. Existing temporary files cause an
+error; inspect them before removing them and retrying. Publication is per sidecar,
+so an error on a later index does not undo earlier successful rebuilds.
+Do not combine `--rebuild-spx` with conversion options.
+
+## Tests
+
+```sh
+cargo test --locked --manifest-path tools/dict_convert/Cargo.toml
+```
+
+Rust tests cover conversion, pinned fixture integrity, sparse-index rebuilding,
+corruption rejection, and safe publication.

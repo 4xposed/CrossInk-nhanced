@@ -8,6 +8,8 @@
 #include "DictIndex.h"
 
 struct WordLookupProbe {
+  bool usuallyKana = false;
+  bool markerCheckFailed = false;
   size_t matchLength = 0;
   bool deinflected = false;
   uint8_t sourceDict = 0;

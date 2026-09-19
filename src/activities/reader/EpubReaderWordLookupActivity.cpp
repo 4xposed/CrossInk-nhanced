@@ -424,8 +424,7 @@ void EpubReaderWordLookupActivity::saveCompleteScanCache() {
       cacheBackend_, spineIndex_, pageIndex_, source.contentHash, cacheDictionarySignature_, source.glyphCount};
   const uint16_t count = cacheLoaded_ ? scanCache_.candidateCount() : scanner_.candidateCount();
   const bool cursorValid = count == 0 ? flow_.cursor() == 0 : flow_.cursor() < count;
-  const bool shouldSave =
-      !sourceTruncated() && (cacheLoaded_ || (scanner_.completedSuccessfully() && !scanner_.truncated()));
+  const bool shouldSave = !sourceTruncated() && (cacheLoaded_ || scanner_.cacheable());
   bool saved = false;
   if (shouldSave && cursorValid) {
     saved = cacheLoaded_ ? scanCache_.saveLoaded(scanCachePath_.data(), identity, flow_.cursor())
@@ -551,14 +550,20 @@ void EpubReaderWordLookupActivity::runWorker() {
     case WorkerJobKind::Lookup:
       pendingResult_ = {};
       pendingSuggestions_ = {};
-      status = engine_.lookup(
-          {lookupText_.view(), 0,
-           engine_.backendKind() == DictionaryBackendKind::Japanese ? DictionaryLookupMode::LongestAtOffset
-                                                                    : DictionaryLookupMode::Token,
-           lookupSyntheticKatakanaName_,
-           lookupSyntheticKatakanaName_ && syntheticNameDefinition_ ? std::string_view(syntheticNameDefinition_)
-                                                                    : std::string_view{}},
-          pendingResult_);
+      {
+        DictionaryQuery query{
+            lookupText_.view(), 0,
+            engine_.backendKind() == DictionaryBackendKind::Japanese ? DictionaryLookupMode::LongestAtOffset
+                                                                     : DictionaryLookupMode::Token,
+            lookupSyntheticKatakanaName_,
+            lookupSyntheticKatakanaName_ && syntheticNameDefinition_ ? std::string_view(syntheticNameDefinition_)
+                                                                     : std::string_view{}};
+        query.grammarContext = {lookupContext_.text, lookupContext_.byteCount};
+        query.grammarCursorByteOffset = lookupContext_.cursorByteOffset;
+        query.displayPrefix = {lookupDisplayPrefix_.data(), lookupDisplayPrefixLength_};
+        query.grammarLabel = tr(STR_GRAMMAR);
+        status = engine_.lookup(query, pendingResult_);
+      }
       if (status == DictionaryStatus::Found && lookupDisplayPrefixLength_ != 0) {
         DictionaryOwnedText displayedHeadword;
         if (!displayedHeadword.assignJoined(std::string_view(lookupDisplayPrefix_.data(), lookupDisplayPrefixLength_),
@@ -626,6 +631,9 @@ DictionaryStatus EpubReaderWordLookupActivity::encodeCandidateText(const PageWor
     lookupDisplayPrefixLength_ = static_cast<uint16_t>(prefixUsed);
     lookupDisplayPrefix_[lookupDisplayPrefixLength_] = '\0';
   }
+  if (engine_.backendKind() == DictionaryBackendKind::Japanese) {
+    buildJapaneseLookupContext(source, start, lookupContext_);
+  }
   for (uint16_t offset = 0; offset < count; ++offset) {
     const PageTextGlyph& glyph = source.glyphs[start + offset];
     if (!appendCodepoint(glyph.codepoint, bytes, sizeof(bytes) - 1, used)) {
@@ -645,6 +653,7 @@ DictionaryStatus EpubReaderWordLookupActivity::encodeCandidateText(const PageWor
 
 DictionaryStatus EpubReaderWordLookupActivity::prepareLookupText(const uint16_t candidateIndex) {
   lookupText_.reset();
+  lookupContext_ = {};
   lookupDisplayPrefixLength_ = 0;
   lookupDisplayPrefix_[0] = '\0';
   lookupSyntheticKatakanaName_ = false;
@@ -1868,6 +1877,9 @@ void EpubReaderWordLookupActivity::renderReaderBackground() {
       auto scope = cache->createPrewarmScope();
       page_->render(renderer, SETTINGS.getReaderFontId(), marginLeft_, marginTop_,
                     ReaderUtils::readerForegroundBlack());
+      if (!scope.endScanAndPrewarm()) {
+        LOG_ERR("WLA", "Could not prewarm reader background; drawing with on-demand glyph loading");
+      }
       page_->render(renderer, SETTINGS.getReaderFontId(), marginLeft_, marginTop_,
                     ReaderUtils::readerForegroundBlack());
     } else {

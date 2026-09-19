@@ -23,9 +23,20 @@ class EpdFontFamily {
   };
 
   explicit EpdFontFamily(const EpdFont* regular, const EpdFont* bold = nullptr, const EpdFont* italic = nullptr,
-                         const EpdFont* boldItalic = nullptr, const EpdFont* fallback = nullptr)
-      : regular(regular), bold(bold), italic(italic), boldItalic(boldItalic), fallback(fallback) {}
+                         const EpdFont* boldItalic = nullptr, const EpdFont* fallback = nullptr,
+                         const EpdFont* japaneseFallback = nullptr)
+      : regular(regular),
+        bold(bold),
+        italic(italic),
+        boldItalic(boldItalic),
+        fallback(fallback),
+        japaneseFallback(japaneseFallback) {}
   ~EpdFontFamily() = default;
+  static void setBuiltinLastResort(const EpdFont* font) { builtinLastResort = font; }
+  static void setSdLastResort(const EpdFont* font) { sdLastResort = font; }
+  static void clearSdLastResort(const EpdFont* font) {
+    if (sdLastResort == font) sdLastResort = nullptr;
+  }
   void getTextDimensions(const char* string, int* w, int* h, Style style = REGULAR) const;
   const EpdFontData* getData(Style style = REGULAR) const;
   GlyphData findGlyphData(uint32_t cp, Style style = REGULAR) const;
@@ -45,6 +56,10 @@ class EpdFontFamily {
   const EpdFont* boldItalic;
   // Optional shared glyphs keep their own bitmap size across font sizes/styles.
   const EpdFont* fallback;
+  const EpdFont* japaneseFallback;
+  // Borrowed: static built-ins, or an SD face detached by its owner before unload.
+  static const EpdFont* builtinLastResort;
+  static const EpdFont* sdLastResort;
 
   const EpdFont* getFont(Style style) const;
 };

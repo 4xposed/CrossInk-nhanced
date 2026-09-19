@@ -408,6 +408,7 @@ DictionaryStatus PageWordScanner::scanJapanese() {
   status =
       probe_.call(probe_.context, {{window.bytes, window.byteCount}, 0, DictionaryLookupMode::LongestAtOffset}, result);
   uint8_t matchedGlyphs = 0;
+  if (result.markerCheckFailed) markerChecksComplete_ = false;
   status = validateProbe(status, result, window, matchedGlyphs);
   if (status != DictionaryStatus::Found) return status;
   if (sokuonTeStart && result.transformed) return DictionaryStatus::NotFound;
@@ -422,6 +423,7 @@ DictionaryStatus PageWordScanner::scanJapanese() {
         probe_.call(probe_.context,
                     {{stemWindow.bytes, stemWindow.byteCount}, 0, DictionaryLookupMode::LongestAtOffset}, stemResult);
     uint8_t stemGlyphs = 0;
+    if (stemResult.markerCheckFailed) markerChecksComplete_ = false;
     status = validateProbe(status, stemResult, stemWindow, stemGlyphs);
     if (status == DictionaryStatus::Found && stemGlyphs == stemWindow.glyphCount &&
         stemResult.matchedBytes == stemWindow.byteCount) {
@@ -439,7 +441,8 @@ DictionaryStatus PageWordScanner::scanJapanese() {
     if (isCjk(codepoint) || isKatakana(codepoint)) allKana = false;
   }
   if (allKana && !result.transformed && filterGlyphs >= 2 &&
-      (result.posFlags & DictionaryProbeResult::kReadingRecord) != 0 && result.priority < kMinCommonReadingPriority) {
+      (result.posFlags & DictionaryProbeResult::kReadingRecord) != 0 && result.priority < kMinCommonReadingPriority &&
+      !result.usuallyKana) {
     return DictionaryStatus::NotFound;
   }
 
@@ -453,6 +456,7 @@ DictionaryStatus PageWordScanner::scanJapanese() {
         probe_.call(probe_.context,
                     {{nextWindow.bytes, nextWindow.byteCount}, 0, DictionaryLookupMode::LongestAtOffset}, nextResult);
     uint8_t nextGlyphs = 0;
+    if (nextResult.markerCheckFailed) markerChecksComplete_ = false;
     status = validateProbe(status, nextResult, nextWindow, nextGlyphs);
     if (status == DictionaryStatus::Found && nextGlyphs >= filterGlyphs) return DictionaryStatus::NotFound;
     if (status != DictionaryStatus::NotFound && status != DictionaryStatus::Found) return status;
@@ -549,6 +553,7 @@ DictionaryStatus PageWordScanner::restart() {
   skipUntil_ = 0;
   done_ = source_.glyphCount == 0;
   truncated_ = false;
+  markerChecksComplete_ = true;
   terminalStatus_ = allocateCandidates(true);
   if (terminalStatus_ != DictionaryStatus::Found) {
     truncated_ = true;
@@ -569,4 +574,5 @@ void PageWordScanner::clear() {
   initialized_ = false;
   done_ = false;
   truncated_ = false;
+  markerChecksComplete_ = true;
 }

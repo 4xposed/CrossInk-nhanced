@@ -140,7 +140,6 @@ class MangaReaderActivity final : public Activity {
   bool queueShortcut(manga::MenuAction action);
   void drawStatusLocked(bool grayMask = false);
   void openLookup(int region = -1);
-  void openTranslation();
   void openLookupHistory();
   void lookupBackgroundLocked(PageTextSourceView source);
   void showLookupMessage(const char* message);

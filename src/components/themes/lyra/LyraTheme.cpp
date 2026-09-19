@@ -593,6 +593,10 @@ void LyraTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
       prewarm.emplace(cache->createPrewarmScope());
       renderer.drawText(UI_12_FONT_ID, 0, 0, book.title.c_str(), true, EpdFontFamily::BOLD);
       renderer.drawText(UI_10_FONT_ID, 0, 0, book.author.c_str());
+      // Prepare glyphs before width measurements and leave scan mode before drawing.
+      if (!prewarm->endScanAndPrewarm()) {
+        LOG_ERR("LYRA", "Home font prewarm failed; using on-demand glyph loading");
+      }
     }
     auto titleLines = renderer.wrappedText(UI_12_FONT_ID, book.title.c_str(), textWidth, 3, EpdFontFamily::BOLD);
 

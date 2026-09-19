@@ -22,7 +22,6 @@
 #include "MangaReaderSelectionActivity.h"
 #include "MangaRegionSelectionActivity.h"
 #include "MangaStatus.h"
-#include "MangaTranslationActivity.h"
 #include "PageTextViewport.h"
 #include "QrDisplayActivity.h"
 #include "ReaderOptionsActivity.h"
@@ -273,7 +272,6 @@ void MangaReaderActivity::showMenuLocked() {
                            tr(STR_ORIENTATION),
                            tr(STR_HOME),
                            tr(STR_LOOKUP),
-                           tr(STR_MANGA_TRANSLATION),
                            tr(STR_LOOKUP_HISTORY),
                            tr(STR_READER_OPTIONS),
                            autoLabel,
@@ -379,9 +377,6 @@ void MangaReaderActivity::handleMenuAction(const MenuAction action) {
       return;
     case MenuAction::Lookup:
       openLookup();
-      return;
-    case MenuAction::Translation:
-      openTranslation();
       return;
     case MenuAction::LookupHistory:
       openLookupHistory();
@@ -833,18 +828,6 @@ void MangaReaderActivity::openLookup(const int region) {
     if (!saved) LOG_ERR("MANGA", "Could not reconstruct or save manga clipping");
     showLookupMessage(saved ? tr(STR_CLIPPING_SAVED) : tr(STR_CLIPPING_FAILED));
   });
-}
-
-void MangaReaderActivity::openTranslation() {
-  auto activity = makeUniqueNoThrow<MangaTranslationActivity>(renderer, mappedInput, page, position.panel);
-  if (!activity) {
-    LOG_ERR("MANGA", "Cannot allocate translation activity");
-    showLookupMessage(tr(STR_MEMORY_ERROR));
-    return;
-  }
-  childActive = true;
-  autoTurn.cancel();
-  startActivityForResult(std::move(activity), [this](const ActivityResult&) { childReturned(); });
 }
 
 void MangaReaderActivity::openLookupHistory() {

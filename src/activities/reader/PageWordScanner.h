@@ -41,6 +41,7 @@ class PageWordScanner {
   // truncated().
   bool completedSuccessfully() const { return initialized_ && done_ && terminalStatus_ == DictionaryStatus::Found; }
   bool truncated() const { return truncated_; }
+  bool cacheable() const { return completedSuccessfully() && !truncated_ && markerChecksComplete_; }
   bool hasProcessedGlyph(uint16_t glyphIndex) const { return initialized_ && scanPos_ > glyphIndex; }
   uint16_t candidateCount() const { return candidateCount_; }
   // Returned storage is immutable and stable until begin(), restart(), clear(),
@@ -63,6 +64,7 @@ class PageWordScanner {
   uint16_t candidateCount_ = 0;
   uint16_t scanPos_ = 0;
   uint16_t skipUntil_ = 0;
+  bool markerChecksComplete_ = true;
   bool initialized_ = false;
   bool done_ = false;
   bool truncated_ = false;

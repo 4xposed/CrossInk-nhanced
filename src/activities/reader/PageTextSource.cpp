@@ -353,8 +353,8 @@ DictionaryStatus visitHorizontalPageWords(const Page& page, GfxRenderer& rendere
       const auto firstStyle = block->wordStyle(0);
       const bool firstIsRtl = BidiUtils::detectParagraphLevel(firstText, block->getBlockStyle().isRtl ? 1 : 0) == 1;
       const int16_t firstWidth =
-          measureBionicText(renderer, fontId, firstText, firstLength, firstStyle, block->bionicBoundary(0),
-                            block->bionicRunOffset(0), firstIsRtl, measurementScratch, scratchCapacity);
+          measureBionicText(renderer, fontId, firstText, firstLength, firstStyle, block->focusBoundary(0),
+                            block->focusRunOffset(0), firstIsRtl, measurementScratch, scratchCapacity);
       const int16_t derivedGap = static_cast<int16_t>(block->wordXpos(1) - block->wordXpos(0) - firstWidth);
       if (derivedGap > naturalSpaceWidth / 2) lineGapWidth = derivedGap;
     }
@@ -382,8 +382,8 @@ DictionaryStatus visitHorizontalPageWords(const Page& page, GfxRenderer& rendere
       word.y = static_cast<int16_t>(line->yPos + marginTop + rubyShift);
       word.height = lineHeight;
       word.style = block->wordStyle(wordIndex);
-      word.bionicBoundary = block->bionicBoundary(wordIndex);
-      word.bionicRunOffset = block->bionicRunOffset(wordIndex);
+      word.bionicBoundary = block->focusBoundary(wordIndex);
+      word.bionicRunOffset = block->focusRunOffset(wordIndex);
       word.isRtl = BidiUtils::detectParagraphLevel(text, block->getBlockStyle().isRtl ? 1 : 0) == 1;
       word.selectable = utf8ContainsLookupCharacter(text);
       word.containsDashSeparator = containsDashSeparator(text, textLength);

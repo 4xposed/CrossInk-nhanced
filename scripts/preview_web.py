@@ -36,7 +36,7 @@ def read(*parts):
 
 def render_page(slug):
     _route, title, active, head_extra = PAGES[slug]
-    js_files = ("anki-converter.js", "anki.js") if slug == "anki" else (f"{slug}.js",)
+    js_files = ("anki-converter.js", "anki.js") if slug == "anki" else (("epub-chapters.js", "files.js") if slug == "files" else (f"{slug}.js",))
     js = "\n".join(read(WEB, "pages", filename).strip() for filename in js_files)
     values = {
         "title": title, "v": "dev", "head_extra": head_extra,

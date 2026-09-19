@@ -62,7 +62,9 @@ class PoolTests(unittest.TestCase):
             self.skipTest("A native C++ compiler is required for compiled equivalence")
         source = ROOT / "lib/EpdFont/builtinFonts"
         fields = ("bitmap glyph intervals intervalCount advanceY ascender descender is2Bit "
-                  "groups groupCount glyphToGroup kernLeftClasses kernRightClasses kernMatrix "
+                  "groups groupCount glyphToGroup kernLeftClasses kernRightClasses "
+                  "kernLeftCodepoints kernLeftClassIds kernRightCodepoints kernRightClassIds "
+                  "kernMatrix kernRowOffsets kernSparseCols kernSparseValues "
                   "kernLeftEntryCount kernRightEntryCount kernLeftClassCount kernRightClassCount "
                   "ligaturePairs ligaturePairCount").split()
         with tempfile.TemporaryDirectory() as temp:
@@ -72,7 +74,7 @@ class PoolTests(unittest.TestCase):
                 body = ["#include <cstdio>", "#include <EpdFontData.h>",
                         "#include <builtinFonts/all.h>", "int main() {"]
                 for relative in pool.font_paths(source):
-                    if not relative.name.startswith("inter_") and ("noemoji" in relative.parts) != noemoji:
+                    if (source / "noemoji" / relative.name).exists() and ("noemoji" in relative.parts) != noemoji:
                         continue
                     original = (source / relative).read_text()
                     for array in pool.parse_arrays(original):
@@ -82,6 +84,7 @@ class PoolTests(unittest.TestCase):
                     # Verify each descriptor's exact scalar value and named table
                     # reference with the compiler, independently of pool parsing.
                     font, initializer = re.search(r"static constexpr EpdFontData (\w+) = \{(.*?)\};", original, re.S).groups()
+                    initializer = re.sub(r"//[^\n]*", "", initializer)
                     values = [value.strip() for value in initializer.split(",") if value.strip()]
                     self.assertEqual(len(fields), len(values))
                     for field, value in zip(fields, values):

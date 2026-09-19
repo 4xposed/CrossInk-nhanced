@@ -6,13 +6,13 @@
 
 int main() {
   using namespace manga;
-  const MenuAction expected[] = {
-      MenuAction::Chapter,    MenuAction::Percent,       MenuAction::Bookmarks,     MenuAction::ToggleBookmark,
-      MenuAction::PanelsOnly, MenuAction::PanelRotation, MenuAction::Orientation,   MenuAction::Home,
-      MenuAction::Lookup,     MenuAction::Translation,   MenuAction::LookupHistory, MenuAction::ReaderSettings,
-      MenuAction::AutoTurn,   MenuAction::Screenshot,    MenuAction::DeleteCache,   MenuAction::OcrQr};
-  for (int i = 0; i < 16; ++i) assert(menuActionAt(i) == expected[i]);
-  assert(menuActionAt(-1) == MenuAction::None && menuActionAt(16) == MenuAction::None);
+  const MenuAction expected[] = {MenuAction::Chapter,        MenuAction::Percent,        MenuAction::Bookmarks,
+                                 MenuAction::ToggleBookmark, MenuAction::PanelsOnly,     MenuAction::PanelRotation,
+                                 MenuAction::Orientation,    MenuAction::Home,           MenuAction::Lookup,
+                                 MenuAction::LookupHistory,  MenuAction::ReaderSettings, MenuAction::AutoTurn,
+                                 MenuAction::Screenshot,     MenuAction::DeleteCache,    MenuAction::OcrQr};
+  for (int i = 0; i < 15; ++i) assert(menuActionAt(i) == expected[i]);
+  assert(menuActionAt(-1) == MenuAction::None && menuActionAt(15) == MenuAction::None);
   constexpr uint32_t intervals[] = {0, 60000, 20000, 10000, 5000};
   for (int rate = 0; rate < 5; ++rate) {
     AutoTurn clock;

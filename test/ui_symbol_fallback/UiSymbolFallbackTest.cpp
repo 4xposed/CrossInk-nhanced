@@ -47,3 +47,26 @@ TEST(UiSymbolFallback, PreservesNormalGlyphsAndMissingGlyphBehavior) {
   EXPECT_FALSE(noFallback.hasCodepoint(POWER));
   EXPECT_EQ(noFallback.getGlyphData(POWER).glyph, smallRegular.getGlyph(REPLACEMENT_GLYPH));
 }
+
+#include <builtinFonts/notosansjp_joyo_12_regular.h>
+
+TEST(UiSymbolFallback, JapaneseFallbackKeepsGlyphOwnerAndPrimaryCoverageSeparate) {
+  const EpdFont japanese(&notosansjp_joyo_12_regular);
+  const EpdFontFamily mixed(&smallRegular, &smallBold, nullptr, nullptr, &symbols, &japanese);
+  EXPECT_EQ(mixed.getGlyphData('A').fontData, &inter_10_regular);
+  EXPECT_EQ(mixed.getGlyphData(POWER).fontData, &ui_symbols_10);
+  EXPECT_EQ(mixed.getGlyphData(0x732B).fontData, &notosansjp_joyo_12_regular);
+  EXPECT_EQ(mixed.getGlyphData(0x732B).glyph, japanese.findGlyph(0x732B));
+  EXPECT_FALSE(mixed.hasCodepoint(0x732B));
+  EpdFontFamily::setBuiltinLastResort(&japanese);
+  EXPECT_EQ(small.getGlyphData(0x732B).fontData, &notosansjp_joyo_12_regular);
+  EpdFontFamily::setBuiltinLastResort(nullptr);
+}
+
+TEST(UiSymbolFallback, SdLastResortCanBeDetachedBeforeFontDestruction) {
+  const EpdFont japanese(&notosansjp_joyo_12_regular);
+  EpdFontFamily::setSdLastResort(&japanese);
+  EXPECT_EQ(small.getGlyphData(0x732B).fontData, &notosansjp_joyo_12_regular);
+  EpdFontFamily::setSdLastResort(nullptr);
+  EXPECT_FALSE(small.findGlyphData(0x732B).glyph);
+}

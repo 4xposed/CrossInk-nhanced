@@ -1,5 +1,4 @@
 #pragma once
-
 #include <Epub/Page.h>
 
 #include <array>
@@ -13,6 +12,7 @@
 #include "DictionaryLookupFlow.h"
 #include "DictionaryScanIdentityPolicy.h"
 #include "EpubLookupRequest.h"
+#include "JapaneseLookupContext.h"
 #include "PageTextSource.h"
 #include "PageWordScanCache.h"
 #include "PageWordScanner.h"
@@ -212,6 +212,7 @@ class EpubReaderWordLookupActivity final : public Activity {
   DictionaryLookupBackChain definitionBackChain_;
   DictionaryResult activeResult_;
   DictionaryResult pendingResult_;
+  JapaneseLookupContext lookupContext_;
   DictionaryOwnedText lookupText_;
   DictionaryOwnedText replacementLookupText_;
   DictionaryOwnedText dictionaryOverridePath_;

@@ -137,6 +137,11 @@ struct DictionaryQuery {
   DictionaryLookupMode mode = DictionaryLookupMode::Token;
   bool synthesizePartialKatakanaName = false;
   std::string_view syntheticNameDefinition;
+  // Borrowed until synchronous lookup returns; activity storage is stable while its worker runs.
+  std::string_view grammarContext;
+  size_t grammarCursorByteOffset = 0;
+  std::string_view displayPrefix;
+  std::string_view grammarLabel;
 };
 
 struct DictionaryProbeResult {
@@ -146,7 +151,9 @@ struct DictionaryProbeResult {
   size_t matchedBytes = 0;
   bool transformed = false;
   uint8_t sourceMask = 0;
-  // Definition-free Japanese scan metadata. StarDict leaves both neutral.
+  // Japanese scan metadata. StarDict leaves these neutral.
+  bool usuallyKana = false;
+  bool markerCheckFailed = false;
   uint8_t priority = 0;
   uint8_t posFlags = 0;
 };

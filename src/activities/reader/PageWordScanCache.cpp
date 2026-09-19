@@ -336,7 +336,7 @@ bool promoteTemp(const SiblingPaths& paths) {
 
 bool PageWordScanCache::save(const char* path, const PageWordScanCacheIdentity& identity,
                              const PageWordScanner& scanner, const uint16_t cursor) {
-  if (!scanner.completedSuccessfully() || scanner.truncated()) {
+  if (!scanner.cacheable()) {
     LOG_ERR(TAG, "Refusing to cache incomplete or truncated wlscan scan");
     return false;
   }

@@ -390,7 +390,7 @@ offset  size  field
 The exact file size is `32 + checkpointCount * 32`, and each checkpoint must
 equal records `0, 48, 96, ...` from the sibling `.idx`. A missing, stale,
 malformed, or allocation-failed sidecar is ignored; lookup falls back to the
-original bounded `.idx` search. `scripts/gen_dict_spx.py` validates a temporary
+original bounded `.idx` search. `crossink-dict --rebuild-spx <directory>` validates a temporary
 file before atomically replacing the sidecar.
 
 ## `ruby.bin`
@@ -431,7 +431,10 @@ sizes. StarDict covers full `.idx`, optional `.syn`, `.ifo`, the resolved base p
 parsed index descriptors, and `.dict` availability/size. Definition payloads and
 rebuildable accelerators (`.spx`, `.qidx`, `.oft`, `.cspt`) are excluded. The binary
 layout remains unchanged; the new domain invalidates earlier sampled identities.
-Pending, failed, cancelled, or truncated scans cannot publish a persistent cache.
+Version 3 invalidates version-2 candidate scans for the usually-kana filter change.
+Pending, failed, cancelled, truncated, or incomplete kana-marker checks cannot
+publish a persistent cache. Marker inspection failures continue scanning for this
+activation but do not persist their incomplete decisions.
 Files are assumed immutable for an active lookup; a new activation always verifies
 again. Large indexes can bypass loading while progressive lookup supplies the first
 definition, then finish verification to allow saving without replacing live candidates.
@@ -439,7 +442,7 @@ Canonical indexes over UINT32_MAX bytes disable cache verification; definition-f
 sizes are captured through the HAL's existing 64-bit size API without reading payloads.
 
 
-### Version 2
+### Version 3
 
 Each EPUB book cache may contain one disposable snapshot of the most recently
 scanned page. All integers are little-endian. The 32-byte header is:
@@ -447,7 +450,7 @@ scanned page. All integers are little-endian. The 32-byte header is:
 ```text
 offset  size  field
 0       4     magic = 0x534c5743 (bytes "CWLS")
-4       1     version = 2
+4       1     version = 3
 5       1     backend: 0 = StarDict, 1 = Japanese
 6       2     flags = 0x0001 (complete scan)
 8       2     spine index (uint16_t LE)

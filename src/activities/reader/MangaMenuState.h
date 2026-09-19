@@ -12,7 +12,6 @@ enum class MenuAction : uint8_t {
   Orientation,
   Home,
   Lookup,
-  Translation,
   LookupHistory,
   ReaderSettings,
   AutoTurn,
@@ -22,7 +21,7 @@ enum class MenuAction : uint8_t {
   None,
   Dismiss
 };
-constexpr int kMenuActionCount = 16;
+constexpr int kMenuActionCount = 15;
 constexpr MenuAction menuActionAt(int index) {
   return index >= 0 && index < kMenuActionCount ? static_cast<MenuAction>(index) : MenuAction::None;
 }

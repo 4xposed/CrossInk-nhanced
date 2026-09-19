@@ -45,6 +45,64 @@ fn sidecar(idx: &[u8]) -> Result<Vec<u8>> {
     Ok(spx)
 }
 
+fn validate_sidecar(idx: &[u8], spx: &[u8]) -> Result<()> {
+    ensure!(spx == sidecar(idx)?, "spx does not match idx");
+    Ok(())
+}
+
+/// Rebuild sidecars without needing the original source or reading definition data.
+#[expect(
+    clippy::print_stdout,
+    reason = "The CLI reports rebuilt and missing indexes."
+)]
+pub(crate) fn rebuild_sparse_indexes(directory: &Path) -> Result<()> {
+    for name in ["vocab", "names", "grammar", "jmdict", "jmnedict"] {
+        let idx_path = directory.join(format!("{name}.idx"));
+        if !exists(&idx_path)? {
+            println!("skip {name}: no {}", idx_path.display());
+            continue;
+        }
+        let idx = read_file(&idx_path)?;
+        let spx = sidecar(&idx).with_context(|| format!("Invalid index {}", idx_path.display()))?;
+        let temporary = directory.join(format!("{name}.spx.tmp"));
+        let destination = directory.join(format!("{name}.spx"));
+        // Exclusive creation preserves any existing recovery file, including symlinks.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| {
+                format!(
+                    "Cannot create {}; inspect any stale temporary file",
+                    temporary.display()
+                )
+            })?;
+        let result = (|| -> Result<()> {
+            file.write_all(&spx)
+                .with_context(|| format!("Cannot write {}", temporary.display()))?;
+            file.sync_all()
+                .with_context(|| format!("Cannot sync {}", temporary.display()))?;
+            drop(file);
+            validate_sidecar(&idx, &read_file(&temporary)?)?;
+            fs::rename(&temporary, &destination)
+                .with_context(|| format!("Cannot publish {}", destination.display()))?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            fs::remove_file(&temporary)
+                .with_context(|| format!("{error:#}; cannot remove {}", temporary.display()))?;
+            return Err(error);
+        }
+        println!(
+            "{name}: {} records -> {} checkpoints ({} bytes, stride={STRIDE})",
+            idx.len() / RECORD_SIZE,
+            (spx.len() - SPX_HEADER_SIZE) / HEADWORD_SIZE,
+            spx.len()
+        );
+    }
+    Ok(())
+}
+
 fn validate(payloads: &[Vec<u8>; 3]) -> Result<()> {
     let [idx, dat, spx] = payloads;
     ensure!(
@@ -75,7 +133,7 @@ fn validate(payloads: &[Vec<u8>; 3]) -> Result<()> {
         );
         previous = Some(key);
     }
-    ensure!(*spx == sidecar(idx)?, "spx does not match idx");
+    validate_sidecar(idx, spx)?;
     Ok(())
 }
 
@@ -317,6 +375,52 @@ fn publish(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn pinned_goldens_have_valid_records_and_sidecars() -> Result<()> {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/japanese_dict_converter/golden");
+        for fixture in ["mini_jmdict", "mini_yomitan"] {
+            let paths = SUFFIXES.map(|suffix| root.join(fixture).join(format!("vocab.{suffix}")));
+            validate(&read_set(paths.each_ref().map(PathBuf::as_path))?)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sidecar_validator_rejects_header_checkpoint_and_size_corruption() -> Result<()> {
+        let mut idx = vec![0; 97 * RECORD_SIZE];
+        for (i, record) in idx.as_chunks_mut::<RECORD_SIZE>().0.iter_mut().enumerate() {
+            record[..3].copy_from_slice(format!("{i:03}").as_bytes());
+        }
+        let valid = sidecar(&idx)?;
+        validate_sidecar(&idx, &valid)?;
+        for offset in [0, 8, 12, 16, 20, 24, 28, 32, 64, 96] {
+            let mut corrupt = valid.clone();
+            corrupt[offset] ^= 1;
+            assert!(
+                validate_sidecar(&idx, &corrupt).is_err(),
+                "corruption at {offset} accepted"
+            );
+        }
+        for length in [0, 31, valid.len() - 1] {
+            assert!(
+                validate_sidecar(&idx, &valid[..length]).is_err(),
+                "truncated sidecar accepted"
+            );
+        }
+        let mut extended = valid.clone();
+        extended.push(0);
+        assert!(
+            validate_sidecar(&idx, &extended).is_err(),
+            "trailing data accepted"
+        );
+        assert!(
+            validate_sidecar(&idx[..idx.len() - 1], &valid).is_err(),
+            "partial index record accepted"
+        );
+        Ok(())
+    }
 
     #[test]
     fn failed_rename_restores_old_set_at_each_publication_step() {

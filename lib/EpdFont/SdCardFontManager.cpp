@@ -8,6 +8,7 @@
 
 SdCardFontManager::~SdCardFontManager() {
   for (auto& lf : loaded_) {
+    EpdFontFamily::clearSdLastResort(lf.font->getEpdFont(0));
     delete lf.font;
   }
 }
@@ -61,6 +62,9 @@ int SdCardFontManager::loadFilePath(const char* path, const char* familyName, ui
 
   EpdFontFamily fontFamily(font->getEpdFont(0), font->getEpdFont(1), font->getEpdFont(2), font->getEpdFont(3));
   renderer.insertFont(fontId, fontFamily);
+  if (fontFamily.hasCodepoint(0x3042) || fontFamily.hasCodepoint(0x30A2)) {
+    EpdFontFamily::setSdLastResort(font->getEpdFont(0));
+  }
   return fontId;
 }
 
@@ -126,6 +130,7 @@ void SdCardFontManager::unloadAll(GfxRenderer& renderer) {
   renderer.clearSdCardFonts();
   for (auto& lf : loaded_) {
     renderer.removeFont(lf.fontId);
+    EpdFontFamily::clearSdLastResort(lf.font->getEpdFont(0));
     delete lf.font;
   }
   loaded_.clear();

@@ -89,6 +89,7 @@ class DictIndex {
                                 uint8_t posMask = 0);
   JapaneseDictStatus lookupExact(std::string_view headword, DictEntry& out, uint8_t dictMask = DICT_ALL,
                                  uint8_t posMask = 0);
+  JapaneseDictStatus checkUsuallyKana(std::string_view headword, bool& found, uint8_t dictMask, uint8_t posMask = 0);
   uint8_t availableSources() const;
   uint64_t signature() const;
   DictionaryScanIdentityStatus beginScanIdentity(DictionaryScanIdentityState& state);

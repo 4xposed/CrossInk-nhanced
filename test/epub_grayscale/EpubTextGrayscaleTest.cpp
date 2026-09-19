@@ -1,5 +1,6 @@
 #include <Epub/blocks/TextBlock.h>
 #include <FontCacheManager.h>
+#include <FontDecompressor.h>
 #include <GfxRenderer.h>
 #include <SdCardFont.h>
 #include <gtest/gtest.h>
@@ -270,4 +271,53 @@ TEST(AbsoluteImageRaster, BitmapPlanesPreserveFourTonesAndWhiteMargins) {
   renderer.setRenderMode(GfxRenderer::BW);
   EXPECT_EQ(display.canceled, 1);
   file.close();
+}
+
+#include <builtinFonts/notosansjp_joyo_12_regular.h>
+
+TEST(EpubTextGrayscaleTest, JapaneseFallbackUsesItsOwnBitmapForNormalAndScaledText) {
+  for (bool fromSd : {false, true}) {
+    fakeheap::reset(true);
+    Storage.reset();
+    RasterFont primary(12), sdFixture(20);
+    // Keep only Latin coverage while retaining a deliberately different bitmap.
+    primary.data.intervalCount = 1;
+    const EpdFont japanese(&notosansjp_joyo_12_regular);
+    SdCardFont sdFont;
+    const EpdFont* fallback = &japanese;
+    if (fromSd) {
+      Storage.put("fallback.cpfont", sdFixture.file());
+      ASSERT_TRUE(sdFont.load("fallback.cpfont"));
+      fallback = sdFont.getEpdFont();
+    }
+    primary.data.ascender = fallback->data->ascender;
+    primary.data.descender = fallback->data->descender;
+    primary.data.advanceY = fallback->data->advanceY;
+    HalDisplay display(800, 480);
+    GfxRenderer renderer(display);
+    renderer.begin();
+    renderer.insertFont(1, EpdFontFamily(&primary.font, nullptr, nullptr, nullptr, nullptr, fallback));
+    renderer.insertFont(2, EpdFontFamily(fallback));
+    if (fromSd) renderer.registerSdCardFont(2, &sdFont);
+    FontCacheManager cache(renderer.getFontMap(), renderer.getSdCardFonts());
+    FontDecompressor decompressor;
+    ASSERT_TRUE(decompressor.init());
+    cache.setFontDecompressor(&decompressor);
+    renderer.setFontCacheManager(&cache);
+    for (auto style : {EpdFontFamily::REGULAR, EpdFontFamily::SUP, EpdFontFamily::SUB}) {
+      for (auto mode : {GfxRenderer::BW, GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+        renderer.setRenderMode(mode);
+        renderer.clearScreen(mode == GfxRenderer::BW ? 255 : 0);
+        const auto blank = display.bw;
+        renderer.drawText(2, 40, 60, "一", true, style);
+        const auto expected = display.bw;
+        if (mode == GfxRenderer::BW) EXPECT_TRUE(expected != blank) << "sd=" << fromSd << " style=" << style;
+        renderer.clearScreen(mode == GfxRenderer::BW ? 255 : 0);
+        renderer.drawText(1, 40, 60, "一", true, style);
+        EXPECT_EQ(display.bw, expected) << "sd=" << fromSd << " style=" << style << " mode=" << mode;
+      }
+    }
+    renderer.setFontCacheManager(nullptr);
+    renderer.clearSdCardFonts();
+  }
 }

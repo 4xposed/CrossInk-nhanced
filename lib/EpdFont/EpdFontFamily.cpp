@@ -4,6 +4,9 @@
 
 #include <algorithm>
 
+const EpdFont* EpdFontFamily::builtinLastResort = nullptr;
+const EpdFont* EpdFontFamily::sdLastResort = nullptr;
+
 const EpdFont* EpdFontFamily::getFont(const Style style) const {
   // Extract font variant bits; decoration and positioning bits do not affect font selection.
   const bool hasBold = (style & BOLD) != 0;
@@ -199,6 +202,11 @@ EpdFontFamily::GlyphData EpdFontFamily::findGlyphData(const uint32_t cp, const S
   if (fallback) {
     if (const EpdGlyph* glyph = fallback->findGlyph(cp)) {
       return {fallback->data, glyph};
+    }
+  }
+  for (const EpdFont* extra : {japaneseFallback, sdLastResort ? sdLastResort : builtinLastResort}) {
+    if (extra) {
+      if (const EpdGlyph* glyph = extra->findGlyph(cp)) return {extra->data, glyph};
     }
   }
   return {nullptr, nullptr};

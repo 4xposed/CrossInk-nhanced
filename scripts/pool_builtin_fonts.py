@@ -81,7 +81,7 @@ def font_paths(source):
     manifest = (source / "all.h").read_text()
     reading = re.findall(r"^#include BUILTIN_READING_FONT_HEADER\((\w+)\)$", manifest, re.M)
     ui = re.findall(r"^#include <builtinFonts/(\w+\.h)>$", manifest, re.M)
-    if not reading or len(reading) + len(ui) != len(re.findall(r"^#include\b", manifest, re.M)):
+    if not (reading or ui) or len(reading) + len(ui) != len(re.findall(r"^#include\b", manifest, re.M)):
         raise ValueError("Unsupported built-in font manifest")
     return sorted([Path(name + ".h") for name in reading]
                   + [Path("noemoji") / (name + ".h") for name in reading]

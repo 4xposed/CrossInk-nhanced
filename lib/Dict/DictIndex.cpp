@@ -646,6 +646,55 @@ JapaneseDictStatus DictIndex::probeExact(std::string_view headword, DictProbe& o
   return JapaneseDictStatus::NotFound;
 }
 
+JapaneseDictStatus DictIndex::checkUsuallyKana(std::string_view headword, bool& found, uint8_t dictMask,
+                                               uint8_t posMask) {
+  found = false;
+  if (!impl_ || availableSources_ == 0) return JapaneseDictStatus::Unavailable;
+  char key[DictIndexRecord::HEADWORD_SIZE];
+  if (!makeKey(headword, key)) return JapaneseDictStatus::NotFound;
+  for (SourceState* source : {&impl_->vocab, &impl_->grammar, &impl_->names}) {
+    if (!source->available || (dictMask & source->source) == 0) continue;
+    size_t count = 0;
+    const auto status = findSiblings(*source, key, posMask, impl_->siblingScratch.data(), count);
+    if (status == JapaneseDictStatus::NotFound) continue;
+    if (status != JapaneseDictStatus::Found) return status;
+    // One bounded, fallible scratch allocation per probe; no merged definitions
+    // or task-stack-sized sense buffers. Released before the next page position.
+    constexpr size_t kChunkBytes = 128;
+    constexpr std::string_view kMarker = "[kana]";
+    auto scratch = makeUniqueNoThrow<char[]>(kChunkBytes);
+    if (!scratch) {
+      LOG_ERR("DICT", "Kana marker scratch allocation failed");
+      return JapaneseDictStatus::OutOfMemory;
+    }
+    size_t selected = 0;
+    for (size_t index = 0; index < count && selected < MAX_MERGED_ENTRIES; ++index) {
+      const auto& sense = impl_->siblingScratch[index];
+      if (sense.length > MAX_DEFINITION_BYTES) continue;
+      ++selected;
+      size_t offset = 0;
+      size_t retained = 0;
+      while (offset < sense.length) {
+        const size_t bytes = std::min(kChunkBytes - retained, static_cast<size_t>(sense.length) - offset);
+        if (!readExact(source->datFile, sense.offset + offset, scratch.get() + retained, bytes)) {
+          LOG_ERR("DICT", "Kana marker definition read failed");
+          return JapaneseDictStatus::ReadError;
+        }
+        const size_t available = retained + bytes;
+        if (std::string_view(scratch.get(), available).find(kMarker) != std::string_view::npos) {
+          found = true;
+          return JapaneseDictStatus::Found;
+        }
+        offset += bytes;
+        retained = std::min(available, kMarker.size() - 1);
+        std::memmove(scratch.get(), scratch.get() + available - retained, retained);
+      }
+    }
+    return JapaneseDictStatus::Found;
+  }
+  return JapaneseDictStatus::NotFound;
+}
+
 JapaneseDictStatus DictIndex::lookupExact(std::string_view headword, DictEntry& out, uint8_t dictMask,
                                           uint8_t posMask) {
   clearEntry(out);

@@ -165,6 +165,14 @@ JapaneseDictStatus WordLookup::probe(std::string_view text, size_t byteOffset, W
   out.sourceDict = match.dictMask;
   out.priority = match.priority;
   out.posFlags = match.posFlags;
+  uint32_t first = 0;
+  size_t firstBytes = 0;
+  if (decodeUtf8(text, byteOffset, first, firstBytes) &&
+      (isHiragana(first) || (first >= 0x30A0 && first <= 0x30FF) || (first >= 0xFF66 && first <= 0xFF9D))) {
+    const auto markerStatus =
+        index_.checkUsuallyKana({match.headword, match.headwordLength}, out.usuallyKana, match.dictMask, match.posMask);
+    out.markerCheckFailed = markerStatus != JapaneseDictStatus::Found;
+  }
   return JapaneseDictStatus::Found;
 }
 
