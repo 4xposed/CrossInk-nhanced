@@ -33,6 +33,8 @@
 
 ### Fixed
 
+- Anki review saves batch SD card operations to reduce exit overhead for large decks while preserving backup recovery.
+
 - Relative ONNX runtime paths now identify the same library for OCR caching and inference; conflicting external initialization is reported explicitly.
 
 - Sparse and mixed-format manga pages retain their original page numbers, keeping overviews aligned with panels and OCR.

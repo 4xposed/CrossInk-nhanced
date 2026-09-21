@@ -81,6 +81,9 @@ jobs:
             ~/.platformio/platforms
           key: ${{ runner.os }}-platformio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
 
+      - name: Install Rust for native build tools
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 

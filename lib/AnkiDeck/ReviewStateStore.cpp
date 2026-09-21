@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 
+#include <algorithm>
 #include <array>
 #include <limits>
 namespace {
@@ -330,15 +331,24 @@ bool ReviewStateStore::writeStateAtomically(bool fromExisting) {
     }
   }
   if (wrote && fromExisting) {
-    std::array<uint8_t, kStateRecordSize> recordBytes{};
-    for (uint32_t index = 0; wrote && index < cardCount_; ++index) {
-      ReviewState state;
-      wrote = readExactly(source, recordBytes.data(), recordBytes.size()) && decodeStateRecord(recordBytes.data(), state);
-      if (wrote) {
-        if (const PendingUpdate* pending = pendingFor(index); pending != nullptr) state = pending->state;
-        encodeStateRecord(recordBytes.data(), state);
-        wrote = writeExactly(temporary, recordBytes.data(), recordBytes.size());
+    constexpr uint32_t kRecordsPerChunk = 32;
+    std::array<uint8_t, kRecordsPerChunk * kStateRecordSize> records{};
+    for (uint32_t first = 0; wrote && first < cardCount_;) {
+      const uint32_t count = std::min(kRecordsPerChunk, cardCount_ - first);
+      const size_t bytes = count * kStateRecordSize;
+      wrote = readExactly(source, records.data(), bytes);
+      for (uint32_t offset = 0; wrote && offset < count; ++offset) {
+        uint8_t* const record = records.data() + offset * kStateRecordSize;
+        ReviewState state;
+        wrote = decodeStateRecord(record, state);
+        if (wrote) {
+          if (const PendingUpdate* pending = pendingFor(first + offset); pending != nullptr) {
+            encodeStateRecord(record, pending->state);
+          }
+        }
       }
+      if (wrote) wrote = writeExactly(temporary, records.data(), bytes);
+      first += count;
     }
   } else if (wrote) {
     InitialStateWriteContext context{this, &temporary};

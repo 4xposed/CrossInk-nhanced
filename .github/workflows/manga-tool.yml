@@ -19,6 +19,8 @@ jobs:
         working-directory: tools/crossink-manga
     steps:
       - uses: actions/checkout@v6
+      - name: Set up Rust for asset verification
+        run: rustup toolchain install stable --profile minimal
       - uses: astral-sh/setup-uv@v7
         with:
           version: '0.11.14'
@@ -27,7 +29,9 @@ jobs:
           uv run --python 3.11 --with mokuro==0.2.5 --with manga-ocr==0.1.16
           --with torch==2.14.0 --with transformers==5.16.1
           --with onnx==1.22.0 --with onnxruntime==1.29.0
-          python dev/prepare_bundle_assets.py --output models-build
+          python dev/prepare_bundle_assets.py --output models-exported
+      - name: Verify and collect exported model assets with Rust
+        run: cargo +stable run --locked --manifest-path xtask/Cargo.toml -- assets --source models-exported --output models-build
       - uses: actions/upload-artifact@v4
         with:
           name: native-ocr-models
@@ -72,18 +76,24 @@ jobs:
           cargo +stable clippy --locked --all-targets -- -D warnings
           cargo +stable test --locked --manifest-path rar-helper/Cargo.toml
           cargo +stable clippy --locked --manifest-path rar-helper/Cargo.toml --all-targets -- -D warnings
+          cargo +stable fmt --check --manifest-path xtask/Cargo.toml
+          cargo +stable test --locked --manifest-path xtask/Cargo.toml
+          cargo +stable clippy --locked --manifest-path xtask/Cargo.toml --all-targets -- -D warnings
       - name: Build executables and gather corresponding source
         run: |
           cargo +stable build --release --locked
           CARGO_TARGET_DIR="$PWD/target" cargo +stable build --release --locked --manifest-path rar-helper/Cargo.toml
-          cargo +stable vendor --locked --sync rar-helper/Cargo.toml vendor > vendor-config.txt
+          cargo +stable vendor --locked --sync rar-helper/Cargo.toml --sync xtask/Cargo.toml vendor > vendor-config.txt
       - name: Locate architecture-specific inference runtime
-        run: uv run --python 3.11 --with onnxruntime==${{ matrix.ort }} python dev/runtime_environment.py
+        run: |
+          uv python install 3.11
+          uv pip install --python 3.11 --target ort-runtime --no-deps onnxruntime==${{ matrix.ort }}
+          cargo +stable run --locked --manifest-path xtask/Cargo.toml -- runtime --root ort-runtime/onnxruntime
       - name: Package native executable, models, runtime and source
         env:
           ARTIFACT_PLATFORM: ${{ runner.os }}-${{ runner.arch }}
           NATIVE_MODELS_DIR: models-build
-        run: python3 package.py
+        run: cargo +stable run --locked --manifest-path xtask/Cargo.toml -- package
       - name: Verify extracted native bundle without Python on PATH
         run: python3 dev/test_bundle.py dist/*.zip
       - uses: actions/upload-artifact@v4

@@ -623,3 +623,42 @@ TEST_F(AnkiDeckTest, ReplacesStateWithZeroIntervalAsCorrupt) {
 }
 
 }  // namespace
+
+TEST_F(AnkiDeckTest, ExitBatchesLargeDeckSaveAndPreservesAllRecords) {
+  FixtureOptions options;
+  options.cardCount = 1025;  // Includes a partial final copy chunk.
+  AnkiDeck deck;
+  ASSERT_TRUE(deck.load(writeDeck(options)));
+  ReviewStateStore state;
+  ASSERT_TRUE(state.open(deck));
+  const ReviewState updated{42, 7, ReviewKind::Learning, 3};
+  for (uint32_t index : {0u, 31u, 32u, 1024u}) {
+    ASSERT_TRUE(state.replaceAndAdvance(index, updated, 1000));
+  }
+  HalFile::readCalls = 0;
+  HalFile::writeCalls = 0;
+  ASSERT_TRUE(state.onExit());
+  // Save must amortize storage locking rather than issuing I/O per card.
+  EXPECT_LT(HalFile::readCalls, 100u);
+  EXPECT_LT(HalFile::writeCalls, 100u);
+
+  ReviewStateStore reopened;
+  ASSERT_TRUE(reopened.open(deck));
+  EXPECT_EQ(reopened.reviewCount(), 4u);
+  ASSERT_TRUE(reopened.beginStream());
+  for (uint32_t index = 0; index < options.cardCount; ++index) {
+    ReviewState actual;
+    ASSERT_TRUE(reopened.readNext(actual));
+    const bool changed = index == 0 || index == 31 || index == 32 || index == 1024;
+    EXPECT_EQ(actual.dueDay, changed ? 42u : 0u);
+    EXPECT_EQ(actual.intervalDays, changed ? 7u : 1u);
+    EXPECT_EQ(actual.kind, changed ? ReviewKind::Learning : ReviewKind::New);
+    EXPECT_EQ(actual.flags, changed ? 3u : 0u);
+  }
+  reopened.endStream();
+  HalFile::readCalls = 0;
+  HalFile::writeCalls = 0;
+  ASSERT_TRUE(reopened.onExit());
+  EXPECT_EQ(HalFile::readCalls, 0u);
+  EXPECT_EQ(HalFile::writeCalls, 0u);
+}

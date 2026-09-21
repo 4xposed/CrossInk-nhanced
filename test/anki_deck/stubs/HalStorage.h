@@ -8,6 +8,8 @@
 
 class HalFile {
  public:
+  inline static size_t readCalls = 0;
+  inline static size_t writeCalls = 0;
   HalFile() = default;
   ~HalFile() { close(); }
   HalFile(HalFile&&) = default;
@@ -21,10 +23,12 @@ class HalFile {
     return stream_.is_open();
   }
   int read(void* data, size_t count) {
+    ++readCalls;
     stream_.read(static_cast<char*>(data), static_cast<std::streamsize>(count));
     return static_cast<int>(stream_.gcount());
   }
   size_t write(const void* data, size_t count) {
+    ++writeCalls;
     stream_.write(static_cast<const char*>(data), static_cast<std::streamsize>(count));
     return stream_ ? count : 0;
   }
