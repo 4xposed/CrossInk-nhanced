@@ -18,6 +18,7 @@ tempfile = "3"
 zip = { version = "8", default-features = false, features = ["deflate", "bzip2", "zstd"] }
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
 ndarray = "0.16"
+roxmltree = "0.20"
 
 [profile.release]
 lto = "thin"

@@ -11,6 +11,7 @@ anyhow = "1"
 tempfile = "3"
 zip = { version = "8", default-features = false, features = ["deflate", "bzip2", "zstd"] }
 unrar = "0.5"
+roxmltree = "0.20"
 
 [profile.release]
 lto = "thin"

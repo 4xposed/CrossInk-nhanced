@@ -6,50 +6,28 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("font_pool", ROOT / "scripts/pool_builtin_fonts.py")
+SPEC = importlib.util.spec_from_file_location("font_pool", ROOT / "test/builtin_font_pool/pool_reference.py")
 pool = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pool)
 
 
+def rust_generate(source, output):
+    command = ["cargo", "run", "--quiet", "--locked", "--manifest-path",
+               str(ROOT / "lib/EpdFont/scripts/Cargo.toml"), "--bin", "pool-builtin-fonts",
+               "--", "--source", str(source), "--output", str(output)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError(result.stderr)
+    import json
+    return json.loads(result.stdout)
+
+
+pool.generate = rust_generate
+
+
 class PoolTests(unittest.TestCase):
-    def test_hook_priority_survives_later_library_include_prepend(self):
-        compiler = shutil.which("c++")
-        if not compiler:
-            self.skipTest("A native C++ compiler is required for include ordering")
-        with tempfile.TemporaryDirectory(prefix="font pool ") as temp:
-            root = Path(temp)
-            generated = root / "build/pooled-fonts"
-            original = root / "library"
-            for directory, marker in ((generated, 1), (original, 0)):
-                (directory / "builtinFonts").mkdir(parents=True)
-                (directory / "builtinFonts/all.h").write_text("#include <builtinFonts/child.h>\n")
-                (directory / "builtinFonts/child.h").write_text(f"#define POOLED_FONT_MARKER {marker}\n")
-
-            class Environment(dict):
-                def subst(self, text):
-                    return {"$PROJECT_DIR": str(ROOT), "$BUILD_DIR": str(root / "build")}[text]
-
-                def Prepend(self, **values):
-                    for key, value in values.items():
-                        self[key] = value + self.get(key, [])
-
-            env = Environment()
-            hook = ROOT / "scripts/pool_builtin_fonts_pio.py"
-            with patch("runpy.run_path", return_value={"generate": lambda *_: None}):
-                exec(compile(hook.read_text(), str(hook), "exec"), {"env": env, "Import": lambda *_: None})
-            # PlatformIO's library builder prepends library directories AFTER
-            # pre-scripts. SCons emits CCFLAGS before its $_CPPINCFLAGS expansion.
-            env.Prepend(CPPPATH=[str(original)])
-            cpp = root / "check.cpp"
-            cpp.write_text("#include <builtinFonts/all.h>\nstatic_assert(POOLED_FONT_MARKER == 1, \"Original fonts selected\");\n")
-            command = [compiler, "-std=c++17", "-fsyntax-only"] + env.get("CCFLAGS", [])
-            for include in env.get("CPPPATH", []):
-                command.extend(["-I", include])
-            subprocess.run(command + [str(cpp)], check=True, capture_output=True)
-
     def test_source_directory_cannot_be_overwritten(self):
         source = ROOT / "lib/EpdFont/builtinFonts"
         for destination in (source, source.parent):
@@ -107,18 +85,26 @@ class PoolTests(unittest.TestCase):
                 self.assertEqual(results[0], results[1], f"Compiled tables differ: noemoji={noemoji}")
 
     def test_types_and_values_are_part_of_identity(self):
-        arrays = pool.parse_arrays("""
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            source.mkdir()
+            (source / "all.h").write_text("#include <builtinFonts/example.h>\n")
+            (source / "example.h").write_text("""
 static const uint8_t a[] = {1, 2};
 static const int8_t b[] = {1, 2};
 static const uint8_t c[2] = {0x1, 2};
 static const uint8_t d[] = {1, 3};
 """)
-        self.assertNotEqual(arrays[0]["key"], arrays[1]["key"])
-        self.assertEqual(arrays[0]["key"], arrays[2]["key"])
-        self.assertNotEqual(arrays[0]["key"], arrays[3]["key"])
+            output = Path(temp) / "output"
+            pool.generate(source, output)
+            text = (output / "builtinFonts/example.h").read_text()
+            aliases = dict(re.findall(r"#define (\w+) (\w+)", text))
+            self.assertEqual(aliases["a"], aliases["c"])
+            self.assertNotIn("b", aliases)
+            self.assertNotIn("d", aliases)
 
     def test_unsupported_initializers_fail_closed(self):
-        for source in (
+        for text in (
             "static const uint8_t a[] = {SOME_MACRO};",
             "static const uint8_t a[] = {1 << 2};",
             "static const uint8_t a[3] = {1, 2};",
@@ -126,8 +112,15 @@ static const uint8_t d[] = {1, 3};
             "static const uint8_t a[] = {256};",
             "static const EpdUnicodeInterval a[] = {{1, 2}};",
         ):
-            with self.subTest(source=source), self.assertRaises(ValueError):
-                pool.parse_arrays(source)
+            with tempfile.TemporaryDirectory() as temp:
+                source = Path(temp) / "source"
+                source.mkdir()
+                (source / "all.h").write_text("#include <builtinFonts/example.h>\n")
+                (source / "example.h").write_text(text)
+                output = Path(temp) / "output"
+                with self.subTest(source=text), self.assertRaises(ValueError):
+                    pool.generate(source, output)
+                self.assertFalse(output.exists())
 
     def test_real_headers_equivalent_and_reproducible(self):
         source = ROOT / "lib/EpdFont/builtinFonts"

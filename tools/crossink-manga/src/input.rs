@@ -13,17 +13,6 @@ pub const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum total uncompressed size of all source images (4 GiB).
 pub const MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Copies supported source images into `destination` and returns their absolute
-/// paths in deterministic natural relative-path order.
-///
-/// Directory trees and archive folders are preserved so repeated basenames in
-/// different chapters remain distinct. ZIP/CBZ and RAR/CBR inputs are bounded
-/// by [`MAX_IMAGE_FILES`], [`MAX_ENTRY_BYTES`], and [`MAX_TOTAL_BYTES`].
-///
-/// # Errors
-///
-/// Returns an error for unsupported inputs, empty inputs, unsafe archive paths,
-/// links, duplicate normalized paths, corrupt archives, or exceeded limits.
 pub fn collect(input: &Path, destination: &Path) -> Result<Vec<PathBuf>> {
     let metadata = fs::symlink_metadata(input)
         .with_context(|| format!("inspect input {}", input.display()))?;
@@ -40,11 +29,220 @@ pub fn collect(input: &Path, destination: &Path) -> Result<Vec<PathBuf>> {
     match lowercase_extension(input).as_deref() {
         Some("zip" | "cbz") => collect_zip(input, destination),
         Some("rar" | "cbr") => collect_rar(input, destination),
+        Some("epub") => collect_epub(input, destination),
+        Some("pdf") => collect_pdf(input, destination),
         _ => bail!(
-            "unsupported input type: {}; expected a folder, CBZ/ZIP, or CBR/RAR archive",
+            "unsupported input type: {}; expected a folder, CBZ/ZIP, CBR/RAR, EPUB, or PDF",
             input.display()
         ),
     }
+}
+
+fn collect_pdf(input: &Path, destination: &Path) -> Result<Vec<PathBuf>> {
+    use std::process::{Command, Stdio};
+    let input = fs::canonicalize(input).context("resolve PDF path")?;
+    let info = Command::new("pdfinfo")
+        .env("LC_ALL", "C")
+        .arg(&input)
+        .output()
+        .context("PDF input requires native Poppler pdfinfo and pdftoppm on PATH")?;
+    anyhow::ensure!(
+        info.status.success(),
+        "PDF inspection failed: {}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    let info = String::from_utf8(info.stdout).context("PDF metadata is not UTF-8")?;
+    let count: usize = info
+        .lines()
+        .find_map(|line| line.strip_prefix("Pages:"))
+        .context("PDF page count missing")?
+        .trim()
+        .parse()
+        .context("invalid PDF page count")?;
+    anyhow::ensure!(
+        (1..=MAX_IMAGE_FILES).contains(&count),
+        "PDF page count exceeds supported limit"
+    );
+    // Render one page at a time so expansion limits are checked before continuing.
+    // Both Poppler executables are native C++, not Python adapters.
+    let temporary = tempfile::tempdir().context("create PDF rendering directory")?;
+    let destination = prepare_destination(destination)?;
+    let mut pages = Vec::with_capacity(count);
+    let mut total = 0;
+    for page in 1..=count {
+        let prefix = temporary.path().join("page");
+        let status = Command::new("pdftoppm")
+            .args([
+                "-f",
+                &page.to_string(),
+                "-l",
+                &page.to_string(),
+                "-singlefile",
+                "-r",
+                "144",
+                "-png",
+            ])
+            .arg(&input)
+            .arg(&prefix)
+            .stdin(Stdio::null())
+            .status()
+            .context("PDF input requires native Poppler pdftoppm on PATH")?;
+        anyhow::ensure!(status.success(), "PDF rendering failed on page {page}");
+        let source = prefix.with_extension("png");
+        let size = fs::metadata(&source)
+            .context("PDF renderer produced no PNG")?
+            .len();
+        let target = destination.join(format!("pdfpage_{:05}.png", page - 1));
+        copy_reader_bounded(File::open(&source)?, &target, size, &mut total)?;
+        fs::remove_file(source)?;
+        pages.push(target);
+    }
+    Ok(pages)
+}
+
+// XML and XHTML are separately bounded: an image-sized metadata allocation is unnecessary.
+fn read_epub_xml(archive: &mut zip::ZipArchive<File>, name: &str) -> Result<String> {
+    let entry = archive
+        .by_name(name)
+        .with_context(|| format!("EPUB member {name}"))?;
+    let limit = 8 * 1024 * 1024;
+    anyhow::ensure!(entry.size() <= limit, "EPUB XML exceeds 8 MiB: {name}");
+    let mut text = String::new();
+    entry.take(limit + 1).read_to_string(&mut text)?;
+    anyhow::ensure!(text.len() as u64 <= limit, "EPUB XML exceeds 8 MiB: {name}");
+    Ok(text)
+}
+
+pub(crate) fn resolve_epub_path(base: &str, href: &str) -> Result<String> {
+    let href = href.split(['#', '?']).next().unwrap_or("");
+    let mut decoded = Vec::with_capacity(href.len());
+    let mut bytes = href.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = bytes
+                .next()
+                .and_then(|b| (b as char).to_digit(16))
+                .context("invalid EPUB URI escape")?;
+            let low = bytes
+                .next()
+                .and_then(|b| (b as char).to_digit(16))
+                .context("invalid EPUB URI escape")?;
+            decoded.push((high * 16 + low) as u8);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    let decoded = String::from_utf8(decoded).context("EPUB URI is not UTF-8")?;
+    let href = decoded.as_str();
+    anyhow::ensure!(
+        !href.contains(':')
+            && !href.starts_with('/')
+            && !href.contains('\\')
+            && !href.contains('\0'),
+        "external or absolute EPUB reference: {href}"
+    );
+    let mut parts: Vec<&str> = base
+        .rsplit_once('/')
+        .map_or("", |(dir, _)| dir)
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    for part in href.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                anyhow::ensure!(
+                    parts.pop().is_some(),
+                    "EPUB reference escapes archive: {href}"
+                );
+            }
+            _ => parts.push(part),
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+fn collect_epub(input: &Path, destination: &Path) -> Result<Vec<PathBuf>> {
+    let mut archive = zip::ZipArchive::new(File::open(input)?)?;
+    // Validate the entire namespace before resolving references, including unselected entries.
+    let mut seen = HashSet::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        if let Some((_, name)) = normalize_archive_path(entry.name())? {
+            anyhow::ensure!(seen.insert(name), "duplicate EPUB archive path");
+        }
+        anyhow::ensure!(
+            !entry
+                .unix_mode()
+                .is_some_and(|mode| mode & 0o170000 == 0o120000),
+            "EPUB symbolic links are not allowed"
+        );
+    }
+    let container = read_epub_xml(&mut archive, "META-INF/container.xml")?;
+    let doc = roxmltree::Document::parse(&container).context("parse EPUB container")?;
+    let opf = doc
+        .descendants()
+        .find(|n| n.has_tag_name("rootfile"))
+        .and_then(|n| n.attribute("full-path"))
+        .context("EPUB rootfile missing")?;
+    let opf = resolve_epub_path("", opf)?;
+    let package = read_epub_xml(&mut archive, &opf)?;
+    let doc = roxmltree::Document::parse(&package).context("parse EPUB package")?;
+    let manifest: std::collections::HashMap<_, _> = doc
+        .descendants()
+        .filter(|n| n.has_tag_name("item"))
+        .filter_map(|n| Some((n.attribute("id")?, n.attribute("href")?)))
+        .collect();
+    let mut sources = Vec::new();
+    let mut total = 0;
+    for (spine_index, item) in doc
+        .descendants()
+        .filter(|n| n.has_tag_name("itemref"))
+        .enumerate()
+    {
+        let id = item
+            .attribute("idref")
+            .context("EPUB spine idref missing")?;
+        let href = manifest
+            .get(id)
+            .with_context(|| format!("EPUB manifest missing {id}"))?;
+        let path = resolve_epub_path(&opf, href)?;
+        let source = if is_supported_image(Path::new(&path)) {
+            path
+        } else {
+            let wrapper = read_epub_xml(&mut archive, &path)?;
+            let page = roxmltree::Document::parse(&wrapper).context("parse EPUB image page")?;
+            let source = page
+                .descendants()
+                .filter(|n| n.has_tag_name("img") || n.has_tag_name("image"))
+                .flat_map(|n| n.attributes())
+                .filter(|a| matches!(a.name(), "src" | "href"))
+                .filter_map(|a| resolve_epub_path(&path, a.value()).ok())
+                .find(|p| is_supported_image(Path::new(p)) && archive.by_name(p).is_ok());
+            let Some(source) = source else {
+                eprintln!("Warning: EPUB spine page has no supported image, skipping: {path}");
+                continue;
+            };
+            source
+        };
+        let size = archive.by_name(&source)?.size();
+        check_declared_entry(size, &mut total, sources.len() + 1)?;
+        sources.push((spine_index, source, size));
+    }
+    anyhow::ensure!(!sources.is_empty(), "EPUB contains no spine images");
+    let destination = prepare_destination(destination)?;
+    let mut output = Vec::with_capacity(sources.len());
+    let mut total = 0;
+    for (index, source, size) in &sources {
+        let extension = Path::new(source)
+            .extension()
+            .context("image extension missing")?
+            .to_string_lossy();
+        let target = destination.join(format!("spine_{index:05}.{extension}"));
+        copy_reader_bounded(archive.by_name(source)?, &target, *size, &mut total)?;
+        output.push(target);
+    }
+    Ok(output)
 }
 
 fn collect_folder(input: &Path, destination: &Path) -> Result<Vec<PathBuf>> {
@@ -528,6 +726,16 @@ mod tests {
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
 
+    #[test]
+    fn epub_references_decode_uri_paths_before_safety_checks() {
+        assert_eq!(
+            super::resolve_epub_path("OPS/page.xhtml", "images/page%20one.png").unwrap(),
+            "OPS/images/page one.png"
+        );
+        assert!(super::resolve_epub_path("OPS/page.xhtml", "%2e%2e/%2e%2e/escape.png").is_err());
+        assert!(super::resolve_epub_path("OPS/page.xhtml", "%2fetc/passwd").is_err());
+    }
+
     fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
         let file = fs::File::create(path).expect("create zip fixture");
         let mut archive = zip::ZipWriter::new(file);
@@ -549,6 +757,39 @@ mod tests {
                     .into()
             })
             .collect()
+    }
+
+    #[test]
+    fn epub_should_follow_spine_and_resolve_wrapper_images() {
+        let dir = TempDir::new().unwrap();
+        let book = dir.path().join("book.epub");
+        write_zip(&book, &[
+            ("META-INF/container.xml", br#"<container><rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles></container>"#),
+            ("OPS/book.opf", br#"<package><manifest><item id="text" href="pages/text.xhtml"/><item href="pages/second.xhtml" id="second"/><item id="first" href="images/01.png"/></manifest><spine><itemref idref="text"/><itemref idref="second"/><itemref idref="first"/></spine></package>"#),
+            ("OPS/pages/text.xhtml", b"<html><p>copyright</p></html>"),
+            ("OPS/pages/second.xhtml", br#"<html><script src="kobo.js"/><img src="../images/02.png#fragment"/></html>"#),
+            ("OPS/images/01.png", b"first"),
+            ("OPS/images/02.png", b"second"),
+            ("OPS/images/unused.png", b"unused"),
+        ]);
+        let pages = collect(&book, &dir.path().join("out")).unwrap();
+        assert_eq!(
+            pages
+                .iter()
+                .map(|p| fs::read(p).unwrap())
+                .collect::<Vec<_>>(),
+            [b"second".to_vec(), b"first".to_vec()]
+        );
+    }
+
+    #[test]
+    fn malformed_pdf_reports_native_pdf_error() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("bad.pdf");
+        fs::write(&input, b"not a PDF").unwrap();
+        let error = collect(&input, &dir.path().join("out")).unwrap_err();
+        assert!(format!("{error:#}").contains("PDF"));
+        assert!(!error.to_string().contains("unsupported input type"));
     }
 
     #[test]
@@ -807,8 +1048,8 @@ exit 7"#,
     #[test]
     fn unsupported_input_file_should_return_clear_error() {
         let fixture = TempDir::new().expect("fixture directory");
-        let input = fixture.path().join("volume.pdf");
-        fs::write(&input, b"pdf").expect("fixture");
+        let input = fixture.path().join("volume.txt");
+        fs::write(&input, b"text").expect("fixture");
 
         let error = collect(&input, &fixture.path().join("owned")).expect_err("reject input");
 

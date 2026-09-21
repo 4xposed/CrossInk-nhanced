@@ -1,7 +1,6 @@
 use crate::{
     format, input, mokuro,
     panels::{self, Rect},
-    runtime,
 };
 use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, GenericImageView};
@@ -22,7 +21,6 @@ pub struct Options {
     pub dither: format::Dither,
     pub mokuro: Option<PathBuf>,
     pub panel_map: Option<PathBuf>,
-    pub uv: Option<PathBuf>,
     pub work: Option<PathBuf>,
     pub title: Option<String>,
 }
@@ -389,9 +387,6 @@ pub fn convert(input_path: &Path, output: &Path, options: &Options) -> Result<()
             crate::native::Backend::Native => {
                 crate::native::run(&work.join("crops"), options.models.as_deref())?
             }
-            crate::native::Backend::Upstream => {
-                runtime::run_mokuro(&work.join("crops"), options.uv.as_deref())?
-            }
         }
     };
     ensure!(
@@ -408,7 +403,6 @@ pub fn convert(input_path: &Path, output: &Path, options: &Options) -> Result<()
         } else {
             match options.backend {
                 crate::native::Backend::Native => "native",
-                crate::native::Backend::Upstream => "upstream",
             }
         }
         .into(),

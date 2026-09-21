@@ -1,7 +1,8 @@
 //! Rebuild the two Japanese fallback headers using the pinned font inputs.
-//! Run with `cargo run --manifest-path lib/EpdFont/scripts/Cargo.toml -- [--source FONT]`.
-//! Python remains required by fontconvert and the fontTools subset adapter.
+//! Run with `cargo run --manifest-path lib/EpdFont/scripts/Cargo.toml --bin build-japanese-subsets -- [--source FONT]`.
+//! The upstream fontconvert requires Python; source preparation uses native HarfBuzz.
 
+use sha2::{Digest, Sha256};
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
@@ -58,32 +59,66 @@ fn checked_output(command: &mut Command, description: &str) -> Result<Output> {
     Ok(output)
 }
 
-// fontTools owns variable-font instancing and TrueType subsetting. Keep this
-// adapter on its existing API so the pinned font bytes and hash stay compatible.
-const SUBSET_FONT: &str = r#"
-import hashlib
-from pathlib import Path
-import sys
-from fontTools.ttLib import TTFont
-from fontTools.varLib.instancer import instantiateVariableFont
-from fontTools import subset
-
-source, output, coverage, checksum = map(Path, sys.argv[1:])
-points = [int(line, 16) for line in coverage.read_text().splitlines()
-          if line.strip() and not line.strip().startswith('#')]
-font = TTFont(source, recalcTimestamp=False)
-if 'fvar' in font:
-    font = instantiateVariableFont(font, {'wght': 400}, inplace=True)
-options = subset.Options()
-options.recalc_timestamp = False
-options.name_IDs = ['*']
-sub = subset.Subsetter(options=options)
-sub.populate(unicodes=points)
-sub.subset(font)
-font.save(output)
-font.close()
-checksum.write_text(hashlib.sha256(source.read_bytes()).hexdigest() + '\n')
-"#;
+// HarfBuzz performs native variable-font instancing and subsetting. Validate the
+// generated face before replacing a pinned input: a failed subprocess must not
+// leave an empty or incomplete font behind.
+fn subset_font(
+    source: &Path,
+    output: &Path,
+    ranges: &[(u32, u32)],
+    harfbuzz: &OsString,
+) -> Result<()> {
+    let input = fs::read(source)?;
+    let face = ttf_parser::Face::parse(&input, 0)?;
+    let variable_weight = face
+        .variation_axes()
+        .into_iter()
+        .any(|axis| axis.tag == ttf_parser::Tag::from_bytes(b"wght"));
+    let temporary = output.with_extension("subset.tmp");
+    let unicodes = ranges
+        .iter()
+        .map(|(a, b)| format!("{a:X}-{b:X}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut command = Command::new(harfbuzz);
+    command
+        .arg(source)
+        .arg(format!("--unicodes={unicodes}"))
+        .args(["--name-IDs=*", "--name-languages=*", "--name-legacy"]);
+    if variable_weight {
+        command.arg("--variations=wght=400");
+    }
+    command.arg("--output-file").arg(&temporary);
+    let result = (|| -> Result<()> {
+        checked_output(
+            &mut command,
+            "HarfBuzz subset generation (install hb-subset or set HB_SUBSET)",
+        )?;
+        let bytes = fs::read(&temporary)?;
+        let face = ttf_parser::Face::parse(&bytes, 0)?;
+        if face
+            .variation_axes()
+            .into_iter()
+            .any(|axis| axis.tag == ttf_parser::Tag::from_bytes(b"wght"))
+        {
+            return Err("HarfBuzz did not pin the weight axis".into());
+        }
+        for &(first, last) in ranges {
+            for point in first..=last {
+                let character = char::from_u32(point).ok_or("Invalid Unicode coverage")?;
+                if face.glyph_index(character).is_none() {
+                    return Err(format!("Subset lacks U+{point:04X}").into());
+                }
+            }
+        }
+        fs::rename(&temporary, output)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
 
 fn generate(here: &Path, python: &OsString, source: Option<&Path>) -> Result<()> {
     let fonts = here.join("../builtinFonts");
@@ -93,16 +128,15 @@ fn generate(here: &Path, python: &OsString, source: Option<&Path>) -> Result<()>
         .map_err(|error| format!("Could not read {}: {error}", coverage.display()))?;
     let ranges = intervals(&text)?;
     if let Some(source) = source {
-        checked_output(
-            Command::new(python)
-                .arg("-c")
-                .arg(SUBSET_FONT)
-                .arg(source)
-                .arg(pinned.join("NotoSansJP-Regular.ttf"))
-                .arg(&coverage)
-                .arg(pinned.join("source-sha256.txt")),
-            "fontTools subset generation",
+        let source_hash = format!("{:x}\n", Sha256::digest(fs::read(source)?));
+        let harfbuzz = env::var_os("HB_SUBSET").unwrap_or_else(|| "hb-subset".into());
+        subset_font(
+            source,
+            &pinned.join("NotoSansJP-Regular.ttf"),
+            &ranges,
+            &harfbuzz,
         )?;
+        fs::write(pinned.join("source-sha256.txt"), source_hash)?;
     }
     for size in [8, 12] {
         let name = format!("notosansjp_joyo_{size}_regular");
@@ -136,7 +170,7 @@ fn run() -> Result<()> {
     let mut args = env::args_os().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Rebuild the firmware's two Japanese fallback headers from pinned font inputs.\n\nUsage: build-japanese-subsets [--source FONT]\n\n  --source FONT  Replace the pinned source with a regular-weight subset of FONT\n\nSet PYTHON to the Python interpreter containing fontTools and freetype-py (default: python3).");
+            println!("Rebuild the firmware's two Japanese fallback headers from pinned font inputs.\n\nUsage: build-japanese-subsets [--source FONT]\n\n  --source FONT  Replace the pinned source with a regular-weight subset of FONT\n\nSet PYTHON for upstream fontconvert (default: python3). Source preparation requires native hb-subset (override with HB_SUBSET).");
             return Ok(());
         } else if arg == "--source" {
             source = Some(args.next().ok_or("--source requires a font path")?.into());
@@ -170,6 +204,30 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_subset_preserves_requested_glyphs() {
+        if Command::new("hb-subset").arg("--version").output().is_err() {
+            eprintln!("hb-subset not installed; native integration check unavailable");
+            return;
+        }
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../builtinFonts/source/NotoSansJP/NotoSansJP-Regular.ttf");
+        let directory = env::temp_dir().join(format!("crossink-subset-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("subset.ttf");
+        subset_font(
+            &source,
+            &output,
+            &[(0x41, 0x42), (0x732B, 0x732B)],
+            &OsString::from("hb-subset"),
+        )
+        .unwrap();
+        let bytes = fs::read(&output).unwrap();
+        assert!(!bytes.is_empty());
+        assert!(bytes.len() < fs::metadata(&source).unwrap().len() as usize);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn sorts_deduplicates_and_merges_only_adjacent_codepoints() {

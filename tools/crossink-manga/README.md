@@ -1,6 +1,6 @@
 # crossink-manga
 
-Convert CBZ/ZIP, CBR/RAR, or image folders into panel-first books for CrossInk on the Xteink X3, X4, and X4 Pro.
+Convert CBZ/ZIP, CBR/RAR, EPUB, PDF, or image folders into panel-first books for CrossInk on the Xteink X3, X4, and X4 Pro.
 
 ```sh
 crossink-manga convert volume.cbz --device x3 --output ./Volume-X3
@@ -13,13 +13,13 @@ Copy the resulting `Volume` folder to the SD card and open it from Books using f
 
 The native backend runs detection and recognition in Rust through ONNX Runtime. It does not invoke uv or Python. It needs the native runtime library and exported model files; these are host-side assets, never copied to the e-reader. Development builds can select them with `--models PATH` and `ORT_DYLIB_PATH`. Release bundles include these assets alongside the executable.
 
-`--backend upstream` explicitly selects Python Mokuro 0.2.5 through uv for comparison. It needs uv on PATH (or `--uv`) and may download its managed Python environment and models. Native mode never silently falls back to upstream.
+Existing Mokuro JSON can still be imported with `--mokuro` or compared with `compare`. EPUB input follows spine order and selects the first supported image in each wrapper page. PDF input uses the native C++ Poppler `pdfinfo` and `pdftoppm` programs on PATH at 144 DPI; those tools must be installed separately.
 
 ## Pipeline and work files
 
 Images are naturally ordered, split using white gutters (top-to-bottom, right-to-left), and cropped at original resolution. Mokuro recognizes those lossless crops **before** device resizing. OCR rectangles are transformed using the actual exported dimensions.
 
-`Volume.work` retains full-resolution crops, numbered previews, `panels.json`, preparation metadata, and OCR results. Native output is `crops.native.mokuro`, with per-crop JSON caches under `native-ocr`; cache identities include crop bytes, model files, the converter executable, and the native runtime. Native progress is printed to stderr. Upstream writes `crops.mokuro` and `ocr.log`. Keep this folder to retry conversion without repeating preparation; source names/content, panel settings, and crop hashes must match. Existing output folders are never overwritten. Export is validated in a temporary sibling folder before publication.
+`Volume.work` retains full-resolution crops, numbered previews, `panels.json`, preparation metadata, and OCR results. Native output is `crops.native.mokuro`, with per-crop JSON caches under `native-ocr`; cache identities include crop bytes, model files, the converter executable, and the native runtime. Native progress is printed to stderr. Keep this folder to retry conversion without repeating preparation; source names/content, panel settings, and crop hashes must match. Existing output folders are never overwritten. Export is validated in a temporary sibling folder before publication.
 
 Gutter detection is deliberately basic: borderless, overlapping, or unusual layouts can require correction. A page without detected splits remains a full-page reading unit and produces a warning. OCR accuracy depends on the artwork; the tool does not guarantee perfect recognition.
 
@@ -43,7 +43,7 @@ Each rectangle is `[left, top, right, bottom]`; right/bottom are exclusive. Arra
 crossink-manga convert volume.cbz --output ./Volume --panel-map panels-corrected.json --work ./Volume-corrected.work
 ```
 
-Advanced options include `--title`, `--uv /path/to/uv`, and `--mokuro /path/to/crops.mokuro`. The latter must describe the prepared crops with matching filenames and dimensions; original whole-page OCR is not interchangeable. This override checks schema and correspondence, but cannot authenticate OCR provenance.
+Advanced options include `--title` and `--mokuro /path/to/crops.mokuro`. The latter must describe the prepared crops with matching filenames and dimensions; original whole-page OCR is not interchangeable. This override checks schema and correspondence, but cannot authenticate OCR provenance.
 
 ## Build and verification
 
@@ -56,7 +56,7 @@ cargo +stable test --locked
 cargo +stable clippy --locked --all-targets -- -D warnings
 ```
 
-The executable is `target/release/crossink-manga` (`.exe` on Windows). Place the separately built `crossink-rar` beside it for CBR support. `package.py` is a CI helper, not part of conversion. Model export under `dev/` uses Python only during development; runtime inference is native. UnRAR and other dependencies retain their own included license terms.
+The executable is `target/release/crossink-manga` (`.exe` on Windows). Place the separately built `crossink-rar` beside it for CBR support. Release packaging uses the Rust `xtask`; see [PACKAGING.md](PACKAGING.md). Model export under `dev/` uses Python only during development; runtime inference is native. UnRAR and other dependencies retain their own included license terms.
 
 The combined native tool is GPL-3.0-only, with upstream notices and corresponding source included in the bundle. The separate RAR helper and original modules retain their stated licenses.
 
@@ -69,10 +69,9 @@ The complete local 185-page / 431-panel comparison passed: 99.14% region recall,
 
 ## Compare native and upstream
 
-Prepare once, then export both backends using the same work directory and device:
+Compare an existing reference Mokuro file against a native export of the same prepared crops:
 
 ```sh
-crossink-manga convert volume.cbz --backend upstream --work ./comparison.work --output ./upstream-book
 crossink-manga convert volume.cbz --backend native --models ./models --work ./comparison.work --output ./native-book
 crossink-manga compare ./comparison.work/crops.mokuro ./comparison.work/crops.native.mokuro --report ./comparison.json
 ```

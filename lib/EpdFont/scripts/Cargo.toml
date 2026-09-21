@@ -10,3 +10,13 @@ path = "build-japanese-subsets.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[[bin]]
+name = "pool-builtin-fonts"
+path = "pool-builtin-fonts.rs"
+
+[dependencies]
+regex = "1"
+serde_json = "1"
+sha2 = "0.10"
+ttf-parser = "0.25"

@@ -20,9 +20,15 @@ cargo run --quiet --locked --manifest-path lib/EpdFont/scripts/Cargo.toml --bin 
 
 The Rust script requires Cargo and uses the existing Python fontconvert tool with 2-bit antialiasing,
 compression, explicit intervals and no implicit default intervals. To
-recreate the pinned subset from the original variable input, pass
+create a replacement subset from the original variable input, pass
 `--source /path/to/NotoSansCJKjp-VF.ttf` after the command's final `--`.
-The optional source preparation still uses fontTools for instancing and subsetting.
+The optional source preparation uses the native C++ HarfBuzz `hb-subset` tool
+(`brew install harfbuzz` on macOS; install your distribution’s HarfBuzz CLI
+package elsewhere). Set `HB_SUBSET=/path/to/hb-subset` when needed. Rust checks
+that every requested codepoint remains mapped and that the weight axis was
+pinned before replacing the font. HarfBuzz and fontTools do not emit identical
+font bytes; existing checked-in inputs are unchanged unless `--source` is used.
+Regenerate and verify both fallback headers when replacing a source.
 Set `PYTHON=/path/to/venv/bin/python` to select a Python environment; otherwise
 the script uses `python3` from `PATH`. Font rasterization also depends on
 the FreeType version installed on the host.

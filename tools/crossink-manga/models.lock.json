@@ -1,0 +1,87 @@
+{
+  "archive": {
+    "bytes": 672111206,
+    "sha256": "95fa428efba3519026004abf8a6326bf005a49022b52d2cd4a0c8359874c70e4",
+    "url": "https://github.com/4xposed/CrossInk-nhanced/releases/download/manga-ocr-v1-20260921/crossink-native-ocr-v1.zip"
+  },
+  "files": {
+    "bootstrap-environment.json": {
+      "bytes": 2125,
+      "sha256": "54218157864911c534181c5ae143f6ca716b081665602e2965dfd70861e567c6"
+    },
+    "bootstrap-validation.json": {
+      "bytes": 6016,
+      "sha256": "e4c04b98cd8f905b6f3feaf407c5b04e9915d1289248cf0a00c1231522105d06"
+    },
+    "comictextdetector.onnx": {
+      "bytes": 93758169,
+      "sha256": "3ee1c36fc06c571f8af95a48344959113c0af230b8abfb29667643a5e82f157d"
+    },
+    "decoder.onnx": {
+      "bytes": 117431241,
+      "sha256": "0efe98b1e08381668fdf712637c3ba55b7186c01d8c2163284e11a0eb038088b"
+    },
+    "decoder_init.onnx": {
+      "bytes": 117429916,
+      "sha256": "247cf1973e7b072cadd71594dda0515281386e6e97d86974c3cbf38299c027a8"
+    },
+    "detector-LICENSE": {
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "encoder.onnx": {
+      "bytes": 343304366,
+      "sha256": "222ce53404117199da5245cb7432f8c51f0e4c24a5bd76ce7a66a13ae34c9d85"
+    },
+    "model-README.md": {
+      "bytes": 705,
+      "sha256": "32f413afcc4295151e77d25202c5c5d81ef621b46f947da1c3bde13256dc0d5f"
+    },
+    "provenance.json": {
+      "bytes": 1333,
+      "sha256": "6683657b1b6c204e129344e4b95b2cd79bea437576a28d88da6188a0fb9e8ce6"
+    },
+    "recognizer-LICENSE": {
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    "recognizer.json": {
+      "bytes": 382,
+      "sha256": "c38bac8e6f11d8295fa24939bf39b3c5724048bf505118f299745723ea1566ee"
+    },
+    "source-metadata/README.md": {
+      "bytes": 705,
+      "sha256": "32f413afcc4295151e77d25202c5c5d81ef621b46f947da1c3bde13256dc0d5f"
+    },
+    "source-metadata/config.json": {
+      "bytes": 77546,
+      "sha256": "8c0e395de8fa699daaac21aee33a4ba9bd1309cfbff03147813d2a025f39f349"
+    },
+    "source-metadata/preprocessor_config.json": {
+      "bytes": 228,
+      "sha256": "af4eb4d79cf61b47010fc0bc9352ee967579c417423b4917188d809b7e048948"
+    },
+    "source-metadata/source-files.json": {
+      "bytes": 904,
+      "sha256": "bbaba766db7eb4abbcae7c8a67db40725f680bfc6abfb0329589b3be6b1d5864"
+    },
+    "source-metadata/special_tokens_map.json": {
+      "bytes": 112,
+      "sha256": "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3"
+    },
+    "source-metadata/tokenizer_config.json": {
+      "bytes": 486,
+      "sha256": "d775ad1deac162dc56b84e9b8638f95ed8a1f263d0f56f4f40834e26e205e266"
+    },
+    "source-metadata/vocab.txt": {
+      "bytes": 24072,
+      "sha256": "344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d"
+    },
+    "vocab.txt": {
+      "bytes": 24072,
+      "sha256": "344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d"
+    }
+  },
+  "model_interface": "crossink-native-ocr-v1",
+  "schema_version": 1
+}

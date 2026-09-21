@@ -14,48 +14,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compare complete OCR outputs by region overlap and Unicode character edits.
+    LegacyConvert(crossink_manga::legacy::Options),
     Compare {
         reference: PathBuf,
         candidate: PathBuf,
         #[arg(long)]
         report: PathBuf,
     },
-    /// Extract panels, recognize original-resolution text, and export a device-sized book.
     Convert(ConvertArgs),
-    /// Prepare lossless panel crops and numbered previews for review before OCR.
     Prepare(ConvertArgs),
-    /// Check the images and indexed text of an exported book.
-    Validate { folder: PathBuf },
+    Validate {
+        folder: PathBuf,
+    },
 }
 
 #[derive(Args)]
 struct ConvertArgs {
-    /// Native Rust inference, or upstream Python Mokuro for comparison.
     #[arg(long, value_enum, default_value = "native")]
     backend: crossink_manga::native::Backend,
-    /// Native model bundle directory; defaults to models beside the executable.
     #[arg(long)]
     models: Option<PathBuf>,
-    /// CBZ/ZIP, CBR/RAR, or a directory of manga images.
     input: PathBuf,
     #[arg(short, long)]
     output: PathBuf,
     #[arg(long, value_enum, default_value = "x4")]
     device: Device,
-    /// Final image dithering; Bayer reproduces earlier exports.
     #[arg(long, value_enum, default_value = "floyd-steinberg")]
     dither: crossink_manga::format::Dither,
-    /// Ordered source-coordinate rectangles, keyed by relative source filename.
     #[arg(long)]
     panel_map: Option<PathBuf>,
-    /// Reuse OCR of the prepared panel crops (not OCR of the original pages).
     #[arg(long)]
     mokuro: Option<PathBuf>,
-    /// Override the bundled/PATH uv executable.
-    #[arg(long)]
-    uv: Option<PathBuf>,
-    /// Persistent OCR work folder; defaults to OUTPUT.work.
     #[arg(long)]
     work: Option<PathBuf>,
     #[arg(long)]
@@ -71,7 +60,6 @@ impl ConvertArgs {
             dither: self.dither,
             mokuro: self.mokuro.clone(),
             panel_map: self.panel_map.clone(),
-            uv: self.uv.clone(),
             work: self.work.clone(),
             title: self.title.clone(),
         }
@@ -80,6 +68,7 @@ impl ConvertArgs {
 
 fn run() -> anyhow::Result<()> {
     match Cli::parse().command {
+        Command::LegacyConvert(options) => crossink_manga::legacy::convert(&options),
         Command::Compare {
             reference,
             candidate,
@@ -132,6 +121,23 @@ fn main() -> ExitCode {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn python_runtime_options_are_rejected() {
+        for options in [["--backend", "upstream"], ["--uv", "/tmp/uv"]] {
+            assert!(
+                Cli::try_parse_from([
+                    "crossink-manga",
+                    "convert",
+                    "source.cbz",
+                    "--output",
+                    "book",
+                    options[0],
+                    options[1],
+                ])
+                .is_err()
+            );
+        }
+    }
     #[test]
     fn dither_cli_defaults_and_override() {
         let parse = |extra: &[&str]| {

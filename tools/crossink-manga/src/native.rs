@@ -11,7 +11,6 @@ use std::{
 pub enum Backend {
     #[default]
     Native,
-    Upstream,
 }
 
 pub fn model_directory(explicit: Option<&Path>) -> Result<PathBuf> {

@@ -16,6 +16,32 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+
+
+def configure_native_tools(env, targets):
+    """SCons adapter only: generation and dependency patching live in Rust."""
+    if 'clean' in targets:
+        return
+    root = Path(env.subst('$PROJECT_DIR'))
+    active = env.subst('$PIOENV')
+    cargo = os.environ.get('CARGO', 'cargo')
+    if 'simulator' in active:
+        package = Path(env.subst('$PROJECT_LIBDEPS_DIR')) / active / 'simulator'
+        subprocess.run([
+            cargo, 'run', '--quiet', '--locked', '--release', '--manifest-path',
+            str(root / 'tools/build-support/Cargo.toml'), '--',
+            'patch-storage', str(root), str(package),
+        ], check=True, cwd=root)
+    output = Path(env.subst('$BUILD_DIR')) / 'pooled-fonts'
+    subprocess.run([
+        cargo, 'run', '--quiet', '--locked', '--release', '--manifest-path',
+        str(root / 'lib/EpdFont/scripts/Cargo.toml'), '--bin', 'pool-builtin-fonts',
+        '--', '--output', str(output),
+    ], check=True, cwd=root)
+    # CCFLAGS precedes library CPPPATH additions made later by PlatformIO.
+    env.Prepend(CPPPATH=[str(output)])
+    env.Prepend(CCFLAGS=['-I', str(output)])
 
 
 def warn(msg):
@@ -251,4 +277,6 @@ except NameError:
         _project_dir = os.getcwd()
     inject_version(_Env({'PIOENV': 'default', 'PROJECT_DIR': _project_dir}))
 else:
+    from SCons.Script import COMMAND_LINE_TARGETS
+    configure_native_tools(env, COMMAND_LINE_TARGETS)
     inject_version(env)  # noqa: F821  # type: ignore[name-defined]

@@ -61,6 +61,25 @@ pub fn write_bmp_with_dither(path: &Path, image: &GrayImage, dither: Dither) -> 
         w > 0 && h > 0 && ((w <= 528 && h <= 800) || (w <= 800 && h <= 528)),
         "invalid manga bitmap dimensions"
     );
+    encode_bmp(path, image, dither)
+}
+
+/// Legacy full-page books may retain source resolution; cap host allocation at 64 MP.
+pub fn write_legacy_bmp(path: &Path, image: &GrayImage) -> Result<()> {
+    let (w, h) = image.dimensions();
+    ensure!(
+        w > 0
+            && h > 0
+            && w <= 65535
+            && h <= 65535
+            && u64::from(w) * u64::from(h) <= 64 * 1024 * 1024,
+        "legacy bitmap exceeds dimension or 64 megapixel limit"
+    );
+    encode_bmp(path, image, Dither::FloydSteinberg)
+}
+
+fn encode_bmp(path: &Path, image: &GrayImage, dither: Dither) -> Result<()> {
+    let (w, h) = image.dimensions();
     let stride = w.div_ceil(32) * 4;
     let size = 62 + stride * h;
     let mut file = std::io::BufWriter::new(
