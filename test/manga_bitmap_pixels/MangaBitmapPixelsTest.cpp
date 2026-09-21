@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "test/UniqueTempDirectory.h"
 #include "HalStorage.h"
 #include "MangaBitmapPixels.h"
 
@@ -81,8 +82,7 @@ std::vector<uint8_t> readAll(const std::string& path) {
 class MangaBitmapPixelsTest : public testing::Test {
  protected:
   void SetUp() override {
-    directory = std::filesystem::temp_directory_path() / "crossink_manga_bitmap_pixels";
-    std::filesystem::remove_all(directory);
+    directory = uniqueTempDirectory("crossink_manga_bitmap_pixels");
     std::filesystem::create_directories(directory);
     storage_test::failWrite = storage_test::failSync = storage_test::failClose = false;
   }

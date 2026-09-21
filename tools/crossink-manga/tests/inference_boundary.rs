@@ -317,3 +317,119 @@ fn ort_rejects_initialization_outside_the_adapter() -> Result<()> {
     );
     Ok(())
 }
+
+struct FullSequenceRuntime;
+struct FullSequenceSession {
+    encoder: bool,
+    calls: usize,
+}
+impl crossink_manga::inference::Runtime for FullSequenceRuntime {
+    fn cache_identity(&self) -> Result<String> {
+        Ok("full-sequence-test-v1".into())
+    }
+    fn load(&self, path: &std::path::Path) -> Result<Box<dyn Session>> {
+        anyhow::ensure!(
+            path.file_name().unwrap() != "decoder_init.onnx",
+            "uncached models have no initial decoder"
+        );
+        Ok(Box::new(FullSequenceSession {
+            encoder: path.file_name().unwrap() == "encoder.onnx",
+            calls: 0,
+        }))
+    }
+}
+impl Session for FullSequenceSession {
+    fn run(&mut self, inputs: Inputs<'_>) -> Result<Box<dyn Outputs + '_>> {
+        use crossink_manga::inference::Input;
+        if self.encoder {
+            return Ok(Box::new(ScriptedOutputs(vec![ArrayD::zeros(IxDyn(&[
+                1, 2, 3,
+            ]))])));
+        }
+        anyhow::ensure!(
+            inputs.len() == 2,
+            "uncached decoder must not receive past-key values"
+        );
+        let Input::I64(ids) = &inputs[0].1 else {
+            anyhow::bail!("wrong token type")
+        };
+        let expected: &[i64] = match self.calls {
+            0 => &[2],
+            1 => &[2, 4, 2, 5, 2, 6, 2, 7],
+            2 => &[2, 5, 6, 2, 6, 7, 2, 7, 4, 2, 4, 0],
+            _ => anyhow::bail!("unexpected step"),
+        };
+        anyhow::ensure!(
+            ids.as_slice() == Some(expected),
+            "full prefixes must follow selected beam parents: {ids:?}"
+        );
+        let batch = if self.calls == 0 { 1 } else { 4 };
+        let sequence = self.calls + 1;
+        anyhow::ensure!(
+            ids.shape() == [batch, sequence],
+            "incorrect full-prefix shape"
+        );
+        let Input::F32(hidden) = &inputs[1].1 else {
+            anyhow::bail!("wrong hidden type")
+        };
+        anyhow::ensure!(
+            hidden.shape() == [batch, 2, 3],
+            "incorrect encoder-state batch"
+        );
+        let mut logits = ArrayD::from_elem(IxDyn(&[batch, sequence, 8]), -100.0);
+        // Earlier-position logits deliberately disagree with the final position.
+        for row in 0..batch {
+            for pos in 0..sequence - 1 {
+                logits[[row, pos, 7]] = 100.0;
+            }
+        }
+        match self.calls {
+            0 => {
+                for (rank, token) in [4, 5, 6, 7].into_iter().enumerate() {
+                    logits[[0, 0, token]] = -(rank as f32) / 10.0;
+                }
+            }
+            1 => {
+                for token in 0..8 {
+                    logits[[0, 1, token]] = 0.0;
+                }
+                for (row, token) in [(1, 6), (2, 7), (3, 4)] {
+                    logits[[row, 1, token]] = 0.0;
+                }
+            }
+            _ => {
+                for row in 0..batch {
+                    logits[[row, sequence - 1, 3]] = 0.0;
+                }
+            }
+        }
+        self.calls += 1;
+        Ok(Box::new(ScriptedOutputs(vec![logits])))
+    }
+}
+#[test]
+fn recognizer_full_sequence_uses_complete_reordered_prefixes_and_last_position() {
+    let models = tempfile::tempdir().unwrap();
+    std::fs::write(models.path().join("recognizer.json"),serde_json::to_vec(&serde_json::json!({
+        "format_version":1,"decoder_interface":"full-sequence-v1","input_width":2,"input_height":2,
+        "image_mean":[0.5,0.5,0.5],"image_std":[0.5,0.5,0.5],"decoder_start_token_id":2,"eos_token_id":3,"pad_token_id":0,
+        "max_length":5,"vocab_size":8,"num_beams":4,"length_penalty":2.0,"no_repeat_ngram_size":3,"early_stopping":true
+    })).unwrap()).unwrap();
+    std::fs::write(
+        models.path().join("vocab.txt"),
+        "[PAD]\n[UNK]\n[CLS]\n[SEP]\nA\nB\nC\nD\n",
+    )
+    .unwrap();
+    for name in ["encoder.onnx", "decoder.onnx"] {
+        std::fs::write(models.path().join(name), []).unwrap();
+    }
+    let mut recognizer = crossink_manga::native_recognizer::Recognizer::load_with_runtime(
+        models.path(),
+        &FullSequenceRuntime,
+    )
+    .unwrap();
+    assert_eq!(
+        recognizer.recognize(&image::RgbImage::new(2, 2)).unwrap(),
+        "ＢＣ"
+    );
+}

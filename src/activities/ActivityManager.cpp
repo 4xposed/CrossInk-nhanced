@@ -26,8 +26,10 @@
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
 #include "home/RecentBookProgress.h"
+#include "home/LibraryActivity.h"
 #include "home/RecentBooksActivity.h"
 #include "home/RecentBooksGridActivity.h"
+#include "home/ToolsActivity.h"
 #include "network/CrossPointWebServerActivity.h"
 #include "network/NearbyBookTransferActivity.h"
 #include "network/NearbyStatsSyncActivity.h"
@@ -705,6 +707,28 @@ void ActivityManager::goToSettings(const bool dismissOnUpSwipe) {
   replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput, dismissOnUpSwipe));
 }
 
+void ActivityManager::goToLibrary() {
+  auto screen = makeUniqueNoThrow<LibraryActivity>(renderer, mappedInput);
+  if (screen)
+    replaceActivity(std::move(screen));
+  else
+    LOG_ERR("ACT", "Cannot allocate Library");
+}
+void ActivityManager::goToAnki() {
+  auto screen = makeUniqueNoThrow<FileBrowserActivity>(renderer, mappedInput, "/", FileBrowserActivity::Mode::Anki);
+  if (screen)
+    replaceActivity(std::move(screen));
+  else
+    LOG_ERR("ACT", "Cannot allocate Anki browser");
+}
+void ActivityManager::goToTools() {
+  auto screen = makeUniqueNoThrow<ToolsActivity>(renderer, mappedInput);
+  if (screen)
+    replaceActivity(std::move(screen));
+  else
+    LOG_ERR("ACT", "Cannot allocate Tools");
+}
+
 void ActivityManager::goToFileBrowser(std::string path) {
   replaceActivity(std::make_unique<FileBrowserActivity>(renderer, mappedInput, std::move(path)));
 }
@@ -796,9 +820,15 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, const HalDisplay::Ref
 
   if (initialMenuItem == HomeMenuItem::NONE && currentActivity) {
     const auto& activityName = currentActivity->name;
-    if (activityName == "FileBrowser") {
+    if (activityName == "Library") {
+      initialMenuItem = HomeMenuItem::LIBRARY;
+    } else if (activityName == "AnkiBrowser") {
+      initialMenuItem = HomeMenuItem::ANKI;
+    } else if (activityName == "Tools") {
+      initialMenuItem = HomeMenuItem::TOOLS;
+    } else if (activityName == "FileBrowser") {
       initialMenuItem = HomeMenuItem::FILE_BROWSER;
-    } else if (activityName == "RecentBooks") {
+    } else if (activityName == "RecentBooks" || activityName == "RecentBooksGrid" || activityName == "SavedItemsHome") {
       initialMenuItem = HomeMenuItem::RECENTS;
     } else if (activityName == "OpdsBookBrowser") {
       initialMenuItem = HomeMenuItem::OPDS_BROWSER;

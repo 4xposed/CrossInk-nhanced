@@ -6,6 +6,7 @@
 #include <atomic>
 #include <filesystem>
 
+#include "test/UniqueTempDirectory.h"
 #include "ReadingStatsSave.h"
 #include "activities/home/BookCompletionEdit.h"
 
@@ -65,8 +66,7 @@ namespace BookActions {
 class CompletionActionTest : public testing::TestWithParam<bool> {
  protected:
   void SetUp() override {
-    storage_test::root = "/private/tmp/crossink-completion-action-fixture";
-    std::filesystem::remove_all(storage_test::root);
+    storage_test::root = uniqueTempDirectory("crossink-completion-action-fixture").string();
     std::filesystem::create_directories(storage_test::root + "/.crosspoint/book");
     RECENT_BOOKS.updates = 0;
     halClock.available = false;
@@ -82,6 +82,7 @@ class CompletionActionTest : public testing::TestWithParam<bool> {
     halClock.available = false;
     storage_test::failWritePath.clear();
     EXPECT_EQ(storage_test::openFiles, 0);
+    std::filesystem::remove_all(storage_test::root);
   }
 };
 TEST_P(CompletionActionTest, PartialPublishRetriesSameDesiredValueAndCountExactlyOnce) {

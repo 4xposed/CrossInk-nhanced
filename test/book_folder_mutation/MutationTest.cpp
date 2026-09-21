@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "test/UniqueTempDirectory.h"
 #include "BookFolderMutation.h"
 #include "BookMutationJournal.h"
 #include "BookMutationStorage.h"
@@ -13,8 +14,7 @@ class MutationTest : public testing::Test {
  protected:
   std::filesystem::path root;
   void SetUp() override {
-    root = std::filesystem::temp_directory_path() / "crossink-mutation-native";
-    std::filesystem::remove_all(root);
+    root = uniqueTempDirectory("crossink-mutation-native");
     std::filesystem::create_directories(root);
     mutation_test::reset(root.string());
     recoverPending();

@@ -22,6 +22,18 @@ const MODELS: &[&str] = &[
     "recognizer-LICENSE",
 ];
 
+const MODELS_V2: &[&str] = &[
+    "comictextdetector.onnx",
+    "encoder.onnx",
+    "decoder.onnx",
+    "vocab.txt",
+    "recognizer.json",
+    "detector.json",
+    "provenance.json",
+    "detector-LICENSE",
+    "recognizer-LICENSE",
+];
+
 #[derive(Parser)]
 #[command(about = "Assemble native CrossInk manga releases without Python")]
 struct Cli {
@@ -256,7 +268,6 @@ fn package(
         licenses.join("LICENSE"),
     ]
     .into_iter()
-    .chain(MODELS.iter().map(|name| models.join(name)))
     {
         ensure!(
             path.is_file(),
@@ -406,12 +417,17 @@ fn main() -> Result<()> {
 }
 
 fn verify_assets(source: &Path) -> Result<()> {
-    for name in MODELS {
-        ensure!(source.join(name).is_file(), "missing model input: {name}");
-    }
     let provenance: serde_json::Value =
         serde_json::from_reader(fs::File::open(source.join("provenance.json"))?)?;
-    for name in &MODELS[..6] {
+    let models = match provenance["model_interface"].as_str() {
+        None | Some("crossink-native-ocr-v1") => MODELS,
+        Some("crossink-native-ocr-v2") => MODELS_V2,
+        Some(_) => anyhow::bail!("unsupported model provenance interface"),
+    };
+    for name in models {
+        ensure!(source.join(name).is_file(), "missing model input: {name}");
+    }
+    for name in &models[..6] {
         let expected = provenance["exports"][name]
             .as_str()
             .with_context(|| format!("missing provenance digest for {name}"))?;

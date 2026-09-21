@@ -7,6 +7,7 @@
 #include <fstream>
 #include <functional>
 
+#include "test/UniqueTempDirectory.h"
 #include "BookDeletionSnapshot.h"
 #include "BookFolderMutation.h"
 #include "BookMutationJournal.h"
@@ -58,8 +59,7 @@ class RecentDeleteTest : public testing::TestWithParam<bool> {
  protected:
   std::filesystem::path root;
   void SetUp() override {
-    root = std::filesystem::temp_directory_path() / "crossink-recent-delete-native";
-    std::filesystem::remove_all(root);
+    root = uniqueTempDirectory("crossink-recent-delete-native");
     std::filesystem::create_directories(root);
     mutation_test::reset(root.string());
     BookFolderMutation::recoverPending();

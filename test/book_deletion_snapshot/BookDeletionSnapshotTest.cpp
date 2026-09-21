@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "test/UniqueTempDirectory.h"
 #include "BookDeletionSnapshot.h"
 #include "HalStorage.h"
 
@@ -10,8 +11,7 @@ namespace {
 class BookDeletionSnapshotTest : public testing::Test {
  protected:
   void SetUp() override {
-    root = std::filesystem::temp_directory_path() / "crossink-book-delete-snapshot";
-    std::filesystem::remove_all(root);
+    root = uniqueTempDirectory("crossink-book-delete-snapshot");
     std::filesystem::create_directories(root);
     storage_test::reset();
   }

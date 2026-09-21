@@ -139,6 +139,13 @@ pub fn pin(source: &Path, url: &str, archive: &Path, lock: &Path) -> Result<()> 
         !archive.starts_with(&source) && !lock.starts_with(&source),
         "pin outputs must be outside model source"
     );
+    // ZIP pins retain the original v1 graph interface.
+    for name in super::MODELS {
+        ensure!(
+            source.join(name).is_file(),
+            "missing v1 model input: {name}"
+        );
+    }
     super::verify_assets(&source)?;
     let mut files = serde_json::Map::new();
     let mut paths = Vec::new();
@@ -230,6 +237,13 @@ pub fn fetch(lock: &Path, output: &Path, archive: Option<&Path>) -> Result<()> {
         "model lockfile exceeds 1 MiB"
     );
     let manifest: Value = serde_json::from_reader(manifest_file)?;
+    if manifest["schema_version"] == 2 {
+        ensure!(
+            archive.is_none(),
+            "--archive is unsupported for per-file model pins"
+        );
+        return fetch_files(lock, output, &manifest);
+    }
     ensure!(
         manifest["schema_version"] == 1 && manifest["model_interface"] == INTERFACE,
         "unsupported model lockfile schema or interface"
@@ -352,6 +366,146 @@ pub fn fetch(lock: &Path, output: &Path, archive: Option<&Path>) -> Result<()> {
         !output.try_exists()? && !output.is_symlink(),
         "model output already exists"
     );
+    publish_directory(staging.path(), &output)?;
+    Ok(())
+}
+
+// Local metadata is confined to the lockfile directory, including every path
+// component. Never follow a link into an unrelated directory or file.
+fn local_source(root: &Path, name: &str) -> Result<PathBuf> {
+    filename(name)?;
+    let mut source = root.to_path_buf();
+    for part in name.split('/') {
+        source.push(part);
+        ensure!(
+            !fs::symlink_metadata(&source)?.file_type().is_symlink(),
+            "symlink in local model metadata: {}",
+            source.display()
+        );
+    }
+    ensure!(
+        source.is_file(),
+        "local model metadata must be a regular file"
+    );
+    Ok(source)
+}
+
+fn download_file(url: &str, target: &Path, bytes: u64) -> Result<()> {
+    https(url)?;
+    // curl also applies this limit to redirect responses. A host's redirect
+    // body can exceed a small JSON file; still check the final exact size below.
+    let transfer_limit = bytes.max(1024 * 1024);
+    let status = Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--retry",
+            "3",
+            "--max-time",
+            "1800",
+            "--max-filesize",
+            &transfer_limit.to_string(),
+            "--output",
+        ])
+        .arg(target)
+        .arg("--")
+        .arg(url)
+        .status()
+        .context("model download requires native curl")?;
+    ensure!(status.success(), "model file download failed: {url}");
+    Ok(())
+}
+
+fn fetch_files(lock: &Path, output: &Path, manifest: &Value) -> Result<()> {
+    ensure!(
+        manifest["model_interface"] == "crossink-native-ocr-v2",
+        "unsupported per-file model interface"
+    );
+    let files = manifest["files"]
+        .as_object()
+        .context("missing locked file list")?;
+    ensure!(files.len() <= MAX_FILES, "too many locked model files");
+    for name in super::MODELS_V2 {
+        ensure!(
+            files.contains_key(*name),
+            "missing locked model file {name}"
+        );
+    }
+    let lock = lock.canonicalize()?;
+    let root = lock.parent().context("model lockfile has no parent")?;
+    let mut total = 0u64;
+    // Validate the complete manifest before downloading anything.
+    for (name, info) in files {
+        filename(name)?;
+        expected_hash(info)?;
+        total = total
+            .checked_add(size(info)?)
+            .context("model size overflow")?;
+        ensure!(
+            total <= MAX_BUNDLE_BYTES,
+            "model bundle exceeds 16 GiB limit"
+        );
+        ensure!(
+            info.get("url").is_some() != info.get("local").is_some(),
+            "model file must specify exactly one url or local source: {name}"
+        );
+        if let Some(url) = info.get("url") {
+            https(url.as_str().context("model URL must be a string")?)?;
+        } else {
+            local_source(
+                root,
+                info["local"]
+                    .as_str()
+                    .context("local source must be a string")?,
+            )?;
+        }
+    }
+    let (parent, output) = destination(output)?;
+    let staging = tempfile::tempdir_in(&parent)?;
+    for (name, info) in files {
+        let target = staging.path().join(name);
+        fs::create_dir_all(target.parent().context("model file has no parent")?)?;
+        if let Some(url) = info["url"].as_str() {
+            download_file(url, &target, size(info)?)?;
+        } else {
+            let source = local_source(
+                root,
+                info["local"].as_str().context("missing local source")?,
+            )?;
+            let mut source = fs::File::open(source)?;
+            ensure!(
+                source.metadata()?.len() == size(info)?,
+                "local model size mismatch: {name}"
+            );
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            std::io::copy(&mut (&mut source).take(size(info)? + 1), &mut file)?;
+        }
+        let mut file = fs::File::open(&target)?;
+        ensure!(
+            file.metadata()?.len() == size(info)?,
+            "model file size mismatch: {name}"
+        );
+        ensure!(
+            hash(&mut file)? == expected_hash(info)?,
+            "model file SHA-256 mismatch: {name}"
+        );
+    }
+    let provenance: Value =
+        serde_json::from_reader(fs::File::open(staging.path().join("provenance.json"))?)?;
+    ensure!(
+        provenance["model_interface"] == manifest["model_interface"],
+        "model provenance interface does not match lockfile"
+    );
+    super::verify_assets(staging.path())?;
     publish_directory(staging.path(), &output)?;
     Ok(())
 }

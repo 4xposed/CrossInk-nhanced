@@ -59,6 +59,12 @@ def prepare_fs(temp_root: Path, book: Path) -> str:
     target = books_dir / book.name
     shutil.copy2(book, target)
     shutil.copy2(book, temp_root / "fs_" / OPDS_SIMULATOR_BOOK)
+    category_dir = temp_root / "fs_" / "epubs" / "nested"
+    category_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(book, category_dir / book.name)
+    articles = temp_root / "fs_" / "articles"
+    articles.mkdir(exist_ok=True)
+    (articles / "example.txt").write_text("Library smoke article.")
     prepare_dictionary(temp_root)
     return f"/books/{book.name}"
 

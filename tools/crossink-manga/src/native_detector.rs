@@ -66,6 +66,7 @@ pub struct DetectedBlock {
 
 pub struct Detector {
     session: Box<dyn Session>,
+    upstream_outputs: bool,
 }
 
 impl Detector {
@@ -76,11 +77,35 @@ impl Detector {
     pub fn load_with_runtime(models: &Path, runtime: &dyn Runtime) -> Result<Self> {
         let path = models.join("comictextdetector.onnx");
         ensure!(path.is_file(), "detector model missing: {}", path.display());
-        Ok(Self::from_session(runtime.load(&path)?))
+        let config_path = models.join("detector.json");
+        let upstream_outputs = if config_path.exists() {
+            #[derive(serde::Deserialize)]
+            struct Config {
+                format_version: u32,
+                graph_interface: String,
+            }
+            let config: Config = serde_json::from_reader(std::fs::File::open(&config_path)?)
+                .context("read detector graph configuration")?;
+            ensure!(
+                config.format_version == 1
+                    && config.graph_interface == "comic-text-detector-upstream-v1",
+                "unsupported detector graph configuration"
+            );
+            true
+        } else {
+            false
+        };
+        Ok(Self {
+            session: runtime.load(&path)?,
+            upstream_outputs,
+        })
     }
 
     pub fn from_session(session: Box<dyn Session>) -> Self {
-        Self { session }
+        Self {
+            session,
+            upstream_outputs: false,
+        }
     }
 
     pub fn detect(&mut self, image: &RgbImage) -> Result<Vec<DetectedBlock>> {
@@ -93,16 +118,21 @@ impl Detector {
             "images",
             Input::F32(prepared.tensor.view().into_dyn()),
         )])?;
+        let names = if self.upstream_outputs {
+            ["blk", "seg", "det"]
+        } else {
+            ["blocks", "mask", "lines"]
+        };
         let block_output = outputs
-            .named_array("blocks")?
+            .named_array(names[0])?
             .into_dimensionality::<Ix3>()
             .context("detector blocks must be rank 3")?;
         let mask_output = outputs
-            .named_array("mask")?
+            .named_array(names[1])?
             .into_dimensionality::<Ix4>()
             .context("detector mask must be rank 4")?;
         let line_output = outputs
-            .named_array("lines")?
+            .named_array(names[2])?
             .into_dimensionality::<Ix4>()
             .context("detector lines must be rank 4")?;
         ensure!(

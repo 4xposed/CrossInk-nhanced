@@ -21,17 +21,9 @@ jobs:
       - uses: actions/checkout@v6
       - name: Set up Rust for asset verification
         run: rustup toolchain install stable --profile minimal
-      - uses: astral-sh/setup-uv@v7
-        with:
-          version: '0.11.14'
-      - name: Export models once (development Python only)
-        run: >-
-          uv run --python 3.11 --with mokuro==0.2.5 --with manga-ocr==0.1.16
-          --with torch==2.14.0 --with transformers==5.16.1
-          --with onnx==1.22.0 --with onnxruntime==1.29.0
-          python dev/prepare_bundle_assets.py --output models-exported
-      - name: Verify and collect exported model assets with Rust
-        run: cargo +stable run --locked --manifest-path xtask/Cargo.toml -- assets --source models-exported --output models-build
+      - name: Fetch and verify pinned ONNX models
+        # Fail on unavailable or changed artifacts; never silently re-export.
+        run: cargo +stable run --release --locked --manifest-path xtask/Cargo.toml -- fetch-models --lock models.lock.json --output models-build
       - uses: actions/upload-artifact@v4
         with:
           name: native-ocr-models

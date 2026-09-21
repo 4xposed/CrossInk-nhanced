@@ -7,9 +7,20 @@ use std::{fmt, fs, path::Path};
 #[cfg(test)]
 const DEFAULT_INPUT_SIZE: usize = 224;
 
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+enum DecoderInterface {
+    #[default]
+    #[serde(rename = "cached-v1")]
+    Cached,
+    #[serde(rename = "full-sequence-v1")]
+    FullSequence,
+}
+
 #[derive(Debug, Deserialize)]
 struct RecognizerConfig {
     format_version: u32,
+    #[serde(default)]
+    decoder_interface: DecoderInterface,
     input_width: usize,
     input_height: usize,
     image_mean: [f32; 3],
@@ -28,7 +39,7 @@ struct RecognizerConfig {
 /// Native manga-ocr recognizer backed by exported ONNX encoder and decoder graphs.
 pub struct Recognizer {
     encoder: Box<dyn Session>,
-    decoder_init: Box<dyn Session>,
+    decoder_init: Option<Box<dyn Session>>,
     decoder: Box<dyn Session>,
     config: RecognizerConfig,
     vocab: Vec<String>,
@@ -107,18 +118,24 @@ impl Recognizer {
             "recognizer encoder missing: {}",
             encoder_path.display()
         );
-        ensure!(
-            decoder_init_path.is_file(),
-            "recognizer initial decoder missing: {}",
-            decoder_init_path.display()
-        );
+        if config.decoder_interface == DecoderInterface::Cached {
+            ensure!(
+                decoder_init_path.is_file(),
+                "recognizer initial decoder missing: {}",
+                decoder_init_path.display()
+            );
+        }
         ensure!(
             decoder_path.is_file(),
             "recognizer decoder missing: {}",
             decoder_path.display()
         );
         let encoder = runtime.load(&encoder_path)?;
-        let decoder_init = runtime.load(&decoder_init_path)?;
+        let decoder_init = if config.decoder_interface == DecoderInterface::Cached {
+            Some(runtime.load(&decoder_init_path)?)
+        } else {
+            None
+        };
         let decoder = runtime.load(&decoder_path)?;
 
         Ok(Self {
@@ -158,14 +175,22 @@ impl Recognizer {
 
         let initial_ids = Tensor::from_array(([1, 1], vec![self.config.decoder_start_token_id]))
             .context("create recognizer initial token tensor")?;
-        let initial_outputs = self
-            .decoder_init
+        let full_sequence = self.config.decoder_interface == DecoderInterface::FullSequence;
+        let initial_decoder = match &mut self.decoder_init {
+            Some(decoder) => decoder.as_mut(),
+            None => self.decoder.as_mut(),
+        };
+        let initial_outputs = initial_decoder
             .run(vec![
                 ("input_ids", initial_ids.input()),
                 ("encoder_hidden_states", Input::F32(hidden_view)),
             ])
             .context("run recognizer initial decoder")?;
-        let mut state = copy_decoder_outputs(initial_outputs.as_ref(), self.config.vocab_size)?;
+        let mut state = copy_decoder_outputs(
+            initial_outputs.as_ref(),
+            self.config.vocab_size,
+            full_sequence,
+        )?;
         drop(initial_outputs);
         drop(encoder_outputs);
 
@@ -234,6 +259,29 @@ impl Recognizer {
                 "recognizer beam search ran out of continuations"
             );
 
+            if full_sequence {
+                // Public ONNX exports consume each beam's complete prefix. Use the
+                // selected histories rather than cached single-token inputs.
+                let sequence_length = next_running[0].tokens.len();
+                let token_ids: Vec<_> = next_running
+                    .iter()
+                    .flat_map(|beam| beam.tokens.iter().copied())
+                    .collect();
+                let input_ids =
+                    Tensor::from_array(([self.config.num_beams, sequence_length], token_ids))
+                        .context("create recognizer full-prefix tensor")?;
+                let decoder_outputs = self
+                    .decoder
+                    .run(vec![
+                        ("input_ids", input_ids.input()),
+                        ("encoder_hidden_states", hidden_states.input()),
+                    ])
+                    .context("run recognizer full-sequence decoder")?;
+                state =
+                    copy_decoder_outputs(decoder_outputs.as_ref(), self.config.vocab_size, true)?;
+                running = next_running;
+                continue;
+            }
             let input_ids = Tensor::from_array(([self.config.num_beams, 1], next_tokens))
                 .context("create recognizer token tensor")?;
             ensure!(
@@ -273,7 +321,7 @@ impl Recognizer {
                     ("past_value_1", value_1.input()),
                 ])
                 .context("run recognizer decoder")?;
-            state = copy_decoder_outputs(decoder_outputs.as_ref(), self.config.vocab_size)?;
+            state = copy_decoder_outputs(decoder_outputs.as_ref(), self.config.vocab_size, false)?;
             running = next_running;
         }
 
@@ -439,19 +487,33 @@ fn repeats_ngram(tokens: &[i64], next: i64, size: usize) -> bool {
         .any(|window| window[..size - 1] == *prefix && window[size - 1] == next)
 }
 
-fn copy_decoder_outputs(outputs: &dyn Outputs, vocab_size: usize) -> Result<DecoderOutputs> {
+fn copy_decoder_outputs(
+    outputs: &dyn Outputs,
+    vocab_size: usize,
+    full_sequence: bool,
+) -> Result<DecoderOutputs> {
+    let expected_outputs = if full_sequence { 1 } else { 5 };
     ensure!(
-        outputs.len() == 5,
-        "recognizer decoder returned {} outputs, expected 5",
+        outputs.len() == expected_outputs,
+        "recognizer decoder returned {} outputs, expected {expected_outputs}",
         outputs.len()
     );
     let logits = outputs.array(0).context("read recognizer decoder logits")?;
     ensure!(
-        logits.ndim() == 3 && logits.shape()[1..] == [1, vocab_size],
+        logits.ndim() == 3
+            && logits.shape()[1] > 0
+            && logits.shape()[2] == vocab_size
+            && (full_sequence || logits.shape()[1] == 1),
         "recognizer decoder returned unexpected logits shape {:?}",
         logits.shape()
     );
-    let mut cache = Vec::with_capacity(4);
+    let last_position = logits.shape()[1] - 1;
+    let final_logits = logits
+        .index_axis(ndarray::Axis(1), last_position)
+        .iter()
+        .copied()
+        .collect();
+    let mut cache = Vec::with_capacity(if full_sequence { 0 } else { 4 });
     for index in 1..outputs.len() {
         let tensor = outputs
             .array(index)
@@ -467,7 +529,7 @@ fn copy_decoder_outputs(outputs: &dyn Outputs, vocab_size: usize) -> Result<Deco
         });
     }
     Ok(DecoderOutputs {
-        logits: logits.iter().copied().collect(),
+        logits: final_logits,
         cache,
     })
 }
@@ -476,6 +538,7 @@ fn copy_decoder_outputs(outputs: &dyn Outputs, vocab_size: usize) -> Result<Deco
 fn preprocess(image: &RgbImage) -> Vec<f32> {
     let config = RecognizerConfig {
         format_version: 1,
+        decoder_interface: DecoderInterface::Cached,
         input_width: DEFAULT_INPUT_SIZE,
         input_height: DEFAULT_INPUT_SIZE,
         image_mean: [0.5; 3],

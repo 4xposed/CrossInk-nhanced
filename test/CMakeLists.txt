@@ -122,3 +122,4 @@ add_test(NAME MangaSourceBoundaryTest
   COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s ${REPO_ROOT}/test/source_contracts -v)
 
 add_subdirectory(anki_deck)
+add_subdirectory(library)

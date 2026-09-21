@@ -32,13 +32,15 @@ static int sourcePasses = 0, dimensionCalls = 0, defaults = 0, rendered = 0;
 struct Budget { CooperativeCancellation cancellation() { return {[](void*) { return expired; }, nullptr}; } };
 struct CrossPointSettings {
  enum class SLEEP_SCREEN_MODE { COVER, COVER_CUSTOM };
+ enum class SLEEP_SCREEN_COVER_FILTER { NO_FILTER };
+ SLEEP_SCREEN_COVER_FILTER sleepScreenCoverFilter = SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
  enum class SLEEP_SCREEN_COVER_MODE { CROP, FIT };
  SLEEP_SCREEN_MODE sleepScreen = SLEEP_SCREEN_MODE::COVER;
  SLEEP_SCREEN_COVER_MODE sleepScreenCoverMode = SLEEP_SCREEN_COVER_MODE::FIT;
  int getReaderFontId() { return 0; }
 } SETTINGS;
 struct { std::string openEpubPath; } APP_STATE;
-struct GfxRenderer { int getScreenWidth() const { return 480; } int getScreenHeight() const { return 800; } };
+struct GfxRenderer { bool supportsAbsoluteGrayscale() const { return false; } int getScreenWidth() const { return 480; } int getScreenHeight() const { return 800; } };
 struct FsFile { void close() {} };
 struct { bool exists(const char*) { return true; }
  bool openFileForRead(const char*, const std::string&, FsFile&) { return true; }
@@ -54,15 +56,15 @@ struct Epub {
  enum class XLocationLoadMode { Skip };
  Epub(const std::string&, const char*) {}
  bool load(bool, bool, XLocationLoadMode) { return true; }
- bool generateCoverBmp(bool,const GfxRenderer*,int) { return true; }
- std::string getCoverBmpPath(bool) { return "cache.bmp"; }
+ bool generateCoverBmp(bool,const GfxRenderer*,int,int) { return true; }
+ std::string getCoverBmpPath(bool,int) { return "cache.bmp"; }
 };
 struct Xtc {
  Xtc(const std::string&,const char*) {} bool load() { return true; }
  bool generateCoverBmp() { return true; } std::string getCoverBmpPath() { return "cache.bmp"; }
 };
-struct Txt { Txt(const std::string&,const char*) {} bool generateCoverBmp() { return true; }
- std::string getCoverBmpPath() { return "cache.bmp"; } };
+struct Txt { Txt(const std::string&,const char*) {} bool generateCoverBmp(int) { return true; }
+ std::string getCoverBmpPath(int) { return "cache.bmp"; } };
 namespace manga {
  enum class PathResult { Found, Missing, Error };
  enum class OpenMode { Cover };
@@ -88,7 +90,7 @@ struct ImageToFramebufferDecoder { bool getDimensions(const std::string&,ImageDi
 struct ImageDecoderFactory { static ImageToFramebufferDecoder* getDecoder(const std::string&) {
  static ImageToFramebufferDecoder decoder; return &decoder; } };
 enum class BmpReaderError { Ok };
-struct Bitmap { Bitmap(FsFile&) {} BmpReaderError parseHeaders() { return BmpReaderError::Ok; }
+struct Bitmap { Bitmap(FsFile&,bool = false,bool = false) {} BmpReaderError parseHeaders() { return BmpReaderError::Ok; }
  int getWidth() { return 480; } int getHeight() { return 800; } };
 template<class T> auto makeUniqueNoThrow(size_t n) { return std::make_unique<T>(n); }
 """
@@ -104,7 +106,7 @@ class SleepActivity { public:
  void renderCoverSleepScreen() const;
  void renderCustomSleepScreen() const { ++defaults; }
  void renderDefaultSleepScreen() const { ++defaults; }
- void renderBitmapSleepScreen(Bitmap&) const { ++rendered; }
+ bool renderBitmapSleepScreen(Bitmap&) const { ++rendered; return true; }
  void logMangaCoverAttempt(bool) const {}
 };
 """

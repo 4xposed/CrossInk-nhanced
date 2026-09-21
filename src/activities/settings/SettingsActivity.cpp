@@ -6,6 +6,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
+#include <Memory.h>
 
 #include <algorithm>
 #include <cctype>
@@ -25,6 +26,7 @@
 #include "FrontlightTimePickerActivity.h"
 #include "KOReaderSettingsActivity.h"
 #include "KeyboardLayoutsActivity.h"
+#include "LibraryFoldersActivity.h"
 #include "MappedInputManager.h"
 #include "OpdsServerListActivity.h"
 #include "QuickActions.h"
@@ -1055,6 +1057,14 @@ void SettingsActivity::toggleCurrentSetting() {
     auto resultHandler = [this](const ActivityResult&) { SETTINGS.saveToFile(); };
 
     switch (setting.action) {
+      case SettingAction::LibraryFolders: {
+        auto folders = makeUniqueNoThrow<LibraryFoldersActivity>(renderer, mappedInput);
+        if (folders)
+          startActivityForResult(std::move(folders), [this](const ActivityResult&) { requestUpdate(); });
+        else
+          LOG_ERR("Settings", "Cannot allocate library folders screen");
+        break;
+      }
       case SettingAction::RemapFrontButtons:
         startActivityForResult(std::make_unique<ButtonRemapActivity>(renderer, mappedInput, false), resultHandler);
         break;

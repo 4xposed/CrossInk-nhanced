@@ -126,6 +126,10 @@ bool acceptCommon(const char* name, bool isDir) {
   return isDir || isSupportedBrowserFile(name);
 }
 
+bool acceptAnki(const char* name, bool isDir) {
+  return acceptCommon(name, isDir) && (isDir || FsHelpers::hasAnkiDeckExtension(std::string_view(name)));
+}
+
 bool acceptFirmware(const char* name, bool isDir) {
   if (isMacOSMetadataEntry(name) || isWindowsMetadataEntry(name) || (!SETTINGS.showHiddenFiles && name[0] == '.')) {
     return false;
@@ -173,9 +177,10 @@ std::string getFileExtension(const std::string& filename);
 }  // namespace
 
 FileBrowserActivity::FileBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                         std::string initialPath, const Mode mode)
-    : Activity("FileBrowser", renderer, mappedInput),
+                                         std::string initialPath, const Mode mode, const StrId directoryTitle)
+    : Activity(mode == Mode::Anki ? "AnkiBrowser" : "FileBrowser", renderer, mappedInput),
       mode(mode),
+      directoryPickerTitle(directoryTitle),
       basepath(initialPath.empty() ? "/" : std::move(initialPath)),
       uiTarget(makeUiTarget(renderer)),
       app(uiTarget, uiTarget.deviceContext()) {}
@@ -200,8 +205,10 @@ bool FileBrowserActivity::loadFilesIntoVector(size_t cap, bool& overflow) {
     return false;
   }
 
-  const auto accept =
-      mode == Mode::PickFirmware ? acceptFirmware : (mode == Mode::PickDirectory ? acceptDirectory : acceptCommon);
+  const auto accept = mode == Mode::PickFirmware ? acceptFirmware
+                                                 : (mode == Mode::PickDirectory ? acceptDirectory
+                                                    : mode == Mode::Anki        ? acceptAnki
+                                                                                : acceptCommon);
 
   files.reserve(std::min<size_t>(cap, INDEX_THRESHOLD));
   for (auto file = root.openNextFile(); file; file = root.openNextFile()) {
@@ -283,8 +290,10 @@ void FileBrowserActivity::loadFilesLocked() {
   if (fileIndex && indexEntry) {
     GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
 
-    const auto accept =
-        mode == Mode::PickFirmware ? acceptFirmware : (mode == Mode::PickDirectory ? acceptDirectory : acceptCommon);
+    const auto accept = mode == Mode::PickFirmware ? acceptFirmware
+                                                   : (mode == Mode::PickDirectory ? acceptDirectory
+                                                      : mode == Mode::Anki        ? acceptAnki
+                                                                                  : acceptCommon);
     if (fileIndex->open(basepath.c_str(), accept)) {
       usingIndex = true;
       return;
@@ -1292,13 +1301,13 @@ void FileBrowserActivity::navigateBack() {
       topIndex = followListSelection(static_cast<int>(selectorIndex), 0, visibleRows, static_cast<int>(entryCount()));
     }
     requestUpdate();
-  } else if (mode != Mode::Books) {
+  } else if (mode == Mode::PickFirmware || mode == Mode::PickDirectory) {
     ActivityResult result;
     result.isCancelled = true;
     setResult(std::move(result));
     finish();
   } else {
-    onGoHome();
+    onGoHome(mode == Mode::Anki ? HomeMenuItem::ANKI : HomeMenuItem::TOOLS);
   }
 }
 
@@ -1499,8 +1508,9 @@ void FileBrowserActivity::render(RenderLock&&) {
       mode == Mode::PickFirmware
           ? std::string(tr(STR_SELECT_FIRMWARE_FILE))
           : (mode == Mode::PickDirectory
-                 ? std::string(tr(STR_SELECT_RECEIVE_FOLDER))
-                 : ((basepath == "/") ? std::string(tr(STR_SD_CARD)) : basepath.substr(basepath.rfind('/') + 1)));
+                 ? std::string(I18N.get(directoryPickerTitle))
+                 : ((basepath == "/") ? std::string(mode == Mode::Anki ? tr(STR_ANKI) : tr(STR_SD_CARD))
+                                      : basepath.substr(basepath.rfind('/') + 1)));
   // Header via GUI.drawHeader (already FreeInkUI-themed) for the battery
   // indicator; the rest of the screen renders through the app.
   const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInput);
@@ -1519,9 +1529,10 @@ void FileBrowserActivity::render(RenderLock&&) {
   uiReady = true;
 
   const size_t visibleEntries = entryCount();
-  const auto backLabel = (basepath == "/") ? (mode == Mode::Books ? mappedInput.withBackArrow(tr(STR_HOME))
-                                                                  : mappedInput.withBackArrow(tr(STR_BACK)))
-                                           : mappedInput.withBackArrow(tr(STR_BACK));
+  const auto backLabel = (basepath == "/")
+                             ? ((mode == Mode::Books || mode == Mode::Anki) ? mappedInput.withBackArrow(tr(STR_HOME))
+                                                                            : mappedInput.withBackArrow(tr(STR_BACK)))
+                             : mappedInput.withBackArrow(tr(STR_BACK));
   // In PickFirmware mode, Confirm on a .bin returns the path to the caller (not "open"); show
   // STR_SELECT instead. Directories in the same picker still descend, so keep STR_OPEN there.
   const bool selectingFirmwareFile =

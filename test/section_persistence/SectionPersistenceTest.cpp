@@ -16,10 +16,14 @@
 #include <GfxRenderer.h>
 
 namespace {
-constexpr uint8_t kFullVersion = 77;
-constexpr uint8_t kPartialVersion = 0xF3;
-constexpr uint8_t kPreviousFullVersion = 76;
-constexpr uint8_t kPreviousPartialVersion = 0xF5;
+// Match Section.cpp's full and suspended cache formats.
+constexpr uint8_t kFullVersion = 78;
+constexpr uint8_t kPartialVersion = 0xF2;
+// Caches written by either pre-merge branch must rebuild.
+constexpr uint8_t kUpstreamFullVersion = 77;
+constexpr uint8_t kUpstreamPartialVersion = 0xF3;
+constexpr uint8_t kForkFullVersion = 67;
+constexpr uint8_t kForkPartialVersion = 0xF5;
 
 ReaderRenderSpec renderSpec() {
   ReaderRenderSpec spec;
@@ -152,7 +156,8 @@ TEST_F(SectionPersistenceTest, FailedCommitKeepsThePreviousReadableCache) {
 }
 
 TEST_F(SectionPersistenceTest, RejectsCachesFromPreviousLayoutRevisions) {
-  for (const uint8_t staleVersion : {kPreviousFullVersion, kPreviousPartialVersion}) {
+  for (const uint8_t staleVersion :
+       {kUpstreamFullVersion, kUpstreamPartialVersion, kForkFullVersion, kForkPartialVersion}) {
     SectionHarness harness;
     harness.begin();
     harness.appendPages(1);

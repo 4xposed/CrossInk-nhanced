@@ -42,6 +42,7 @@
 #include "activities/reader/ReaderOptionsActivity.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/settings/QuickActionsActivity.h"
+#include "activities/settings/LibraryFoldersActivity.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/TouchRegistry.h"
 #include "components/UITheme.h"
@@ -59,6 +60,25 @@ namespace {
 enum class SmokeStep : uint8_t {
   Start,
   Home,
+  HomeMenuSelect,
+  HomeMenuRelease,
+  HomeMenuOpen,
+  HomeMenuOpenRelease,
+  HomeMenuVerify,
+  LibraryArticleTab,
+  LibraryArticleTabRelease,
+  LibraryFocusBooks,
+  LibraryFocusBooksRelease,
+  LibraryOpenArticle,
+  LibraryOpenArticleRelease,
+  LibraryVerifyReader,
+  OpenLibraryFolders,
+  VerifyLibraryFolders,
+  OpenLibraryFolderPicker,
+  VerifyLibraryFolderPicker,
+  LibrarySaveFolderRelease,
+  LibraryVerifySavedFolder,
+  ResumeOriginalSmoke,
   OpdsBrowser,
   OpdsSelectBook,
   OpdsDownloadRelease,
@@ -196,6 +216,7 @@ class SimulatorSmokeTest {
 
   int touchButtonX = 0;
   int touchButtonY = 0;
+  int homeDestination = 0, homeMoves = 0, libraryTabMoves = 0;
   static bool enabled() { return std::getenv("CROSSINK_SIMULATOR_SMOKE_TEST") != nullptr; }
 
   static int pageTurnCount() {
@@ -559,12 +580,143 @@ class SimulatorSmokeTest {
         verifyUpDownShortcutAvailability();
         verifyReaderControlsSettings();
         verifyMixedPageGestures();
+        {
+          JsonDocument original;
+          SETTINGS.toJson(original);
+          JsonDocument changed;
+          changed["libraryMangaFolder"] = "/comics/nested/";
+          changed["libraryBooksFolder"] = "/fiction";
+          changed["libraryArticlesFolder"] = "/essays";
+          SETTINGS.fromJson(changed.as<JsonVariantConst>());
+          if (std::string(SETTINGS.libraryMangaFolder) != "/comics/nested") fail("Library folder normalization failed");
+          if (!SETTINGS.saveToFile()) fail("Library folder save failed");
+          std::strcpy(SETTINGS.libraryMangaFolder, "/wrong");
+          if (!SETTINGS.loadFromFile() || std::string(SETTINGS.libraryMangaFolder) != "/comics/nested" ||
+              std::string(SETTINGS.libraryBooksFolder) != "/fiction" ||
+              std::string(SETTINGS.libraryArticlesFolder) != "/essays")
+            fail("Library folder persistence failed");
+          changed["libraryBooksFolder"] = "/../invalid";
+          SETTINGS.fromJson(changed.as<JsonVariantConst>());
+          if (std::string(SETTINGS.libraryBooksFolder) != "/fiction") fail("Invalid library folder replaced setting");
+          SETTINGS.fromJson(original.as<JsonVariantConst>());
+          if (!SETTINGS.saveToFile()) fail("Library settings restore failed");
+          LOG_INF("SMOKE", "Verified library folder persistence and invalid-path rejection");
+        }
         applyRequestedTheme();
-        activityManager.goHome();
+        activityManager.goHome(HomeMenuItem::LIBRARY);
         queueStep("Home", SmokeStep::Home);
         break;
 
       case SmokeStep::Home:
+        if (!activityManager.isCurrentActivityNamed("Home")) fail("Home did not open");
+        homeMoves = homeDestination;
+        step = SmokeStep::HomeMenuSelect;
+        break;
+      case SmokeStep::HomeMenuSelect:
+        if (homeMoves == 0) {
+          step = SmokeStep::HomeMenuOpen;
+          break;
+        }
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Right);
+        step = SmokeStep::HomeMenuRelease;
+        break;
+      case SmokeStep::HomeMenuRelease:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Right);
+        --homeMoves;
+        queueStep(nullptr, SmokeStep::HomeMenuSelect, 1);
+        break;
+      case SmokeStep::HomeMenuOpen:
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        step = SmokeStep::HomeMenuOpenRelease;
+        break;
+      case SmokeStep::HomeMenuOpenRelease:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+        queueStep("Home destination", SmokeStep::HomeMenuVerify, 16);
+        break;
+      case SmokeStep::HomeMenuVerify: {
+        static constexpr const char* names[] = {"Library", "AnkiBrowser", "OpdsServerList", "NetworkModeSelection",
+                                                "Tools",   "Settings"};
+        if (!activityManager.isCurrentActivityNamed(names[homeDestination]))
+          fail("Home destination %d did not open %s", homeDestination, names[homeDestination]);
+        LOG_INF("SMOKE", "Verified home destination %s", names[homeDestination]);
+        if (homeDestination == 0) {
+          libraryTabMoves = 2;
+          step = SmokeStep::LibraryArticleTab;
+          break;
+        }
+        if (++homeDestination < 6) {
+          activityManager.goHome(HomeMenuItem::LIBRARY);
+          queueStep("Home", SmokeStep::Home);
+        } else
+          step = SmokeStep::OpenLibraryFolders;
+        break;
+      }
+      case SmokeStep::LibraryArticleTab:
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Right);
+        step = SmokeStep::LibraryArticleTabRelease;
+        break;
+      case SmokeStep::LibraryArticleTabRelease:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Right);
+        queueStep("Library category", --libraryTabMoves ? SmokeStep::LibraryArticleTab : SmokeStep::LibraryFocusBooks);
+        break;
+      case SmokeStep::LibraryFocusBooks:
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        step = SmokeStep::LibraryFocusBooksRelease;
+        break;
+      case SmokeStep::LibraryFocusBooksRelease:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+        queueStep("Library article selected", SmokeStep::LibraryOpenArticle);
+        break;
+      case SmokeStep::LibraryOpenArticle:
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        step = SmokeStep::LibraryOpenArticleRelease;
+        break;
+      case SmokeStep::LibraryOpenArticleRelease:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+        queueStep("Library article opened", SmokeStep::LibraryVerifyReader, 8);
+        break;
+      case SmokeStep::LibraryVerifyReader:
+        if (!activityManager.isCurrentActivityNamed("TxtReader")) fail("Article tab did not open its text book");
+        LOG_INF("SMOKE", "Verified category navigation and opening a gallery item");
+        homeDestination = 1;
+        activityManager.goHome(HomeMenuItem::LIBRARY);
+        queueStep("Home with last book preview", SmokeStep::Home);
+        break;
+      case SmokeStep::OpenLibraryFolders:
+        activityManager.replaceActivity(std::make_unique<LibraryFoldersActivity>(renderer, mappedInputManager));
+        queueStep("Library folders", SmokeStep::VerifyLibraryFolders);
+        break;
+      case SmokeStep::VerifyLibraryFolders:
+        if (!activityManager.isCurrentActivityNamed("LibraryFolders")) fail("Library folder settings did not open");
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+        step = SmokeStep::OpenLibraryFolderPicker;
+        break;
+      case SmokeStep::OpenLibraryFolderPicker:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+        queueStep("Library folder picker", SmokeStep::VerifyLibraryFolderPicker);
+        break;
+      case SmokeStep::VerifyLibraryFolderPicker:
+        if (!activityManager.isCurrentActivityNamed("FileBrowser")) fail("Library folder picker did not open");
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Right);
+        step = SmokeStep::LibrarySaveFolderRelease;
+        break;
+      case SmokeStep::LibrarySaveFolderRelease:
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Right);
+        queueStep("Saved library folder", SmokeStep::LibraryVerifySavedFolder);
+        break;
+      case SmokeStep::LibraryVerifySavedFolder:
+        if (!activityManager.isCurrentActivityNamed("LibraryFolders") ||
+            std::string(SETTINGS.libraryMangaFolder) != "/")
+          fail("Folder picker did not persist the selected root");
+        if (!SETTINGS.loadFromFile() || std::string(SETTINGS.libraryMangaFolder) != "/")
+          fail("Picked folder did not reload");
+        std::strcpy(SETTINGS.libraryMangaFolder, "/manga/");
+        if (!SETTINGS.saveToFile()) fail("Could not restore folder fixture");
+        LOG_INF("SMOKE", "Verified folder picker selection and persistence");
+        activityManager.goHome();
+        queueStep("Home after folder picker", SmokeStep::ResumeOriginalSmoke);
+        break;
+      case SmokeStep::ResumeOriginalSmoke:
         activityManager.replaceActivity(std::make_unique<OpdsBookBrowserActivity>(
             renderer, mappedInputManager, OpdsServer{"Simulator", "simulator://"}));
         queueStep("OPDS Browser", SmokeStep::OpdsBrowser);

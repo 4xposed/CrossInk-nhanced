@@ -3,6 +3,7 @@
 #include <FileIndex.h>
 #include <FreeInkApp.h>
 #include <FreeInkUIGfxRenderer.h>
+#include <I18n.h>
 
 #include <array>
 #include <atomic>
@@ -18,7 +19,7 @@
 class FileBrowserActivity final : public Activity {
  public:
   // Picker modes return their selected path via ActivityResult.
-  enum class Mode { Books, PickFirmware, PickDirectory };
+  enum class Mode { Books, Anki, PickFirmware, PickDirectory };
 
  private:
   // FreeInkApp hosts the file list (themed rows, icons, touch routing); the
@@ -60,6 +61,7 @@ class FileBrowserActivity final : public Activity {
   bool lockNextConfirmRelease = false;
 
   Mode mode = Mode::Books;
+  StrId directoryPickerTitle = StrId::STR_SELECT_RECEIVE_FOLDER;
 
   // Files state
   static constexpr size_t INDEX_ROW_CACHE_SIZE = 32;
@@ -108,7 +110,7 @@ class FileBrowserActivity final : public Activity {
 
  public:
   explicit FileBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string initialPath = "/",
-                               Mode mode = Mode::Books);
+                               Mode mode = Mode::Books, StrId directoryTitle = StrId::STR_SELECT_RECEIVE_FOLDER);
   void onEnter() override;
   void onExit() override;
   void loop() override;

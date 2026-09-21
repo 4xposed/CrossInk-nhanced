@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <vector>
 
+#include "test/UniqueTempDirectory.h"
 #include "activities/network/NearbyStatsProtocol.h"
 using namespace nearby_stats;
 namespace {
@@ -94,8 +95,7 @@ void pump(Peer& a, Peer& b, std::deque<Packet>& q) {
 }
 class NearbyProtocolTest : public ::testing::Test {
   void SetUp() override {
-    storage_test::root = "/private/tmp/crossink-nearby-stats-fixture";
-    std::filesystem::remove_all(storage_test::root);
+    storage_test::root = uniqueTempDirectory("crossink-nearby-stats-fixture").string();
     std::filesystem::create_directories(storage_test::root + "/.crosspoint");
     storage_test::failWrite = false;
     storage_test::failSync = false;
@@ -103,7 +103,10 @@ class NearbyProtocolTest : public ::testing::Test {
     storage_test::failWriteCall = storage_test::failSyncCall = storage_test::failCloseCall =
         storage_test::failRenameCall = storage_test::failRenameFromCall = 0;
   }
-  void TearDown() override { EXPECT_EQ(storage_test::openFiles, 0); }
+  void TearDown() override {
+    EXPECT_EQ(storage_test::openFiles, 0);
+    std::filesystem::remove_all(storage_test::root);
+  }
 };
 }  // namespace
 TEST_F(NearbyProtocolTest, UpdatedPeersExchange223ByteSummariesAndDurableAcks) {

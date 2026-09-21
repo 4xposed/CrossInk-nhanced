@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "test/UniqueTempDirectory.h"
 #include "Arduino.h"
 #include "Deinflector.h"
 #include "DictIndex.h"
@@ -510,11 +511,7 @@ std::vector<uint8_t> makeSpx(const std::vector<uint8_t>& idx, uint32_t declaredC
 class JapaneseDictionaryTest : public testing::Test {
  protected:
   void SetUp() override {
-    static std::atomic_uint32_t sequence{0};
-    root_ = std::filesystem::temp_directory_path() /
-            ("crossink-japanese-dictionary-" + std::to_string(sequence.fetch_add(1)));
-    std::filesystem::remove_all(root_);
-    std::filesystem::create_directories(root_);
+    root_ = uniqueTempDirectory("crossink-japanese-dictionary");
     HalStorage::setRoot(root_);
     hal_storage_test::reset();
     dict_memory_test::reset();

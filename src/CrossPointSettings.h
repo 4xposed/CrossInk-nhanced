@@ -549,6 +549,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   char opdsPassword[64] = "";
   char opdsDownloadFolder[64] = "";
   // Nearby file receive destination (empty = SD root).
+  // Fixed SD paths: 1.5 KiB, no per-navigation allocation.
+  char libraryMangaFolder[512] = "/manga/";
+  char libraryBooksFolder[512] = "/epubs/";
+  char libraryArticlesFolder[512] = "/articles/";
   char nearbyReceiveFolder[64] = "";
   // Hide battery percentage
   uint8_t hideBatteryPercentage = HIDE_NEVER;

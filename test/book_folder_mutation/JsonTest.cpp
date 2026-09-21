@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "test/UniqueTempDirectory.h"
 #include "BookMutationJson.h"
 using namespace bookmutation;
 namespace {
@@ -15,9 +16,7 @@ PathEdit change(void*, PathField field, const char*, const char* value, char* ou
   return PathEdit::Keep;
 }
 bool run(const std::string& text, std::string& result, JsonKind kind = JsonKind::Recent) {
-  auto root = std::filesystem::temp_directory_path() / "crossink-mutation-json";
-  std::filesystem::remove_all(root);
-  std::filesystem::create_directories(root);
+  auto root = uniqueTempDirectory("crossink-mutation-json");
   mutation_test::reset(root.string());
   std::ofstream(root / "in") << text;
   FsFile in = Storage.open("/in"), out = Storage.open("/out", O_WRONLY | O_CREAT | O_TRUNC);

@@ -6,6 +6,8 @@ add_executable(BitmapResampleTest
 
 target_include_directories(BitmapResampleTest PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs
+  ${REPO_ROOT}/test/memory_policy/stubs
+  ${REPO_ROOT}/lib/Memory
   ${REPO_ROOT}/lib
   ${REPO_ROOT}/lib/GfxRenderer
 )

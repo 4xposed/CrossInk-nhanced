@@ -1,5 +1,7 @@
 #include "KeyboardLayoutSet.h"
 
+#include <cstring>
+
 #include "CrossPointSettings.h"
 
 namespace keyboard_layouts {
@@ -14,12 +16,12 @@ uint8_t indexOf(const freeink::ui::KeyboardLayoutId id) {
 
 freeink::ui::KeyboardLayoutId forLanguage(const Language language) {
   for (uint8_t i = 0; i < COUNT; ++i) {
-    if (ALL[i].language == language) return ALL[i].id;
+    if (strcmp(ALL[i].languageCode, LANGUAGE_CODES[static_cast<uint8_t>(language)]) == 0) return ALL[i].id;
   }
   return freeink::ui::KeyboardLayoutId::QwertyEn;
 }
 
-constexpr uint16_t ALL_BITS = static_cast<uint16_t>((uint32_t{1} << COUNT) - 1);
+constexpr uint16_t ALL_BITS = LATIN_BITS;
 
 uint16_t layoutBit(const freeink::ui::KeyboardLayoutId id) {
   const uint8_t i = indexOf(id);
@@ -30,13 +32,7 @@ uint16_t layoutBit(const freeink::ui::KeyboardLayoutId id) {
 
 uint16_t enabled() {
   const uint16_t configured = static_cast<uint16_t>(SETTINGS.keyboardLayouts & ALL_BITS);
-  if (configured != 0) {
-    // URL and credential fields still need a Latin layout even when a settings
-    // file was hand-edited to contain only Cyrillic or Hebrew.
-    return (configured & LATIN_BITS) != 0
-               ? configured
-               : static_cast<uint16_t>(configured | layoutBit(freeink::ui::KeyboardLayoutId::QwertyEn));
-  }
+  if (configured != 0) return configured;
 
   return static_cast<uint16_t>(layoutBit(forLanguage(I18N.getLanguage())) |
                                layoutBit(freeink::ui::KeyboardLayoutId::QwertyEn));

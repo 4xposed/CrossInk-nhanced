@@ -806,6 +806,13 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
                             "tapToHideStatusBar", StrId::STR_CAT_CONTROLS));
 
     // --- System ---
+    add(SettingInfo::String(StrId::STR_LIBRARY_MANGA_FOLDER, SETTINGS.libraryMangaFolder,
+                            sizeof(SETTINGS.libraryMangaFolder), "libraryMangaFolder"));
+    add(SettingInfo::String(StrId::STR_LIBRARY_BOOKS_FOLDER, SETTINGS.libraryBooksFolder,
+                            sizeof(SETTINGS.libraryBooksFolder), "libraryBooksFolder"));
+    add(SettingInfo::String(StrId::STR_LIBRARY_ARTICLES_FOLDER, SETTINGS.libraryArticlesFolder,
+                            sizeof(SETTINGS.libraryArticlesFolder), "libraryArticlesFolder"));
+
     add(SettingInfo::String(StrId::STR_DEVICE_NAME, SETTINGS.deviceName, sizeof(SETTINGS.deviceName), "deviceName",
                             StrId::STR_CAT_SYSTEM));
     add(SettingInfo::Value(
@@ -1444,6 +1451,7 @@ inline std::vector<SettingInfo> buildSystemSettingsParentList(const std::vector<
   std::vector<SettingInfo> systemSettings;
   systemSettings.reserve(8);
   systemSettings.push_back(SettingInfo::Submenu(StrId::STR_SYSTEM_DEVICE, SettingAction::SystemDevice));
+  systemSettings.push_back(SettingInfo::Action(StrId::STR_LIBRARY_FOLDERS, SettingAction::LibraryFolders));
   systemSettings.push_back(SettingInfo::Submenu(StrId::STR_SYSTEM_FILES_CACHE, SettingAction::SystemFilesCache));
   systemSettings.push_back(SettingInfo::Submenu(StrId::STR_READING_STATS, SettingAction::SystemReadingStats));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));

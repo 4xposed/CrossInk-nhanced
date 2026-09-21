@@ -11,6 +11,8 @@ class HalFile : public Print {
   int available() const { return 0; }
   size_t position() const { return 0; }
   size_t size() const { return 0; }
+  size_t fileSize() const { return size(); }
+  bool sync() const { return false; }
   int read(void*, size_t) { return 0; }
   bool seek(size_t) { return false; }
   bool seekSet(size_t) { return false; }
@@ -19,6 +21,7 @@ class HalFile : public Print {
   operator bool() const { return false; }
   size_t write(uint8_t) override { return 0; }
   size_t write(const uint8_t*, size_t) { return 0; }
+  size_t write(const void*, size_t) { return 0; }
 };
 
 using FsFile = HalFile;

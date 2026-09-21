@@ -1,0 +1,21 @@
+{
+  "model_interface": "crossink-native-ocr-v2",
+  "recognizer_source": "https://huggingface.co/onnx-community/manga-ocr-base-ONNX",
+  "recognizer_revision": "f9023406bb2f6b17df67bc4a327c56ecd20611f0",
+  "recognizer_base_revision": "aa6573bd10b0d446cbf622e29c3e084914df9741",
+  "detector_source": "https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.2.1/comictextdetector.pt.onnx",
+  "exports": {
+    "comictextdetector.onnx": "1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f",
+    "encoder.onnx": "df35f64c2400ea860c70a2d06f2a1f99892374a78c89fcf35308076557a3863f",
+    "decoder.onnx": "31ca14d6dee6b3966144e128d0481d5a91f5083cbced81fe7a9571713fa50cd4",
+    "vocab.txt": "344fbb6b8bf18c57839e924e2c9365434697e0227fac00b88bb4899b78aa594d",
+    "recognizer.json": "096a193c5de92777aa747c00f9ef2c3fc3b4371cc4b875cea479ac8afa8349e6",
+    "detector.json": "0781749c6119e3aa5fa3af86843c0505058f9ae27f4772d44635088516e0217e"
+  },
+  "notes": [
+    "Public ONNX graphs are downloaded unchanged; no local export or repackaging is required.",
+    "Recognizer parameters are derived from the pinned upstream generation and preprocessing configs.",
+    "Full-sequence decoder retains four-beam search but recomputes previous decoder positions each step.",
+    "Detector output names blk/seg/det map to blocks/mask/lines; numeric random-input parity against prior export passed at rtol=1e-3, atol=1e-3."
+  ]
+}

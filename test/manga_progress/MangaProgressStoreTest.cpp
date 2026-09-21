@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "test/UniqueTempDirectory.h"
 #include "HalStorage.h"
 #include "MangaProgressStore.h"
 
@@ -11,8 +12,7 @@ namespace {
 class MangaProgressStoreTest : public testing::Test {
  protected:
   void SetUp() override {
-    root_ = std::filesystem::temp_directory_path() / "crossink-manga-progress-test";
-    std::filesystem::remove_all(root_);
+    root_ = uniqueTempDirectory("crossink-manga-progress-test");
     std::filesystem::create_directories(root_);
     manga_progress_test::reset(root_);
   }

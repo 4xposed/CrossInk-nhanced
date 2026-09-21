@@ -959,27 +959,15 @@ unsigned long MappedInputManager::getHeldTime() const {
   return heldTime;
 }
 
-namespace {
-
-bool isRightToLeftUiLanguage() {
-  const auto language = I18N.getLanguage();
-  return language == Language::AR || language == Language::HE;
-}
-
-}  // namespace
-
 MappedInputManager::Label MappedInputManager::withBackArrow(const char* text) const {
-  if (isRightToLeftUiLanguage()) return Label::withSuffix(tr(STR_ARROW_RIGHT), text);
   return Label::withPrefix(tr(STR_ARROW_LEFT), text);
 }
 
 MappedInputManager::Label MappedInputManager::withPreviousPageArrow(const char* text) const {
-  if (isRightToLeftUiLanguage()) return Label(text);
   return Label::withPrefix(tr(STR_ARROW_LEFT), text);
 }
 
 MappedInputManager::Label MappedInputManager::withNextPageArrow(const char* text) const {
-  if (isRightToLeftUiLanguage()) return Label(text);
   return Label::withSuffix(tr(STR_ARROW_RIGHT), text);
 }
 

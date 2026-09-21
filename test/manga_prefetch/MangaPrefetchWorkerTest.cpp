@@ -8,6 +8,8 @@
 #include <fstream>
 #include <vector>
 
+#include "test/UniqueTempDirectory.h"
+
 namespace {
 const manga::ImageViewports views{{0, 0, 480, 800}, {0, 0, 800, 480}, 480, 800, 0};
 void writeBmp() {
@@ -34,8 +36,7 @@ void writeBmp() {
 class MangaPrefetchWorker : public testing::Test {
  protected:
   void SetUp() override {
-    storage_test::root = "/private/tmp/crossink-prefetch-worker-native";
-    std::filesystem::remove_all(storage_test::root);
+    storage_test::root = uniqueTempDirectory("crossink-prefetch-worker-native").string();
     std::filesystem::create_directories(storage_test::root);
     task_test::failCreate = false;
     task_test::pause = false;
@@ -60,15 +61,15 @@ TEST_F(MangaPrefetchWorker, TaskFailureLeavesForegroundFilesUsable) {
   task_test::failCreate = true;
   manga::MangaPrefetch worker("/book", 256);
   EXPECT_FALSE(worker.start());
-  EXPECT_FALSE(worker.post("/private/tmp/crossink-prefetch-worker-native/page.bmp", 1, -1, true, views));
+  EXPECT_FALSE(worker.post((storage_test::root + "/page.bmp").c_str(), 1, -1, true, views));
   manga::BitmapPixelInfo info;
-  EXPECT_TRUE(manga::probeBitmapPixels("/private/tmp/crossink-prefetch-worker-native/page.bmp", info));
+  EXPECT_TRUE(manga::probeBitmapPixels((storage_test::root + "/page.bmp").c_str(), info));
 }
 TEST_F(MangaPrefetchWorker, CopiedPathAndBmpPixelsMatchForeground) {
   manga::MangaPrefetch worker("/book", 256);
   ASSERT_TRUE(worker.start());
-  char path[] = "/private/tmp/crossink-prefetch-worker-native/page.bmp";
-  ASSERT_TRUE(worker.post(path, 1, -1, true, views));
+  std::string path = storage_test::root + "/page.bmp";
+  ASSERT_TRUE(worker.post(path.c_str(), 1, -1, true, views));
   path[1] = 'x';
   EXPECT_FALSE(worker.post("/absent.bmp", 2, -1, true, views));
   bool failed = true;
@@ -87,14 +88,14 @@ TEST_F(MangaPrefetchWorker, CopiedPathAndBmpPixelsMatchForeground) {
   for (int row = 0; row < 4; ++row) ASSERT_TRUE(cache.readRow(warm.data() + row * 2, 2));
   cache.close();
   std::vector<uint8_t> scratch(manga::kBitmapPixelScratchBytes);
-  ASSERT_TRUE(manga::writeBitmapPixels("/private/tmp/crossink-prefetch-worker-native/page.bmp",
-                                       "/private/tmp/crossink-prefetch-worker-native/cold.pxc", 5, 4, scratch.data(),
+  ASSERT_TRUE(manga::writeBitmapPixels((storage_test::root + "/page.bmp").c_str(),
+                                       (storage_test::root + "/cold.pxc").c_str(), 5, 4, scratch.data(),
                                        scratch.size()));
   std::ifstream file(storage_test::root + "/cold.pxc", std::ios::binary);
   std::vector<uint8_t> cold((std::istreambuf_iterator<char>(file)), {});
   ASSERT_EQ(cold.size(), warm.size() + 4);
   EXPECT_TRUE(std::equal(warm.begin(), warm.end(), cold.begin() + 4));
-  ASSERT_TRUE(worker.post("/private/tmp/crossink-prefetch-worker-native/page.bmp", 1, -1, true,
+  ASSERT_TRUE(worker.post((storage_test::root + "/page.bmp").c_str(), 1, -1, true,
                           views));  // Valid cache hit also closes reader.
   ASSERT_TRUE(await(worker, failed));
   EXPECT_FALSE(failed);
@@ -103,10 +104,10 @@ TEST_F(MangaPrefetchWorker, CancelPostedGenerationAndRetainSlotUntilAcknowledged
   task_test::pause = true;
   manga::MangaPrefetch worker("/book", 256);
   ASSERT_TRUE(worker.start());
-  ASSERT_TRUE(worker.post("/private/tmp/crossink-prefetch-worker-native/page.bmp", 1, -1, true, views));
+  ASSERT_TRUE(worker.post((storage_test::root + "/page.bmp").c_str(), 1, -1, true, views));
   worker.cancel();
   EXPECT_FALSE(worker.idle());
-  EXPECT_FALSE(worker.post("/private/tmp/crossink-prefetch-worker-native/page.bmp", 2, -1, true, views));
+  EXPECT_FALSE(worker.post((storage_test::root + "/page.bmp").c_str(), 2, -1, true, views));
   task_test::pause = false;
   bool failed = false;
   ASSERT_TRUE(await(worker, failed));
@@ -117,7 +118,7 @@ TEST_F(MangaPrefetchWorker, CancelPostedGenerationAndRetainSlotUntilAcknowledged
 TEST_F(MangaPrefetchWorker, ShutdownJoinsBeforeSourceOwnerDestruction) {
   manga::MangaPrefetch worker("/book", 256);
   ASSERT_TRUE(worker.start());
-  ASSERT_TRUE(worker.post("/private/tmp/crossink-prefetch-worker-native/page.bmp", 1, -1, true, views));
+  ASSERT_TRUE(worker.post((storage_test::root + "/page.bmp").c_str(), 1, -1, true, views));
   worker.stopAndJoin();
   EXPECT_EQ(storage_test::openFiles, 0);
 }
@@ -125,7 +126,7 @@ TEST_F(MangaPrefetchWorker, BoundedPathFailureDisablesOnlyWarming) {
   manga::MangaPrefetch worker("/book", 1025);
   EXPECT_FALSE(worker.start());
   manga::BitmapPixelInfo info;
-  EXPECT_TRUE(manga::probeBitmapPixels("/private/tmp/crossink-prefetch-worker-native/page.bmp", info));
+  EXPECT_TRUE(manga::probeBitmapPixels((storage_test::root + "/page.bmp").c_str(), info));
 }
 TEST_F(MangaPrefetchWorker, RealJpegAndPngUseBorrowedPathAndNeverTouchRenderer) {
   manga::MangaPrefetch worker("/book", 512);
@@ -154,7 +155,7 @@ TEST_F(MangaPrefetchWorker, CancelDuringFinalSyncCannotPublishAndNextGenerationS
   ASSERT_TRUE(worker.start());
   cancelOnSyncWorker = &worker;
   storage_test::onSync = [] { cancelOnSyncWorker->cancel(); };
-  ASSERT_TRUE(worker.post("/private/tmp/crossink-prefetch-worker-native/page.bmp", 1, -1, true, views));
+  ASSERT_TRUE(worker.post((storage_test::root + "/page.bmp").c_str(), 1, -1, true, views));
   bool failed = true;
   ASSERT_TRUE(await(worker, failed));
   EXPECT_FALSE(failed);  // Explicit cancellation must not cause the failure backoff.
@@ -164,7 +165,7 @@ TEST_F(MangaPrefetchWorker, CancelDuringFinalSyncCannotPublishAndNextGenerationS
   for (const auto& file : std::filesystem::recursive_directory_iterator(storage_test::root))
     EXPECT_FALSE(file.path().string().ends_with(".tmp"));
   storage_test::onSync = nullptr;
-  ASSERT_TRUE(worker.post("/private/tmp/crossink-prefetch-worker-native/page.bmp", 1, -1, true, views));
+  ASSERT_TRUE(worker.post((storage_test::root + "/page.bmp").c_str(), 1, -1, true, views));
   ASSERT_TRUE(await(worker, failed));
   EXPECT_FALSE(failed);
   EXPECT_TRUE(manga::MangaPixelCache::sourceIdentity("/book", 1, -1, identity));

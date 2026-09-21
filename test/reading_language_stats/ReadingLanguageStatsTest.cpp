@@ -4,16 +4,19 @@
 #include <filesystem>
 #include <fstream>
 
+#include "test/UniqueTempDirectory.h"
 #include "BookReadingStats.h"
 #include "GlobalReadingStats.h"
 class LanguageStatsTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    storage_test::root = "/private/tmp/crossink-language-stats-fixture";
-    std::filesystem::remove_all(storage_test::root);
+    storage_test::root = uniqueTempDirectory("crossink-language-stats-fixture").string();
     std::filesystem::create_directories(storage_test::root + "/.crosspoint/book");
   }
-  void TearDown() override { EXPECT_EQ(storage_test::openFiles, 0); }
+  void TearDown() override {
+    EXPECT_EQ(storage_test::openFiles, 0);
+    std::filesystem::remove_all(storage_test::root);
+  }
 };
 TEST_F(LanguageStatsTest, BookPublishesVersionSixWithEmptyAppendix) {
   BookReadingStats stats;

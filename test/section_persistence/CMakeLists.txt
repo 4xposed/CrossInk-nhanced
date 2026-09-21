@@ -1,6 +1,7 @@
 add_executable(SectionPersistenceTest
   SectionPersistenceTest.cpp
   SectionPersistenceLinkStubs.cpp
+  ${REPO_ROOT}/lib/Epub/Epub/RubyGlossary.cpp
   ${REPO_ROOT}/lib/Epub/Epub/Section.cpp
 )
 

@@ -20,6 +20,7 @@ class MangaCoverInput {
       RenderLock drain;
     }
   }
+  bool hasInput() const { return relevant; }
   ~MangaCoverInput() {
     if (relevant) work.authorizeIntent(intent);
   }

@@ -23,6 +23,7 @@
 #include "SettingsList.h"
 #include "fontIds.h"
 #include "util/FrontlightSchedule.h"
+#include "util/LibraryPaths.h"
 #include "util/TwoFingerSwipe.h"
 
 void readAndValidate(FsFile& file, uint8_t& member, const uint8_t maxValue) {
@@ -535,6 +536,14 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
         }
       } else {
         value = doc[info.key] | fieldDefault;
+      }
+      if (strcmp(info.key, "libraryMangaFolder") == 0 || strcmp(info.key, "libraryBooksFolder") == 0 ||
+          strcmp(info.key, "libraryArticlesFolder") == 0) {
+        if (!library::normalizeFolder(value, destination, info.stringMaxLen)) {
+          LOG_ERR("CPS", "Invalid library folder for %s", info.key);
+          needsResave = true;
+        }
+        continue;
       }
       strncpy(destination, value.c_str(), info.stringMaxLen - 1);
       destination[info.stringMaxLen - 1] = '\0';
