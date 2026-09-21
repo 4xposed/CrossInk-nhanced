@@ -16,7 +16,7 @@
 #include "CrossPointState.h"
 #include "ImageFolderIndex.h"
 #include "fontIds.h"
-#include "images/Logo120.h"
+#include "images/BongoBootLogo.h"
 
 namespace {
 
@@ -118,10 +118,12 @@ void drawDefaultBootLogo(const GfxRenderer& renderer) {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
 
+  const int logoX = (pageWidth - BongoBootLogoWidth) / 2;
+  const int logoY = (pageHeight - BongoBootLogoHeight) / 2;
+
   renderer.clearScreen();
-  renderer.drawImage(Logo120, (pageWidth - 120) / 2, (pageHeight - 120) / 2, 120, 120);
-  renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 70, tr(STR_CROSSINK), true, EpdFontFamily::BOLD);
-  renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 95, tr(STR_BOOTING));
+  renderer.drawImage(BongoBootLogo, logoX, logoY, BongoBootLogoWidth, BongoBootLogoHeight);
+  renderer.drawCenteredText(SMALL_FONT_ID, logoY + BongoBootLogoHeight + 12, tr(STR_BOOTING));
   renderer.drawCenteredText(SMALL_FONT_ID, pageHeight - 30, CROSSINK_VERSION);
 }
 

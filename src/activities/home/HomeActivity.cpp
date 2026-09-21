@@ -2252,17 +2252,7 @@ void HomeActivity::render(RenderLock&&) {
     }
 
     displayHomeBuffer();
-
-    if (!firstRenderDone) {
-      firstRenderDone = true;
-      requestUpdate();
-      return;
-    }
-
-    if (!recentsLoaded && !recentsLoading) {
-      recentsLoading = true;
-      loadRecentCovers(metrics.homeCoverHeight);
-    }
+    prepareAssetsAfterDisplay();
     return;
   }
 
@@ -2310,15 +2300,7 @@ void HomeActivity::render(RenderLock&&) {
       displayHomeBuffer();
       // E-ink refresh complete — pre-render the missing adjacent frame while idle.
       updateSlidingWindowCache(centerIdx, bookCount);
-      // Mirror the slow-path trigger: generate missing thumbnails on the second
-      // render so the E-ink is already showing something before the SD work starts.
-      if (!firstRenderDone) {
-        firstRenderDone = true;
-        requestUpdate();
-      } else if (!recentsLoaded && !recentsLoading) {
-        recentsLoading = true;
-        loadRecentCovers(metrics.homeCoverHeight);
-      }
+      prepareAssetsAfterDisplay();
       return;
     }
   }
@@ -2377,17 +2359,17 @@ void HomeActivity::render(RenderLock&&) {
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
   displayHomeBuffer();
+  prepareAssetsAfterDisplay();
+}
 
-  if (!firstRenderDone) {
-    firstRenderDone = true;
-    requestUpdate();
-    return;
-  }
-
+void HomeActivity::prepareAssetsAfterDisplay() {
+  // Every theme has already displayed Home. Do deferred SD work now rather than
+  // requesting an identical frame merely to advance initialization.
   if (!recentsLoaded && !recentsLoading) {
-    recentsLoading = true;
-    loadRecentCovers(metrics.homeCoverHeight);
+    loadRecentCovers(UITheme::getInstance().getMetrics().homeCoverHeight);
   }
+  // A cancelled cover batch must not start another round of SD work.
+  if (!recentsLoaded) return;
 
   if (carouselWarmupPending && !carouselFramesReady) {
     // Resolve any missing cover thumbs first, then warm the carousel snapshot.
