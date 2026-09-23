@@ -49,3 +49,6 @@ dist-publish/
 /CMakeLists.txt
 /dependencies.lock
 /sdkconfig.*
+
+# SQLite-style ":memory:" session files written by local tooling; ":" is invalid on Windows.
+:memory:*
