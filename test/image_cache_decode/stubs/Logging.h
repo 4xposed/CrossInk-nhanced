@@ -10,3 +10,6 @@
 #define LOG_INF(tag, ...) \
   do {                    \
   } while (0)
+#define LOG_DBG(tag, ...) \
+  do {                    \
+  } while (0)

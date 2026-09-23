@@ -60,6 +60,7 @@ bool RecentBooksStore::fromJson(JsonVariantConst doc) {
 }
 
 bool RecentBooksStore::saveToFile() const {
+  if (BookFolderMutation::storesFrozen()) return false;
   std::lock_guard<std::mutex> lock(storeMutex);
   JsonDocument doc;
   toJson(doc);
@@ -143,7 +144,7 @@ bool RecentBooksStore::removeByPath(const std::string& path) {
 
 bool RecentBooksStore::updatePath(const std::string& oldPath, const std::string& newPath,
                                   const std::string& oldCachePath, const std::string& newCachePath) {
-  if (BookFolderMutation::storesFrozen()) return;
+  if (BookFolderMutation::storesFrozen()) return false;
   ensureLoaded();
 
   auto it = std::find_if(recentBooks.begin(), recentBooks.end(),
@@ -220,11 +221,6 @@ RecentBook RecentBooksStore::getDataFromBook(std::string path) const {
     return RecentBook{path, lastBookFileName, "", ""};
   }
   return RecentBook{path, "", "", ""};
-}
-
-bool RecentBooksStore::saveToFile() const {
-  if (BookFolderMutation::storesFrozen()) return false;
-  return PersistableStore<RecentBooksStore>::saveToFile();
 }
 
 bool RecentBooksStore::loadFromFile(bool mutationReload) {

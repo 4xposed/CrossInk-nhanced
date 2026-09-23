@@ -1070,10 +1070,7 @@ void enterDeepSleep(bool fromTimeout) {
   if (!activityManager.prepareToSuspend()) {
     pendingDeepSleep = activityManager.retrySuspensionAfterFailure();
     pendingDeepSleepFromTimeout = fromTimeout;
-    if (!pendingDeepSleep) {
-      APP_STATE.quickLockResumePending = false;
-      APP_STATE.quickLockResumeTrigger = static_cast<uint8_t>(QuickLockTrigger::None);
-    }
+    if (!pendingDeepSleep) APP_STATE.quickLockResumePending = false;
     return;
   }
   pendingDeepSleep = false;
@@ -1753,10 +1750,7 @@ void loop() {
       // The simulator's deep sleep returns, unlike hardware. Keep its next
       // test loop from treating the marker as a real reboot resume.
 #ifdef SIMULATOR
-      if (!pendingDeepSleep) {
-        APP_STATE.quickLockResumePending = false;
-        APP_STATE.quickLockResumeTrigger = static_cast<uint8_t>(QuickLockTrigger::None);
-      }
+      if (!pendingDeepSleep) APP_STATE.quickLockResumePending = false;
 #endif
       lastActivityTime = millis();
     }

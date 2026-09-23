@@ -21,6 +21,7 @@
 
 ### Changed
 
+- Updated to CrossInk v1.6.0, bringing its reader, file browser, OPDS, memory and display improvements; books re-paginate once after updating because the layout cache format changed.
 - Native manga OCR precomputes repetition exclusions once per beam, avoiding repeated history scans for every vocabulary token.
 
 - Native manga OCR reuses encoder-state buffers while decoding text, reducing repeated allocations and copies.

@@ -71,8 +71,10 @@ void* operator new(size_t n, const std::nothrow_t&) noexcept {
   if (++allocationIndex == failAllocation) return nullptr;
   return std::malloc(n);
 }
+// Each ditherer keeps all of its error rows in one contiguous allocation.
+constexpr int kDitherRowAllocations = 1;
 TEST(RealCover, DitherRowsFailWithoutPartialInitialization) {
-  for (int failure = 1; failure <= 3; failure++) {
+  for (int failure = 1; failure <= kDitherRowAllocations; failure++) {
     allocationIndex = 0;
     failAllocation = failure;
     Atkinson1BitDitherer dither;
@@ -225,7 +227,7 @@ TEST_F(PublishedCover, EachReachableAllocationPreservesOldPairAndClosesFiles) {
     EXPECT_EQ(manga::generateThumbnailControlled(book, folder.string(), 123, 180, {cancel, &diagnostics}, &diagnostics),
               manga::ThumbnailResult::Cancelled);
     const int count = allocationIndex;
-    ASSERT_GE(count, 8) << fixture;
+    ASSERT_GE(count, 6) << fixture;
     for (int failure = 1; failure <= count; failure++) {
       SCOPED_TRACE(std::string(fixture) + " allocation " + std::to_string(failure));
       allocationIndex = 0;
@@ -459,7 +461,7 @@ TEST_F(PublishedCover, BitmapCancellationIncludesFinalOutputRowAndNoDitherAlloca
   }
 }
 TEST(RealCover, AllDitherClassesRejectEveryInnerAllocation) {
-  for (int failure = 1; failure <= 3; failure++) {
+  for (int failure = 1; failure <= kDitherRowAllocations; failure++) {
     allocationIndex = 0;
     failAllocation = failure;
     AtkinsonDitherer d;
@@ -467,7 +469,7 @@ TEST(RealCover, AllDitherClassesRejectEveryInnerAllocation) {
     failAllocation = 0;
     EXPECT_TRUE(d.begin(123));
   }
-  for (int failure = 1; failure <= 2; failure++) {
+  for (int failure = 1; failure <= kDitherRowAllocations; failure++) {
     allocationIndex = 0;
     failAllocation = failure;
     FloydSteinbergDitherer d;

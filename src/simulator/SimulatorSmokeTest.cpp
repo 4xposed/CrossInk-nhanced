@@ -3500,11 +3500,8 @@ class SimulatorSmokeTest {
           // Arm the same one-shot intent as a Quick Lock timeout before the
           // real canceled sleep path; a later ordinary sleep must not retain it.
           APP_STATE.quickLockResumePending = true;
-          APP_STATE.quickLockResumeTrigger = static_cast<uint8_t>(QuickLockTrigger::ShortPower);
           enterDeepSleep(true);
-          if (APP_STATE.quickLockResumePending ||
-              APP_STATE.quickLockResumeTrigger != static_cast<uint8_t>(QuickLockTrigger::None))
-            fail("Canceled stats sleep retained Quick Lock resume intent");
+          if (APP_STATE.quickLockResumePending) fail("Canceled stats sleep retained Quick Lock resume intent");
           if (activityManager.retrySuspensionAfterFailure()) fail("Failed stats sleep entered drain retry policy");
         } else if (action.x == 2) {
           if (!Storage.remove(marker) || !Storage.rmdir(obstruction))
@@ -3524,9 +3521,7 @@ class SimulatorSmokeTest {
           enterDeepSleep(false);
           if (!hadSleepSeam) unsetenv("CROSSINK_SIMULATOR_MANGA_PREFETCH_STRESS");
           if (!APP_STATE.loadFromFile()) fail("Could not reload ordinary sleep state");
-          if (APP_STATE.quickLockResumePending ||
-              APP_STATE.quickLockResumeTrigger != static_cast<uint8_t>(QuickLockTrigger::None))
-            fail("Ordinary sleep persisted stale Quick Lock resume intent");
+          if (APP_STATE.quickLockResumePending) fail("Ordinary sleep persisted stale Quick Lock resume intent");
           LOG_INF("SMOKE", "Verified ordinary sleep after canceled stats sleep has no Quick Lock wake intent");
         }
         break;

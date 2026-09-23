@@ -405,7 +405,9 @@ void MangaReaderActivity::handleMenuAction(const MenuAction action) {
       startActivityForResult(std::move(activity), [this](const ActivityResult& result) {
         if (!result.isCancelled) {
           if (const auto* target = std::get_if<PercentResult>(&result.data)) {
-            jump(std::min(book.pageCount() - 1, book.pageCount() * std::clamp(target->percent, 0, 100) / 100));
+            const float percent = std::clamp(target->percent, 0.0f, 100.0f);
+            const auto page = static_cast<uint32_t>(static_cast<float>(book.pageCount()) * percent / 100.0f);
+            jump(std::min(book.pageCount() - 1, page));
           }
         }
         childReturned();
