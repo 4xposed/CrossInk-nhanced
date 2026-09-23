@@ -27,6 +27,7 @@
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/icons/listIcons.h"
+#include "components/icons/brightnessMenuIcon.h"
 void HomeActivity::onEnter() {
   NavigationListActivity::onEnter();
   RECENT_BOOKS.ensureLoaded();
@@ -89,6 +90,12 @@ const char* HomeActivity::itemLabel(int index) const {
   static constexpr StrId labels[] = {StrId::STR_LIBRARY,        StrId::STR_ANKI,  StrId::STR_OPDS_BROWSER,
                                      StrId::STR_TRANSFER_FILES, StrId::STR_TOOLS, StrId::STR_SETTINGS_TITLE};
   return I18N.get(labels[index]);
+}
+freeink::ui::BitmapRef HomeActivity::itemIcon(const int index) const {
+  if (index >= 0 && index < itemCount() && kHomeDestinations[index] == HomeDestination::Anki) {
+    return freeink::ui::bitmapFromIcon(icon_anki_24);
+  }
+  return {};
 }
 void HomeActivity::activate(int index) {
   if (index < 0) {
@@ -318,16 +325,7 @@ void HomeActivity::renderTouchHome() {
   lightButton = Rect(menuButton.x - control, top, control, headerHeight);
   renderer.drawText(titleFont, left, top + (headerHeight - titleLine) / 2, tr(STR_HOME));
   icon(icon_menu_32, menuButton.x + (control - 32) / 2, top + (headerHeight - 32) / 2);
-  const int sunX = lightButton.x + control / 2;
-  const int sunY = top + headerHeight / 2;
-  renderer.drawRoundedRect(sunX - 6, sunY - 6, 13, 13, 2, 6, true);
-  for (int dx = -1; dx <= 1; ++dx)
-    for (int dy = -1; dy <= 1; ++dy)
-      if (dx || dy) {
-        const int inner = dx && dy ? 9 : 12;
-        const int outer = dx && dy ? 12 : 16;
-        renderer.drawLine(sunX + dx * inner, sunY + dy * inner, sunX + dx * outer, sunY + dy * outer, 2, true);
-      }
+  icon(icon_brightness_menu_28, lightButton.x + (control - 28) / 2, top + (headerHeight - 28) / 2);
   renderer.drawLine(left, top + headerHeight, left + width, top + headerHeight);
 
   const int destinationHeight = std::max(72, available * 21 / 100);
@@ -416,15 +414,7 @@ void HomeActivity::renderTouchHome() {
   const int libraryX = libraryButton.x + libraryButton.width / 2;
   icon(icon_lyra_library_32, libraryX - 16, iconY);
   const int ankiX = ankiButton.x + ankiButton.width / 2;
-  // Match the reference's open layer outlines at the same weight as the Lucide icons.
-  renderer.drawLine(ankiX, iconY + 2, ankiX + 16, iconY + 10, 2, true);
-  renderer.drawLine(ankiX + 16, iconY + 10, ankiX, iconY + 18, 2, true);
-  renderer.drawLine(ankiX, iconY + 18, ankiX - 16, iconY + 10, 2, true);
-  renderer.drawLine(ankiX - 16, iconY + 10, ankiX, iconY + 2, 2, true);
-  for (int offset : {7, 14}) {
-    renderer.drawLine(ankiX - 16, iconY + 10 + offset, ankiX, iconY + 18 + offset, 2, true);
-    renderer.drawLine(ankiX, iconY + 18 + offset, ankiX + 16, iconY + 10 + offset, 2, true);
-  }
+  icon(icon_anki_32, ankiX - 16, iconY);
   centered(Rect(libraryButton.x, iconY + 44, libraryButton.width, line), tr(STR_LIBRARY), font);
   centered(Rect(ankiButton.x, iconY + 44, ankiButton.width, line), tr(STR_ANKI), font);
 

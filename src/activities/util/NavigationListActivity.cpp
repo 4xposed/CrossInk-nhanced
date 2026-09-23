@@ -83,6 +83,7 @@ void NavigationListActivity::screen(UiApp::ScreenType& screen, void* user) {
   const int count = std::min(self.itemCount(), static_cast<int>(items.size()));
   for (int i = 0; i < count; ++i) {
     items[i].label = self.itemLabel(i);
+    items[i].icon = self.itemIcon(i);
     items[i].subtitle = self.itemValue(i);
     items[i].actionValue = i;
   }

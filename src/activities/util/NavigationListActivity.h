@@ -21,6 +21,7 @@ class NavigationListActivity : public Activity {
   virtual int firstSelection() const { return 0; }
   virtual int itemCount() const = 0;
   virtual const char* itemLabel(int index) const = 0;
+  virtual freeink::ui::BitmapRef itemIcon(int) const { return {}; }
   virtual const char* itemValue(int) const { return nullptr; }
   virtual void activate(int index) = 0;
   virtual void back() { finish(); }

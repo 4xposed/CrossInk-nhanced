@@ -1,0 +1,5 @@
+# Tabler outline brightness menu button. Regenerate with:
+# python3 scripts/generate_icons.py --library tabler \
+#   --manifest src/components/icons/brightnessMenuIcon.manifest \
+#   --sizes 28 --out src/components/icons/brightnessMenuIcon.h
+brightness-menu = sun

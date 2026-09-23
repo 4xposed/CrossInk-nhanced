@@ -45,6 +45,7 @@ class HomeActivity final : public NavigationListActivity {
   int itemCount() const override { return 6; }
   int firstSelection() const override { return book.path.empty() ? 0 : -1; }
   const char* itemLabel(int index) const override;
+  freeink::ui::BitmapRef itemIcon(int index) const override;
   void activate(int index) override;
   void back() override;
   bool showBack() const override { return false; }

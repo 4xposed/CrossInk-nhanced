@@ -9,6 +9,7 @@ image = image
 book-open = book-open
 book = book
 book-marked = book-marked
+anki = layers
 file = file
 wifi = wifi
 lyra-library = library-big
