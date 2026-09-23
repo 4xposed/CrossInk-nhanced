@@ -21,7 +21,11 @@ My goal with this fork was to extend CrossInk to add support for:
 
 The fastest way to install Crossink is by using Inky, Crossink's web companion app: https://inky.crossink.dev/#flash-tools
 
-Download a `firmware-*.bin` from the [releases page](https://github.com/uxjulia/CrossInk/releases), then flash it with the web installer or command line.
+Download a `firmware-*.bin` from the [releases page](https://github.com/4xposed/CrossInk-nhanced/releases), then flash it with the web installer or command line.
+
+Once running firmware from this fork, use Update in Settings to connect to Wi-Fi and install a newer stable release from `4xposed/CrossInk-nhanced`. The updater selects the binary for your device, stages it on the SD card, validates it, and restarts after installation. Keep an SD card inserted with enough free space for the firmware download.
+
+Release maintainers can run the **Build release assets** workflow with a version such as `0.1.1` to create a draft release with device-specific binaries, then publish it when ready. OTA checks published stable releases; drafts and prereleases are not offered. The release version must be newer than the installed version. Devices still running firmware that checks the upstream repository need a one-time manual flash of this fork's firmware to switch update sources.
 
 See [Installation](./docs/installation.md) for step-by-step flashing and revert instructions.
 
