@@ -1,5 +1,7 @@
 #pragma once
 
+#include <CooperativeCancellation.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -13,6 +15,7 @@ enum class JapaneseDictStatus : uint8_t {
   Unavailable,
   ReadError,
   OutOfMemory,
+  Cancelled,
 };
 
 struct DictIndexRecord {
@@ -84,6 +87,11 @@ class DictIndex {
   DictIndex(const DictIndex&) = delete;
   DictIndex& operator=(const DictIndex&) = delete;
 
+  // Configure before open(); the borrowed context must outlive the session.
+  // close() preserves this policy so reopening uses the same cancellation owner.
+  void setCancellation(CooperativeCancellation cancellation = {}) { cancellation_ = cancellation; }
+  CooperativeCancellation cancellation() const { return cancellation_; }
+  bool cancellationRequested() const { return cancellation_.requested(); }
   JapaneseDictStatus open();
   JapaneseDictStatus probeExact(std::string_view headword, DictProbe& out, uint8_t dictMask = DICT_ALL,
                                 uint8_t posMask = 0);
@@ -98,6 +106,7 @@ class DictIndex {
   void close();
 
  private:
+  CooperativeCancellation cancellation_{};
   struct Impl;
   std::unique_ptr<Impl> impl_;
   uint8_t availableSources_ = 0;

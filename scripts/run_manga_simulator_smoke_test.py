@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import re
 import struct
 import subprocess
@@ -269,7 +270,7 @@ def validate_progress(fs_root: Path) -> None:
         )
 
 
-def validate_library(fs_root: Path) -> None:
+def validate_library(fs_root: Path, x4_touch: bool = False) -> None:
     crc = zlib.crc32(MANGA_BOOK.encode("utf-8")) & 0xFFFFFFFF
     cache = fs_root / ".crosspoint" / f"manga_{crc}"
     cover = cache / "thumb_v3_123x180.bmp"
@@ -284,7 +285,34 @@ def validate_library(fs_root: Path) -> None:
         raise RuntimeError("manga cover identity dimensions do not match the request and BMP")
     if zlib.crc32(data) & 0xFFFFFFFF != struct.unpack_from("<I", identity, 28)[0]:
         raise RuntimeError("manga cover identity checksum does not match the BMP")
-    if os.environ.get("CROSSINK_SIMULATOR_SMOKE_THEME", "1") == "1" and not (cache / "thumb_v3_151x226.bmp").is_file():
+    if x4_touch:
+        # X4 Home requests a responsive portrait cover. Recent Books retains its
+        # separately verified 123x180 thumbnail; require an actual Home cache
+        # with dimensions and source identity matching its encoded filename.
+        home_covers = [path for path in cache.glob("thumb_v3_*x*.bmp") if path != cover]
+        valid_home = False
+        for home in home_covers:
+            match = re.fullmatch(r"thumb_v3_(\d+)x(\d+)\.bmp", home.name)
+            if not match:
+                continue
+            requested_width, requested_height = map(int, match.groups())
+            if not 0 < requested_width < requested_height <= 800:
+                continue
+            bitmap = home.read_bytes()
+            identity = home.with_suffix(home.suffix + ".src").read_bytes()
+            actual_width, actual_height = struct.unpack_from("<ii", bitmap, 18)
+            row_bytes = ((actual_width + 31) // 32) * 4
+            if (bitmap[:2] != b"BM" or (actual_width, abs(actual_height)) != (requested_width, requested_height)
+                    or len(bitmap) != 62 + row_bytes * requested_height
+                    or len(identity) != 40 or identity[:4] != b"MCG3"
+                    or struct.unpack_from("<4I", identity, 12) !=
+                       (requested_width, requested_height, actual_width, abs(actual_height))
+                    or zlib.crc32(bitmap) & 0xFFFFFFFF != struct.unpack_from("<I", identity, 28)[0]):
+                raise RuntimeError("X4 manga Home cover or identity is malformed")
+            valid_home = True
+        if not valid_home:
+            raise RuntimeError("X4 manga Home cover was not generated")
+    elif os.environ.get("CROSSINK_SIMULATOR_SMOKE_THEME", "1") == "1" and not (cache / "thumb_v3_151x226.bmp").is_file():
         raise RuntimeError("manga Home cover was not generated")
     if os.environ.get("CROSSINK_SIMULATOR_MANGA_GRAYSCALE"):
         pixel_files = list(cache.glob("pixels_v1_*.pxc"))
@@ -362,6 +390,19 @@ def run_smoke(args: argparse.Namespace) -> int:
                     raise RuntimeError(f"simulator output contained crash pattern: {pattern}")
             if "Simulator smoke test passed" not in output:
                 raise RuntimeError("simulator did not print its success marker")
+            if os.environ.get("CROSSINK_SIMULATOR_MANGA_TOUCH_LOOKUP_ONLY"):
+                capture_dir = os.environ.get("CROSSINK_SIMULATOR_MANGA_TOUCH_CAPTURE_DIR")
+                if capture_dir:
+                    Path(capture_dir).mkdir(parents=True, exist_ok=True)
+                    for name in ("touch-dictionary.bmp",):
+                        shutil.copyfile(temp_root / "fs_" / name, Path(capture_dir) / name)
+                for marker in ("Verified manga bubble tap opens dictionary directly",
+                               "Verified manga dictionary next/previous terms in tapped bubble",
+                               "Rendering Manga touch lookup returns to held panel"):
+                    if marker not in output:
+                        raise RuntimeError(f"missing touch lookup contract: {marker}")
+                print(output, end="")
+                return 0
             if os.environ.get("CROSSINK_SIMULATOR_MANGA_ACTIVE_EVENTS"):
                 count = 5 if args.env == "simulator" else 6
                 for mode in range(count):
@@ -472,7 +513,7 @@ def run_smoke(args: argparse.Namespace) -> int:
             if os.environ.get("CROSSINK_SIMULATOR_MANGA_GRAYSCALE"):
                 validate_grayscale_hashes(output)
             validate_progress(temp_root / "fs_")
-            validate_library(temp_root / "fs_")
+            validate_library(temp_root / "fs_", args.env == "x4-pro-simulator")
         except (OSError, RuntimeError) as error:
             print(output, end="")
             print(f"Manga simulator smoke test failed: {error}", file=sys.stderr)

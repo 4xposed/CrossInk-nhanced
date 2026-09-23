@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "TouchUi.h"
 #include "UIThemeTokens.h"
 #include "components/CompactHeader.h"
 #include "components/HeaderDate.h"
@@ -36,7 +37,8 @@ Layout layout(const Rect& header) {
   // spare space above and below the back button/title instead of placing all
   // of it above the title.
   const int actionX = header.x;
-  const int actionY = header.y + (header.height - actionHeight) / 2;
+  const int actionY =
+      TouchUi::enabled() ? header.y + header.height - actionHeight : header.y + (header.height - actionHeight) / 2;
   const int touchWidth = std::min(touchSize, header.width);
   const int touchHeight = touchSize;
   const int touchX = std::max(header.x, actionX + (actionWidth - touchWidth) / 2);
@@ -114,7 +116,7 @@ void drawCompact(GfxRenderer& renderer, const char* title, const bool readerCont
   const int rightReserve =
       metrics.batteryWidth + 2 * metrics.headerSidePadding + (showDate ? headerDateReservedWidth(renderer) : 0);
   draw(renderer, header, title, readerContext, rightReserve, nullptr, verticalOffset);
-  if (showDate) {
+  if (showDate && !TouchUi::enabled()) {
     const Layout back = layout(header);
     const int offset = effectiveVerticalOffset(back, header, verticalOffset);
     const int titleBaselineY = back.iconRect.y + offset +

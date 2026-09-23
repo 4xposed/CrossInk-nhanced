@@ -1,5 +1,6 @@
 add_executable(TouchReaderPreviewModelTest
   TouchReaderPreviewModelTest.cpp
+  ReaderTouchLookupHoldTest.cpp
 )
 
 target_include_directories(TouchReaderPreviewModelTest PRIVATE

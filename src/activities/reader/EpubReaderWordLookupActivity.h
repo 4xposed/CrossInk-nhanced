@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include "AppCapabilities.h"
 #include "DictionaryDefinitionModel.h"
 #include "DictionaryLookupFlow.h"
 #include "DictionaryScanIdentityPolicy.h"
@@ -36,6 +37,37 @@ class EpubReaderWordLookupActivity final : public Activity {
   void render(RenderLock&&) override;
   bool skipLoopDelay() override;
 #ifdef SIMULATOR
+  unsigned simulatorBackgroundRenderCount() const { return simulatorBackgroundRenderCount_; }
+  bool simulatorSelectedAt(int x, int y) const {
+    return flow_.hasSelection() && candidateAtPoint(x, y, true) == flow_.cursor() && !lookupText_.view().empty();
+  }
+  bool simulatorCandidateTouchPoint(uint16_t index, int& x, int& y) const {
+    const auto* candidate = candidateAt(index);
+    const auto source = sourceView();
+    if (!candidate || candidate->firstGlyph >= source.glyphCount) return false;
+    const auto& glyph = source.glyphs[candidate->firstGlyph];
+    x = glyph.x + glyph.width / 2;
+    y = glyph.y + glyph.height / 2;
+    return true;
+  }
+  void simulatorAnkiTouchPoint(int& x, int& y) const {
+    const auto layout = panelLayoutLocked();
+    const auto button = footerActionRect(layout, 2);
+    x = button.x + button.width / 2;
+    y = button.y + button.height / 2;
+  }
+  uint8_t simulatorAnkiFeedback() const { return ankiSaveFeedback_; }
+  bool simulatorWaitingForTouchSelection() const { return showingTouchSourceSelection(); }
+  void simulatorTermTouchPoint(bool next, int& x, int& y) const {
+    const auto panel = panelLayoutLocked().panel;
+    x = panel.x + panel.width - 22 - (next ? 3 : 4) * 44;
+    y = panel.y + 22;
+  }
+  void simulatorCloseTouchPoint(int& x, int& y) const {
+    const auto panel = panelLayoutLocked().panel;
+    x = panel.x + panel.width - 22;
+    y = panel.y + 22;
+  }
   bool simulatorReadyAt(uint16_t cursor, int definitionPage, const char* word = nullptr) const {
     return externalMode_ && flow_.state() == DictionaryLookupFlowState::Ready && flow_.cursor() == cursor &&
            flow_.definitionPage() == definitionPage && sourceView().glyphCount > 0 &&
@@ -66,8 +98,10 @@ class EpubReaderWordLookupActivity final : public Activity {
     uint16_t discoveredCount = 0;
     int definitionPage = 0;
     int definitionPageCount = 0;
+    uint8_t ankiSaveFeedback = 0;
     bool scanComplete = true;
     bool selectionValid = false;
+    bool sourceSelectionVisible = false;
     bool highlightValid = false;
     PageTextBounds definitionHighlight{};
     bool definitionHighlightValid = false;
@@ -96,7 +130,16 @@ class EpubReaderWordLookupActivity final : public Activity {
   static constexpr size_t kLookupTextBytes = 256;
   static constexpr int kCleanupRefreshInterval = 10;
   static constexpr uint32_t kLongPressMs = 600;
+  static constexpr int kFooterHeight = 48;
 
+  Rect footerActionRect(const PanelLayout& layout, int action) const;
+  void drawFooter(const PanelLayout& layout, const RenderSnapshot& snapshot) const;
+  void openSaveOptions();
+
+  bool showingTouchSourceSelection() const {
+    return touchSourceSelectionVisible_ || (deferToTouchSelection_ && !flow_.hasSelection());
+  }
+  void closeTouchPanelOrLookup();
   void initializeRequest(EpubLookupPageRequest&& request);
   DictionaryStatus openRoutedEngine();
   DictionaryStatus openEngine();
@@ -164,6 +207,9 @@ class EpubReaderWordLookupActivity final : public Activity {
   bool returnToPreviousDefinition();
   void resetDefinitionBackChain();
   void returnCurrentClipping();
+  void addCurrentTermToAnki();
+  uint32_t ankiFeedbackGeneration_ = 0;
+  uint8_t ankiSaveFeedback_ = 0;
 #if CROSSINK_APP_CAP_TOUCH
   bool panelContainsLocked(int x, int y) const;
 #endif
@@ -243,9 +289,25 @@ class EpubReaderWordLookupActivity final : public Activity {
   bool exiting_ = false;
   bool shutdownComplete_ = false;
   bool renderDisabled_ = false;
+#if CROSSINK_APP_DEVICE_X4PRO
+  // Metadata only; retain pixels in the existing framebuffer, never a second buffer.
+  Rect paintedPanel_{};
+  PageTextBounds paintedSourceHighlight_{};
+  int paintedOrientation_ = -1;
+  bool paintedSourceHighlightValid_ = false;
+  bool paintedForegroundBlack_ = true;
+  bool paintedPanelValid_ = false;
+#endif
   bool initialRender_ = true;
   bool framebufferContainsPage_ = false;
+#ifdef SIMULATOR
+  unsigned simulatorBackgroundRenderCount_ = 0;
+#endif
+  bool deferToTouchSelection_ = false;
+  bool returnToTouchSourceSelection_ = false;
+  bool touchSourceSelectionVisible_ = false;
   bool autoLookupInitialWord_ = false;
+  bool approximateSourceTerms_ = false;
   bool pendingInitialTouchSelection_ = false;
   bool dismissOnInitialTouchMiss_ = false;
   bool nearestOnInitialTouchMiss_ = false;
@@ -256,11 +318,13 @@ class EpubReaderWordLookupActivity final : public Activity {
   bool definitionConfirmReleaseConsumed_ = false;
   bool definitionTouchDragLookup_ = false;
   bool dictionarySwitchHeld_ = false;
+  bool saveOptionsHeld_ = false;
   bool dictionaryFontActive_ = false;
   bool readyTimeLogged_ = false;
   bool ignoreInitialBackRelease_ = false;
   bool exitAllOnBackRelease_ = false;
   bool lookupWasSuggestion_ = false;
+  bool lookupUsesPageContext_ = false;
   bool initialRecordLookupHistory_ = true;
   bool recordLookupHistory_ = true;
   bool notFoundShouldRecordHistory_ = true;

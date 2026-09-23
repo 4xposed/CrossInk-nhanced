@@ -1,6 +1,8 @@
 #include "EpubReaderWordLookupActivity.h"
 
 #include <Arduino.h>
+#include <AnkiDeck.h>
+#include <AnkiTermText.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
@@ -22,6 +24,7 @@
 #include "ReaderUtils.h"
 #include "SdCardFontSystem.h"
 #include "activities/settings/DictionarySelectActivity.h"
+#include "activities/util/OptionSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/DictionaryActivityUtils.h"
@@ -214,6 +217,8 @@ void EpubReaderWordLookupActivity::initializeRequest(EpubLookupPageRequest&& req
   initialTouchX_ = request.initialTouchX;
   initialTouchY_ = request.initialTouchY;
   autoLookupInitialWord_ = request.autoLookupInitialWord;
+  approximateSourceTerms_ = request.approximateSourceTerms;
+  deferToTouchSelection_ = request.deferToTouchSelection;
   framebufferContainsPage_ = request.framebufferContainsPage;
   initialRecordLookupHistory_ = request.recordLookupHistory;
   dictionaryFontPointSize_ = request.dictionaryFontPointSize;
@@ -330,7 +335,8 @@ DictionaryStatus EpubReaderWordLookupActivity::initializePageMode(const bool def
         LOG_INF("WLA", "Page scanner retried full capacity after font-cache release attempt (%s)",
                 released ? "released" : "no eligible SD font");
       }};
-  const DictionaryStatus scanStatus = scanner_.begin(source, engine_.backendKind(), probe, memoryRecovery);
+  const DictionaryStatus scanStatus =
+      scanner_.begin(source, engine_.backendKind(), probe, memoryRecovery, TouchUi::enabled(mappedInput));
   if (scanStatus != DictionaryStatus::Found) {
     LOG_ERR("WLA", "Could not initialize page scanner: %u", static_cast<unsigned>(scanStatus));
     return scanStatus;
@@ -372,18 +378,31 @@ void EpubReaderWordLookupActivity::onEnter() {
   notFoundShouldRecordHistory_ = true;
   resetDefinitionBackChain();
   pendingInitialTouchSelection_ = pageMode_ && initialTouchX_ >= 0 && initialTouchY_ >= 0;
-  dismissOnInitialTouchMiss_ = pendingInitialTouchSelection_ && autoLookupInitialWord_;
-  nearestOnInitialTouchMiss_ = pendingInitialTouchSelection_ && !autoLookupInitialWord_;
+  if (TouchUi::enabled(mappedInput) && pendingInitialTouchSelection_ && autoLookupInitialWord_) {
+    int x = 0, y = 0;
+    unsigned long held = 0;
+    if (mappedInput.isScreenTouchTapCandidate(x, y, held)) mappedInput.suppressCurrentTouchContact();
+  }
+  dismissOnInitialTouchMiss_ = pendingInitialTouchSelection_ && autoLookupInitialWord_ && !approximateSourceTerms_;
+  nearestOnInitialTouchMiss_ = pendingInitialTouchSelection_ && (!autoLookupInitialWord_ || approximateSourceTerms_);
 
+  deferToTouchSelection_ = TouchUi::enabled(mappedInput) && pageMode_ &&
+                           (deferToTouchSelection_ || (!externalMode_ && !pendingInitialTouchSelection_));
+  returnToTouchSourceSelection_ = externalMode_ && deferToTouchSelection_;
+  touchSourceSelectionVisible_ = false;
   const DictionaryStatus openStatus = openEngine();
+  LOG_INF("WLA", "Engine open after %lums (backend=%u status=%u)", millis() - openedAtMs_,
+          static_cast<unsigned>(engine_.backendKind()), static_cast<unsigned>(openStatus));
   DictionaryStatus initializationStatus = openStatus;
   if (openStatus == DictionaryStatus::Found) {
     if (pageMode_)
-      initializationStatus = initializePageMode(pendingInitialTouchSelection_);
+      initializationStatus = initializePageMode(pendingInitialTouchSelection_ || deferToTouchSelection_);
     else
       initializeDirectMode();
   }
 
+  LOG_INF("WLA", "Page source ready after %lums (glyphs=%u status=%u)", millis() - openedAtMs_,
+          static_cast<unsigned>(sourceView().glyphCount), static_cast<unsigned>(initializationStatus));
   {
     RenderLock lock(*this);
     const DictionaryFontActivation activation =
@@ -393,6 +412,8 @@ void EpubReaderWordLookupActivity::onEnter() {
   }
 
   if (initializationStatus != DictionaryStatus::Found) {
+    deferToTouchSelection_ = false;
+    returnToTouchSourceSelection_ = false;
     if (pageMode_)
       flow_.beginPage(openedAtMs_, 0, false, 0);
     else
@@ -652,6 +673,7 @@ DictionaryStatus EpubReaderWordLookupActivity::encodeCandidateText(const PageWor
 }
 
 DictionaryStatus EpubReaderWordLookupActivity::prepareLookupText(const uint16_t candidateIndex) {
+  lookupUsesPageContext_ = pageMode_ && replacementLookupText_.empty();
   lookupText_.reset();
   lookupContext_ = {};
   lookupDisplayPrefixLength_ = 0;
@@ -826,7 +848,8 @@ void EpubReaderWordLookupActivity::processWorkerCompletion() {
     flow_.onLookupFinished(generation, status);
     executeFlowCommands();
     publishRenderSnapshot();
-    if (status == DictionaryStatus::NotFound && pendingSuggestions_.count != 0 && !suggestionsShownForGeneration_) {
+    if (status == DictionaryStatus::NotFound && pendingSuggestions_.count != 0 && !suggestionsShownForGeneration_ &&
+        !showingTouchSourceSelection()) {
       suggestionsShownForGeneration_ = true;
       openSuggestions();
     } else if (status == DictionaryStatus::NotFound && recordHistory && !notFoundHistoryRecorded_) {
@@ -869,6 +892,10 @@ void EpubReaderWordLookupActivity::runScanSlice() {
     executeFlowCommands();
     if (flow_.workerOwned() || scanner_.done() || terminal != DictionaryStatus::Found) break;
   }
+  if (deferToTouchSelection_ && !flow_.hasSelection() &&
+      (flow_.scanFailed() || (scanner_.done() && scanner_.candidateCount() == 0))) {
+    deferToTouchSelection_ = false;
+  }
   if (beforeCount != scanner_.candidateCount() || beforeDone != scanner_.done()) {
     publishRenderSnapshot(scanner_.done() || beforeCount == 0 || flow_.waitingForNextCandidate());
   }
@@ -897,11 +924,13 @@ void EpubReaderWordLookupActivity::publishRenderSnapshot(const bool requestRende
     const DictionaryLookupCandidatePresentation presentation =
         dictionaryLookupCandidatePresentation(pageMode_, flow_.hasSelection(), flow_.cursor(), flow_.discoveredCount());
     renderSnapshot_.state = flow_.state();
+    renderSnapshot_.ankiSaveFeedback = ankiFeedbackGeneration_ == flow_.generation() ? ankiSaveFeedback_ : 0;
     renderSnapshot_.backend = cacheBackend_;
     renderSnapshot_.cursor = presentation.cursor;
     renderSnapshot_.discoveredCount = presentation.discoveredCount;
     renderSnapshot_.scanComplete = flow_.scanComplete();
     renderSnapshot_.selectionValid = presentation.selectionValid;
+    renderSnapshot_.sourceSelectionVisible = showingTouchSourceSelection();
     renderSnapshot_.definitionPage = flow_.definitionPage();
     renderSnapshot_.definitionPageCount = flow_.definitionPageCount();
     if (externalMode_ && externalTextViewport_.height > 0) {
@@ -912,7 +941,8 @@ void EpubReaderWordLookupActivity::publishRenderSnapshot(const bool requestRende
     updateHighlightSnapshot(renderSnapshot_);
   }
   const bool awaitingFirstDefinition = !readyTimeLogged_ && !flow_.openDeadlineReached(millis());
-  if (requestRender && dictionaryLookupShouldRenderSnapshot(flow_.state(), awaitingFirstDefinition)) {
+  if (requestRender &&
+      (showingTouchSourceSelection() || dictionaryLookupShouldRenderSnapshot(flow_.state(), awaitingFirstDefinition))) {
     requestUpdate();
   }
 }
@@ -954,6 +984,94 @@ void EpubReaderWordLookupActivity::finishLookup(const bool cancelled) {
   result.isCancelled = cancelled;
   setResult(std::move(result));
   finish();
+}
+
+void EpubReaderWordLookupActivity::addCurrentTermToAnki() {
+  if (flow_.state() != DictionaryLookupFlowState::Ready || flow_.workerOwned() ||
+      DictionaryLookupWorker::instance().isBusy() || activeResult_.status != DictionaryStatus::Found) return;
+  // Card-sized text exceeds the render/main task stack budget. Allocate only
+  // for this explicit save action and release it before returning to lookup.
+  auto answer = makeUniqueNoThrow<char[]>(kMaxCardFieldTextBytes + 1);
+  AnkiDeck::AddTermResult saved = AnkiDeck::AddTermResult::Error;
+  if (answer) {
+    AnkiTermText text(answer.get(), kMaxCardFieldTextBytes);
+    if (!activeResult_.reading.empty()) {
+      text.append(activeResult_.reading.view());
+      text.append("\n\n");
+    }
+    const auto* candidate = selectedCandidate();
+    const auto source = sourceView();
+    if (lookupUsesPageContext_ && candidate && source.glyphs) {
+      text.append("[");
+      const uint16_t first = candidate->firstGlyph > 24 ? candidate->firstGlyph - 24 : 0;
+      const uint16_t end = std::min<unsigned>(source.glyphCount, candidate->firstGlyph + candidate->glyphCount + 24);
+      for (uint16_t i = first; i < end; ++i) {
+        char encoded[4];
+        size_t count = 0;
+        if (appendCodepoint(source.glyphs[i].codepoint, encoded, sizeof(encoded), count))
+          text.append({encoded, count});
+      }
+      text.append("]\n\n");
+    }
+    const auto status = engine_.streamDefinition(activeResult_.definition, DictionaryDefinitionMode::Styled,
+        {&text, [](void* context, const DictionaryDefinitionSpan& span) {
+          auto& output = *static_cast<AnkiTermText*>(context);
+          if (span.lineBreak || span.listItem) output.append("\n");
+          output.append(span.text);
+          return true;
+        }});
+    if (status == DictionaryStatus::Found) {
+      const auto term = activeResult_.headword.empty() ? activeResult_.surface.view() : activeResult_.headword.view();
+      saved = AnkiDeck::addSavedTerm(term.empty() ? lookupText_.view() : term, text.finish(), tr(STR_ANKI_SAVED_TERMS));
+    } else {
+      LOG_ERR("WLA", "Could not collect definition for Anki: %u", static_cast<unsigned>(status));
+    }
+  } else {
+    LOG_ERR("WLA", "OOM allocating saved Anki term text");
+  }
+  ankiFeedbackGeneration_ = flow_.generation();
+  ankiSaveFeedback_ = saved == AnkiDeck::AddTermResult::Added ? 1 : saved == AnkiDeck::AddTermResult::AlreadyAdded ? 2 : 3;
+  publishRenderSnapshot();
+}
+
+void EpubReaderWordLookupActivity::openSaveOptions() {
+  if (flow_.state() != DictionaryLookupFlowState::Ready || flow_.workerOwned() ||
+      DictionaryLookupWorker::instance().isBusy() || activeResult_.status != DictionaryStatus::Found)
+    return;
+  // Reuse the existing options activity. Its two short labels and activity are
+  // allocated only for this explicit action, never during lookup or redraw.
+  std::vector<std::string> options;
+  options.reserve(2);
+  options.emplace_back(tr(STR_ADD_TO_ANKI));
+  if (pageMode_ && selectedCandidate()) options.emplace_back(tr(STR_SAVE_CLIPPING));
+  auto child = makeUniqueNoThrow<OptionSelectionActivity>(renderer, mappedInput, "DictionarySave", StrId::STR_SAVE,
+                                                          std::move(options), 0, true);
+  if (!child) {
+    LOG_ERR("WLA", "OOM allocating dictionary save options");
+    return;
+  }
+  startActivityForResult(std::move(child), [this](const ActivityResult& result) {
+    {
+      RenderLock lock(*this);
+      // The options screen replaced the page framebuffer; restore it before
+      // drawing this panel even on devices that reuse unchanged backgrounds.
+      initialRender_ = true;
+      framebufferContainsPage_ = false;
+    }
+    if (!result.isCancelled) {
+      if (const auto* selected = std::get_if<OptionSelectionResult>(&result.data)) {
+        if (selected->index == 0) {
+          addCurrentTermToAnki();
+          return;
+        }
+        if (selected->index == 1 && pageMode_) {
+          returnCurrentClipping();
+          return;
+        }
+      }
+    }
+    requestUpdate();
+  });
 }
 
 void EpubReaderWordLookupActivity::returnCurrentClipping() {
@@ -1211,7 +1329,8 @@ void EpubReaderWordLookupActivity::openDictionarySwitcher() {
     nearestOnInitialTouchMiss_ = false;
     initialTouchMiss_ = false;
     recordLookupHistory_ = false;
-    const DictionaryStatus initializationStatus = initializePageMode(pendingInitialTouchSelection_);
+    const DictionaryStatus initializationStatus =
+        initializePageMode(pendingInitialTouchSelection_ || deferToTouchSelection_);
     if (initializationStatus != DictionaryStatus::Found) {
       flow_.onInitializationFailed(initializationStatus);
       publishRenderSnapshot();
@@ -1259,7 +1378,18 @@ uint16_t EpubReaderWordLookupActivity::nearestCandidateAt(const int x, const int
 bool EpubReaderWordLookupActivity::resolvePendingInitialTouch() {
   if (!pendingInitialTouchSelection_) return true;
   const uint16_t exact = candidateAtPoint(initialTouchX_, initialTouchY_, true);
-  if (exact != UINT16_MAX && flow_.selectInitialCandidate(exact)) {
+  const bool replaceFromSelector = touchSourceSelectionVisible_ && flow_.hasSelection();
+  const bool selected = exact != UINT16_MAX &&
+                        (replaceFromSelector ? (exact == flow_.cursor() ? flow_.replaceCurrentLookup()
+                                                                        : flow_.moveCursor(int(exact) - flow_.cursor()))
+                                             : flow_.selectInitialCandidate(exact));
+  if (selected) {
+    if (replaceFromSelector) {
+      touchSourceSelectionVisible_ = false;
+      resetDefinitionBackChain();
+      RenderLock lock(*this);
+      clearDefinitionSelection();
+    }
     pendingInitialTouchSelection_ = false;
     initialTouchMiss_ = false;
     return true;
@@ -1288,7 +1418,16 @@ bool EpubReaderWordLookupActivity::resolvePendingInitialTouch() {
     const uint16_t nearest = nearestCandidateAt(initialTouchX_, initialTouchY_);
     if (nearest != UINT16_MAX && flow_.selectInitialCandidate(nearest)) initialTouchMiss_ = false;
   }
-  if (initialTouchMiss_ && !dismissOnInitialTouchMiss_) flow_.onInitializationFailed(DictionaryStatus::NotFound);
+  if (initialTouchMiss_ && TouchUi::enabled(mappedInput) && touchedGlyph != UINT16_MAX) {
+    // A real word with no dictionary candidate still deserves visible feedback.
+    // Only holds on page whitespace dismiss without a result.
+    dismissOnInitialTouchMiss_ = false;
+  }
+  if (initialTouchMiss_ && !dismissOnInitialTouchMiss_) {
+    touchSourceSelectionVisible_ = false;
+    deferToTouchSelection_ = false;
+    flow_.onInitializationFailed(DictionaryStatus::NotFound);
+  }
   return !initialTouchMiss_;
 }
 
@@ -1512,9 +1651,30 @@ bool EpubReaderWordLookupActivity::lookupDefinitionTokenAt(const int x, const in
 }
 #endif
 
+void EpubReaderWordLookupActivity::closeTouchPanelOrLookup() {
+  if (returnToTouchSourceSelection_ && !showingTouchSourceSelection()) {
+    // Keep the OCR source and dictionary session alive for another word tap.
+    // The result is modal; closing it reveals the same selector underneath.
+    touchSourceSelectionVisible_ = true;
+    pendingInitialTouchSelection_ = false;
+    resetDefinitionBackChain();
+    {
+      RenderLock lock(*this);
+      clearDefinitionSelection();
+    }
+    publishRenderSnapshot();
+    return;
+  }
+  finishLookup(true);
+}
+
 void EpubReaderWordLookupActivity::loop() {
   processWorkerCompletion();
   if (exiting_) return;
+  if (flow_.hasSelection() && !touchSourceSelectionVisible_) {
+    pendingInitialTouchSelection_ = false;
+    deferToTouchSelection_ = false;
+  }
   observeOpenDeadline(millis());
 
   if (ignoreInitialBackRelease_) {
@@ -1552,7 +1712,7 @@ void EpubReaderWordLookupActivity::loop() {
       return;
     }
     if (returnToPreviousDefinition()) return;
-    finishLookup(true);
+    closeTouchPanelOrLookup();
     return;
   }
   if (dictionaryLookupPowerReleaseDismisses(SETTINGS.shortPwrBtn,
@@ -1614,6 +1774,19 @@ void EpubReaderWordLookupActivity::loop() {
         lookupDefinitionSelection();
       return;
     }
+  }
+
+  if (saveOptionsHeld_) {
+    if (!mappedInput.isPressed(MappedInputManager::Button::Right)) {
+      saveOptionsHeld_ = false;
+      openSaveOptions();
+    }
+    return;
+  }
+  if (!definitionSelectionMode_ && mappedInput.isPressed(MappedInputManager::Button::Right) &&
+      mappedInput.getHeldTime() >= kLongPressMs) {
+    saveOptionsHeld_ = true;
+    return;
   }
 
   const bool sideButtonsForLookup = dictionaryLookupUsesSideButtons(
@@ -1749,7 +1922,7 @@ void EpubReaderWordLookupActivity::loop() {
   int touchDownX = 0;
   int touchDownY = 0;
   if (mappedInput.wasScreenTouchDown(touchDownX, touchDownY)) {
-    if (selectDefinitionTokenAt(touchDownX, touchDownY, /*beginTouchDrag=*/true)) {
+    if (!showingTouchSourceSelection() && selectDefinitionTokenAt(touchDownX, touchDownY, /*beginTouchDrag=*/true)) {
       return;
     }
   }
@@ -1757,11 +1930,103 @@ void EpubReaderWordLookupActivity::loop() {
   int touchX = 0;
   int touchY = 0;
   if (mappedInput.wasScreenTapped(touchX, touchY)) {
-    if (externalMode_ && pageTextViewportContains(externalTextViewport_, touchX, touchY)) {
+    const bool selectingSource = showingTouchSourceSelection();
+    if (selectingSource && touchY >= renderer.getScreenHeight() - 48 && touchX >= renderer.getScreenWidth() - 64) {
+      finishLookup(true);
+      return;
+    }
+    bool touchesPanel = false;
+    if (TouchUi::enabled(mappedInput) && !selectingSource) {
+      RenderLock lock(*this);
+      touchesPanel = panelContainsLocked(touchX, touchY);
+    }
+    if (!touchesPanel && pageMode_ && !approximateSourceTerms_ && (!returnToTouchSourceSelection_ || selectingSource) &&
+        (TouchUi::enabled(mappedInput) ||
+         (externalMode_ && pageTextViewportContains(externalTextViewport_, touchX, touchY)))) {
       const auto candidate = candidateAtPoint(touchX, touchY, true);
-      if (candidate != UINT16_MAX && flow_.moveCursor(int(candidate) - flow_.cursor())) {
-        resetDefinitionBackChain();
-        recordLookupHistory_ = true;
+      if (candidate != UINT16_MAX) {
+        const bool selected = flow_.hasSelection()
+                                  ? (candidate == flow_.cursor() ? flow_.replaceCurrentLookup()
+                                                                 : flow_.moveCursor(int(candidate) - flow_.cursor()))
+                                  : flow_.selectInitialCandidate(candidate);
+        if (selected) {
+          touchSourceSelectionVisible_ = false;
+          pendingInitialTouchSelection_ = false;
+          initialTouchMiss_ = false;
+          deferToTouchSelection_ = false;
+          initialTouchX_ = touchX;
+          initialTouchY_ = touchY;
+          resetDefinitionBackChain();
+          recordLookupHistory_ = true;
+          {
+            RenderLock lock(*this);
+            clearDefinitionSelection();
+          }
+          executeFlowCommands();
+          publishRenderSnapshot();
+        }
+        return;
+      }
+      if (selectingSource) {
+        // Preserve a tap while the bounded scan has not reached this word yet.
+        const auto source = sourceView();
+        if (pageTextRangeContains(source, 0, source.glyphCount, touchX, touchY)) {
+          initialTouchX_ = touchX;
+          initialTouchY_ = touchY;
+          pendingInitialTouchSelection_ = true;
+          dismissOnInitialTouchMiss_ = false;
+          nearestOnInitialTouchMiss_ = false;
+          resolvePendingInitialTouch();
+          executeFlowCommands();
+          publishRenderSnapshot();
+        }
+        return;
+      }
+      if (!TouchUi::enabled(mappedInput)) return;
+    }
+    bool insidePanel = false;
+    bool insideFooter = false;
+    int headerAction = -1;
+    bool insideBody = false;
+    int footerAction = -1;
+    {
+      RenderLock lock(*this);
+      const PanelLayout layout = panelLayoutLocked();
+      insidePanel = panelContainsLocked(touchX, touchY);
+      if (TouchUi::enabled(mappedInput) && insidePanel && touchY < layout.panel.y + 44) {
+        const int fromRight = layout.panel.x + layout.panel.width - touchX;
+        if (fromRight <= (approximateSourceTerms_ ? 220 : 132)) headerAction = (fromRight - 1) / 44;
+      }
+      insideFooter = touchY >= layout.panel.y + layout.panel.height - kFooterHeight;
+      if (insideFooter) {
+        for (int action = 0; action < 3; ++action) {
+          const Rect button = footerActionRect(layout, action);
+          if (touchX >= button.x && touchX < button.x + button.width && touchY >= button.y &&
+              touchY < button.y + button.height)
+            footerAction = action;
+        }
+      }
+      insideBody = touchY >= layout.bodyY && touchY < layout.bodyBottom;
+    }
+    if (!insidePanel) {
+      closeTouchPanelOrLookup();
+      return;
+    }
+    if (headerAction >= 0) {
+      if (headerAction == 0) {
+        closeTouchPanelOrLookup();
+      } else if (headerAction >= 3) {
+        if (flow_.moveCursor(headerAction == 3 ? 1 : -1)) {
+          resetDefinitionBackChain();
+          recordLookupHistory_ = true;
+          {
+            RenderLock lock(*this);
+            clearDefinitionSelection();
+          }
+          executeFlowCommands();
+          publishRenderSnapshot();
+        }
+      } else if (flow_.moveDefinitionPage(headerAction == 1 ? 1 : -1)) {
         {
           RenderLock lock(*this);
           clearDefinitionSelection();
@@ -1771,26 +2036,12 @@ void EpubReaderWordLookupActivity::loop() {
       }
       return;
     }
-    bool insidePanel = false;
-    bool insideFooter = false;
-    bool insideBody = false;
-    bool insideRightHalf = false;
-    {
-      RenderLock lock(*this);
-      const PanelLayout layout = panelLayoutLocked();
-      insidePanel = panelContainsLocked(touchX, touchY);
-      insideFooter = touchY >= layout.panel.y + layout.panel.height - layout.lineHeight * 2;
-      insideBody = touchY >= layout.bodyY && touchY < layout.bodyBottom;
-      insideRightHalf = touchX >= layout.panel.x + layout.panel.width / 2;
-    }
-    if (!insidePanel) {
-      finishLookup(true);
-      return;
-    }
     if (insideFooter) {
-      if (pageMode_ && insideRightHalf) {
+      if (footerAction == 2) {
+        addCurrentTermToAnki();
+      } else if (footerAction == 1 && pageMode_) {
         returnCurrentClipping();
-      } else if (capabilities_.dictionarySwitch) {
+      } else if (footerAction == 0 && capabilities_.dictionarySwitch) {
         openDictionarySwitcher();
       }
       return;
@@ -1823,25 +2074,42 @@ EpubReaderWordLookupActivity::PanelLayout EpubReaderWordLookupActivity::panelLay
   const int bottomMargin = std::max(metrics.optionPopupDialogSideMargin, viewBottom);
   const int availableWidth = std::max(1, safe.width - sideMargin * 2);
   const int availableHeight = std::max(1, safe.height - topMargin - bottomMargin);
-  const int desiredHeight = std::max(availableHeight / 2, (availableHeight * 2) / 3);
+  int desiredHeight = std::max(availableHeight / 2, (availableHeight * 2) / 3);
+  if (TouchUi::enabled(mappedInput) && definitionModel_.state() == DefinitionBuildState::Ready) {
+    int rows = 1 + !activeResult_.reading.empty() + !bookReading_.empty() +
+               (activeResult_.transformed && !activeResult_.surface.empty());
+    desiredHeight =
+        std::min(desiredHeight, metrics.optionPopupInnerPadding * 2 + 44 + metrics.optionPopupTitleGap * 3 +
+                                    (rows + std::max(1, static_cast<int>(definitionModel_.page().lineCount))) *
+                                        std::max(1, renderer.getLineHeight(definitionFontId_)) +
+                                    kFooterHeight);
+  }
   const int panelHeight = std::clamp(desiredHeight, 1, availableHeight);
 
   PanelLayout layout;
-  layout.panel =
-      Rect{safe.x + sideMargin, safe.y + safe.height - bottomMargin - panelHeight, availableWidth, panelHeight};
+  layout.panel = Rect{safe.x + sideMargin,
+                      TouchUi::enabled(mappedInput) ? safe.y + (safe.height - panelHeight) / 2
+                                                    : safe.y + safe.height - bottomMargin - panelHeight,
+                      availableWidth, panelHeight};
   const int inner = metrics.optionPopupInnerPadding;
   layout.contentX = layout.panel.x + inner;
   layout.contentWidth = std::max(1, layout.panel.width - inner * 2);
   layout.lineHeight = std::max(1, renderer.getLineHeight(definitionFontId_));
-  const int headerHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int headerHeight = TouchUi::enabled(mappedInput) ? 44 : renderer.getLineHeight(UI_10_FONT_ID);
   layout.titleY = layout.panel.y + inner + headerHeight + metrics.optionPopupTitleGap;
   int metadataRows = 1;
   if (activeResult_.transformed && !activeResult_.surface.empty()) ++metadataRows;
   if (!activeResult_.reading.empty()) ++metadataRows;
   if (!bookReading_.empty()) ++metadataRows;
   layout.bodyY = layout.titleY + metadataRows * layout.lineHeight + metrics.optionPopupTitleGap;
-  layout.bodyBottom = layout.panel.y + layout.panel.height - inner - layout.lineHeight - metrics.optionPopupTitleGap;
-  layout.linesPerPage = std::max(1, (layout.bodyBottom - layout.bodyY) / layout.lineHeight);
+  layout.bodyBottom = layout.panel.y + layout.panel.height - inner - kFooterHeight - metrics.optionPopupTitleGap;
+  // Keep pagination capacity fixed when a short result shrinks the visible panel.
+  // Otherwise moving to another definition page would reflow it at the old page's size.
+  const int paginationHeight =
+      TouchUi::enabled(mappedInput) ? std::max(availableHeight / 2, (availableHeight * 2) / 3) : panelHeight;
+  layout.linesPerPage = std::max(
+      1, (paginationHeight - (layout.bodyY - layout.panel.y) - inner - kFooterHeight - metrics.optionPopupTitleGap) /
+             layout.lineHeight);
   return layout;
 }
 
@@ -1853,6 +2121,9 @@ bool EpubReaderWordLookupActivity::panelContainsLocked(const int x, const int y)
 #endif
 
 void EpubReaderWordLookupActivity::renderReaderBackground() {
+#ifdef SIMULATOR
+  ++simulatorBackgroundRenderCount_;
+#endif
   if (!pageMode_) {
     renderer.clearScreen(ReaderUtils::readerBackgroundColor());
     return;
@@ -1905,6 +2176,14 @@ void EpubReaderWordLookupActivity::drawPanelFrame(const PanelLayout& layout) con
   const bool foregroundBlack = ReaderUtils::readerForegroundBlack();
   const Color foreground = foregroundBlack ? Color::Black : Color::White;
   const Color background = foregroundBlack ? Color::White : Color::Black;
+  if (TouchUi::enabled(mappedInput)) {
+    // The reference uses a crisp paper panel with a small offset shadow.
+    renderer.fillRect(layout.panel.x + 3, layout.panel.y + 4, layout.panel.width, layout.panel.height, foregroundBlack);
+    renderer.fillRect(layout.panel.x - 1, layout.panel.y - 1, layout.panel.width + 2, layout.panel.height + 2,
+                      foregroundBlack);
+    renderer.fillRect(layout.panel.x, layout.panel.y, layout.panel.width, layout.panel.height, !foregroundBlack);
+    return;
+  }
   if (metrics.popupCornerRadius > 0) {
     renderer.fillRoundedRect(layout.panel.x - frame, layout.panel.y - frame, layout.panel.width + frame * 2,
                              layout.panel.height + frame * 2, metrics.popupCornerRadius + frame, foreground);
@@ -1931,6 +2210,34 @@ void EpubReaderWordLookupActivity::drawPanelHeader(const PanelLayout& layout, co
   renderer.drawText(UI_10_FONT_ID, layout.contentX, layout.panel.y + 3,
                     sourceTruncated() ? tr(STR_LOOKUP_TRUNCATED) : tr(STR_LOOKUP), foregroundBlack,
                     EpdFontFamily::BOLD);
+  if (TouchUi::enabled(mappedInput)) {
+    const int right = layout.panel.x + layout.panel.width;
+    const int cy = layout.panel.y + 22;
+    char pages[48]{};
+    if (approximateSourceTerms_)
+      std::snprintf(pages, sizeof(pages), "%s · %d/%d", position, snapshot.definitionPage + 1,
+                    std::max(1, snapshot.definitionPageCount));
+    else
+      std::snprintf(pages, sizeof(pages), "%d/%d", snapshot.definitionPage + 1,
+                    std::max(1, snapshot.definitionPageCount));
+    renderer.drawText(UI_10_FONT_ID, layout.contentX, layout.panel.y + 23, pages, foregroundBlack);
+    for (int action = 0; action < (approximateSourceTerms_ ? 5 : 3); ++action) {
+      const int cx = right - 22 - action * 44;
+      if (action == 0) {
+        renderer.drawLine(cx - 6, cy - 6, cx + 6, cy + 6, foregroundBlack);
+        renderer.drawLine(cx - 6, cy + 6, cx + 6, cy - 6, foregroundBlack);
+      } else {
+        const int direction = action == 1 || action == 3 ? 1 : -1;
+        renderer.drawLine(cx - direction * 4, cy - 7, cx + direction * 4, cy, foregroundBlack);
+        renderer.drawLine(cx + direction * 4, cy, cx - direction * 4, cy + 7, foregroundBlack);
+        if (action >= 3) {
+          renderer.drawLine(cx - direction * 10, cy - 7, cx - direction * 2, cy, foregroundBlack);
+          renderer.drawLine(cx - direction * 2, cy, cx - direction * 10, cy + 7, foregroundBlack);
+        }
+      }
+    }
+    return;
+  }
   if (position[0] != '\0') {
     const int width = renderer.getTextWidth(UI_10_FONT_ID, position);
     renderer.drawText(UI_10_FONT_ID, layout.panel.x + layout.panel.width - width - 4, layout.panel.y + 3, position,
@@ -2028,6 +2335,33 @@ void EpubReaderWordLookupActivity::drawDefinition(const PanelLayout& layout) con
   drawDefinitionPass(layout);
 }
 
+Rect EpubReaderWordLookupActivity::footerActionRect(const PanelLayout& layout, const int action) const {
+  const int left = layout.contentX + layout.contentWidth * action / 3;
+  const int right = layout.contentX + layout.contentWidth * (action + 1) / 3;
+  return Rect{left + 2, layout.panel.y + layout.panel.height - kFooterHeight, right - left - 4, kFooterHeight - 4};
+}
+
+void EpubReaderWordLookupActivity::drawFooter(const PanelLayout& layout, const RenderSnapshot& snapshot) const {
+  const bool ink = ReaderUtils::readerForegroundBlack();
+  const char* source =
+      snapshot.backend == DictionaryBackendKind::Japanese ? tr(STR_DICT_EFFECTIVE_JAPANESE) : tr(STR_DICTIONARY);
+  const char* save = snapshot.ankiSaveFeedback == 1   ? tr(STR_ANKI_TERM_ADDED)
+                     : snapshot.ankiSaveFeedback == 2 ? tr(STR_ANKI_TERM_EXISTS)
+                     : snapshot.ankiSaveFeedback == 3 ? tr(STR_ANKI_TERM_FAILED)
+                                                      : tr(STR_ADD_TO_ANKI);
+  const char* labels[] = {source, pageMode_ ? tr(STR_SAVE_CLIPPING) : nullptr, save};
+  for (int action = 0; action < 3; ++action) {
+    if (!labels[action]) continue;
+    const Rect button = footerActionRect(layout, action);
+    if (mappedInput.hasTouchHardware()) renderer.drawRect(button.x, button.y, button.width, button.height, ink);
+    renderer.beginTextClip(button.x + 3, button.y + 1, button.width - 6, button.height - 2);
+    const int width = renderer.getTextWidth(UI_10_FONT_ID, labels[action]);
+    renderer.drawText(UI_10_FONT_ID, button.x + std::max(3, (button.width - width) / 2),
+                      button.y + (button.height - renderer.getLineHeight(UI_10_FONT_ID)) / 2, labels[action], ink);
+    renderer.endTextClip();
+  }
+}
+
 void EpubReaderWordLookupActivity::drawButtonHints() const {
   const bool sideButtonsForLookup = dictionaryLookupUsesSideButtons(
       SETTINGS.wordLookupSideButtons, SETTINGS.sideButtonLayout, CrossPointSettings::SIDE_BUTTONS_DISABLED);
@@ -2036,10 +2370,15 @@ void EpubReaderWordLookupActivity::drawButtonHints() const {
   const bool logicalLeftScrollsUp = scrollButtons.up == DictionaryLookupNavigationButton::Left;
   const char* sideLeftLabel = logicalLeftScrollsUp ? tr(STR_DIR_UP) : tr(STR_DIR_DOWN);
   const char* sideRightLabel = logicalLeftScrollsUp ? tr(STR_DIR_DOWN) : tr(STR_DIR_UP);
+  char rightHint[96];
+  const char* rightLabel = sideButtonsForLookup && !definitionSelectionMode_ ? sideRightLabel : tr(STR_NEXT);
+  if (!definitionSelectionMode_) {
+    snprintf(rightHint, sizeof(rightHint), "%s / %s", rightLabel, tr(STR_HOLD_SAVE));
+    rightLabel = rightHint;
+  }
   const auto labels = mappedInput.mapLabels(
       mappedInput.withBackArrow(tr(STR_BACK)), definitionMultiSelectMode_ ? tr(STR_DONE) : tr(STR_LOOKUP_SHORT),
-      sideButtonsForLookup && !definitionSelectionMode_ ? sideLeftLabel : tr(STR_PREV),
-      sideButtonsForLookup && !definitionSelectionMode_ ? sideRightLabel : tr(STR_NEXT));
+      sideButtonsForLookup && !definitionSelectionMode_ ? sideLeftLabel : tr(STR_PREV), rightLabel);
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
@@ -2067,14 +2406,44 @@ void EpubReaderWordLookupActivity::render(RenderLock&&) {
   const RenderSnapshot snapshot = renderSnapshot_;
   // ActivityManager also requests an initial render, independently of snapshot
   // publication. Defer that loading frame even when the word scan was cached.
-  if (initialRender_ &&
+  if (initialRender_ && !snapshot.sourceSelectionVisible &&
       !dictionaryLookupShouldRenderSnapshot(
           snapshot.state, static_cast<uint32_t>(millis() - openedAtMs_) < DictionaryLookupFlow::kOpenDeadlineMs)) {
     return;
   }
   const bool framebufferContainedPage = initialRender_ && framebufferContainsPage_;
-  renderReaderBackground();
-  if (snapshot.highlightValid) {
+  bool reuseReaderBackground = false;
+#if CROSSINK_APP_DEVICE_X4PRO
+  const Rect nextPanel = panelLayoutLocked().panel;
+  const auto& nextHighlight = snapshot.highlight;
+  reuseReaderBackground = TouchUi::enabled(mappedInput) && !externalMode_ && pageMode_ && !initialRender_ &&
+                          !snapshot.sourceSelectionVisible && paintedPanelValid_ &&
+                          paintedOrientation_ == static_cast<int>(renderer.getOrientation()) &&
+                          paintedForegroundBlack_ == ReaderUtils::readerForegroundBlack() &&
+                          paintedPanel_.x == nextPanel.x && paintedPanel_.y == nextPanel.y &&
+                          paintedPanel_.width == nextPanel.width && paintedPanel_.height == nextPanel.height &&
+                          paintedSourceHighlightValid_ == snapshot.highlightValid &&
+                          (!snapshot.highlightValid || (paintedSourceHighlight_.x == nextHighlight.x &&
+                                                        paintedSourceHighlight_.y == nextHighlight.y &&
+                                                        paintedSourceHighlight_.width == nextHighlight.width &&
+                                                        paintedSourceHighlight_.height == nextHighlight.height));
+  paintedPanelValid_ = false;
+#endif
+  // Unchanged page/highlight/panel geometry permits repainting just the opaque
+  // overlay. Rebuilding the page would swap reader/dictionary SD fonts again.
+  if (!reuseReaderBackground) renderReaderBackground();
+  if (snapshot.sourceSelectionVisible) {
+    TouchUi::drawStatus(renderer, !ReaderUtils::readerForegroundBlack());
+    renderer.drawCenteredText(UI_10_FONT_ID, renderer.getScreenHeight() - 36, tr(STR_TOUCH_SELECT_WORD),
+                              ReaderUtils::readerForegroundBlack());
+    const int closeX = renderer.getScreenWidth() - 28;
+    const int closeY = renderer.getScreenHeight() - 24;
+    renderer.drawLine(closeX - 6, closeY - 6, closeX + 6, closeY + 6, ReaderUtils::readerForegroundBlack());
+    renderer.drawLine(closeX - 6, closeY + 6, closeX + 6, closeY - 6, ReaderUtils::readerForegroundBlack());
+    displayPanelRefresh(framebufferContainedPage);
+    return;
+  }
+  if (!reuseReaderBackground && snapshot.highlightValid) {
     auto highlight = snapshot.highlight;
     if (externalMode_ && externalTextViewport_.height > 0) {
       highlight = clipPageTextBounds(highlight, externalTextViewport_);
@@ -2102,13 +2471,23 @@ void EpubReaderWordLookupActivity::render(RenderLock&&) {
     drawLoadingOrError(layout, visibleState);
   }
 
-  const int footerY = layout.panel.y + layout.panel.height - layout.lineHeight - 2;
   const bool foregroundBlack = ReaderUtils::readerForegroundBlack();
-  renderer.drawLine(layout.panel.x, footerY - 2, layout.panel.x + layout.panel.width, footerY - 2, foregroundBlack);
-  const char* source =
-      snapshot.backend == DictionaryBackendKind::Japanese ? tr(STR_DICT_EFFECTIVE_JAPANESE) : tr(STR_DICTIONARY);
-  renderer.drawText(UI_10_FONT_ID, layout.contentX, footerY, source, foregroundBlack);
-  drawButtonHints();
+  drawFooter(layout, snapshot);
+  if (TouchUi::enabled(mappedInput)) {
+    if (reuseReaderBackground)
+      renderer.fillRect(0, 0, renderer.getScreenWidth(), TouchUi::statusHeight(renderer), !foregroundBlack);
+    TouchUi::drawStatus(renderer, !foregroundBlack);
+  } else {
+    drawButtonHints();
+  }
+#if CROSSINK_APP_DEVICE_X4PRO
+  paintedPanel_ = layout.panel;
+  paintedSourceHighlight_ = snapshot.highlight;
+  paintedSourceHighlightValid_ = snapshot.highlightValid;
+  paintedOrientation_ = static_cast<int>(renderer.getOrientation());
+  paintedForegroundBlack_ = foregroundBlack;
+  paintedPanelValid_ = true;
+#endif
   displayPanelRefresh(framebufferContainedPage);
 }
 
@@ -2141,7 +2520,7 @@ void EpubReaderWordLookupActivity::refreshScanIdentity() {
       cacheLoaded_ = false;
       scanCache_.clear();
       scanner_.clear();
-      const auto status = initializePageMode(pendingInitialTouchSelection_);
+      const auto status = initializePageMode(pendingInitialTouchSelection_ || deferToTouchSelection_);
       if (status != DictionaryStatus::Found) flow_.onInitializationFailed(status);
     }
   }
@@ -2193,7 +2572,9 @@ void EpubReaderWordLookupActivity::tryLoadVerifiedScanCache() {
   LOG_INF("WLA", "Verified dictionary scan cache loaded: candidates=%u cursor=%u",
           static_cast<unsigned>(scanCache_.candidateCount()), static_cast<unsigned>(scanCache_.cursor()));
   scanner_.clear();
-  flow_.beginPage(openedAtMs_, scanCache_.candidateCount(), true, scanCache_.cursor(), pendingInitialTouchSelection_);
+  if (scanCache_.candidateCount() == 0) deferToTouchSelection_ = false;
+  flow_.beginPage(openedAtMs_, scanCache_.candidateCount(), true, scanCache_.cursor(),
+                  pendingInitialTouchSelection_ || deferToTouchSelection_);
   if (pendingInitialTouchSelection_) resolvePendingInitialTouch();
   executeFlowCommands();
   publishRenderSnapshot();

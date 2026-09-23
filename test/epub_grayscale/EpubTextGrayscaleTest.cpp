@@ -321,3 +321,44 @@ TEST(EpubTextGrayscaleTest, JapaneseFallbackUsesItsOwnBitmapForNormalAndScaledTe
     renderer.clearSdCardFonts();
   }
 }
+
+TEST(EpubTextGrayscaleTest, PreparedJapaneseFallbackHitsCacheAcrossAllThreeRenderPasses) {
+  fakeheap::reset(true);
+  RasterFont primary(12);
+  primary.data.intervalCount = 1;
+  const EpdFont japanese(&notosansjp_joyo_12_regular);
+  HalDisplay display(800, 480);
+  GfxRenderer renderer(display);
+  renderer.begin();
+  renderer.insertFont(1, EpdFontFamily(&primary.font, nullptr, nullptr, nullptr, nullptr, &japanese));
+  FontCacheManager cache(renderer.getFontMap(), renderer.getSdCardFonts());
+  FontDecompressor decompressor;
+  ASSERT_TRUE(decompressor.init());
+  cache.setFontDecompressor(&decompressor);
+  renderer.setFontCacheManager(&cache);
+  const char* text = "日本語の猫と犬";
+  std::array<std::vector<uint8_t>, 3> expected;
+  int pass = 0;
+  for (auto mode : {GfxRenderer::BW, GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+    renderer.setRenderMode(mode);
+    renderer.clearScreen(mode == GfxRenderer::BW ? 255 : 0);
+    renderer.drawText(1, 40, 60, text);
+    expected[pass++] = display.bw;
+  }
+  {
+    auto scope = cache.createPrewarmScope();
+    renderer.drawText(1, 40, 60, text);
+    ASSERT_TRUE(scope.endScanAndPrewarm());
+    decompressor.resetStats();
+    pass = 0;
+    for (auto mode : {GfxRenderer::BW, GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+      renderer.setRenderMode(mode);
+      renderer.clearScreen(mode == GfxRenderer::BW ? 255 : 0);
+      renderer.drawText(1, 40, 60, text);
+      EXPECT_EQ(display.bw, expected[pass++]);
+    }
+    EXPECT_EQ(decompressor.getStats().cacheMisses, 0u);
+    EXPECT_GE(decompressor.getStats().cacheHits, 21u);
+  }
+  renderer.setFontCacheManager(nullptr);
+}

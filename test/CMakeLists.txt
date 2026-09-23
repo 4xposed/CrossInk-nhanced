@@ -118,8 +118,11 @@ add_subdirectory(book_folder_mutation)
 
 add_subdirectory(manga_menu)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME LookupPerformanceGateTest
+  COMMAND ${Python3_EXECUTABLE} -B ${REPO_ROOT}/scripts/test_lookup_performance.py)
 add_test(NAME MangaSourceBoundaryTest
   COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s ${REPO_ROOT}/test/source_contracts -v)
 
 add_subdirectory(anki_deck)
+add_subdirectory(anki_review)
 add_subdirectory(library)

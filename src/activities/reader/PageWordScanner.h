@@ -31,8 +31,11 @@ class PageWordScanner {
   // source and probe are borrowed. The source glyph storage must remain
   // immutable, and both glyph/callback storage must outlive scanning,
   // restart(), and every candidate read until clear()/destruction.
+  // geometryOnlyStarDict skips redundant dictionary probes for whole-word touch
+  // selection; Japanese still probes to determine word boundaries. Legacy callers
+  // keep probe/error semantics by leaving this option false.
   DictionaryStatus begin(PageTextSourceView source, DictionaryBackendKind backend, DictionaryProbeFn probe,
-                         PageWordScannerMemoryRecoveryFn memoryRecovery = {});
+                         PageWordScannerMemoryRecoveryFn memoryRecovery = {}, bool geometryOnlyStarDict = false);
   DictionaryStatus stepOne();
   bool done() const { return done_; }
   // True only when scanning reached the natural end of the source without a
@@ -64,6 +67,7 @@ class PageWordScanner {
   uint16_t candidateCount_ = 0;
   uint16_t scanPos_ = 0;
   uint16_t skipUntil_ = 0;
+  bool geometryOnlyStarDict_ = false;
   bool markerChecksComplete_ = true;
   bool initialized_ = false;
   bool done_ = false;

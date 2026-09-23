@@ -21,6 +21,7 @@
 #include "activities/reader/BookReadingStats.h"
 #include "components/TouchActionButtons.h"
 #include "components/TouchRegistry.h"
+#include "components/TouchUi.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -445,6 +446,16 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
 
 void BaseTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle,
                            const bool readerContext) const {
+  if (TouchUi::enabled()) {
+    TouchUi::drawStatus(renderer);
+    const int y =
+        std::max(TouchUi::statusHeight(renderer), rect.y + rect.height - renderer.getLineHeight(UI_12_FONT_ID) - 8);
+    if (title && *title) {
+      const auto text = renderer.truncatedText(UI_12_FONT_ID, title, std::max(1, rect.width - 32));
+      renderer.drawText(UI_12_FONT_ID, rect.x + 16, y, text.c_str());
+    }
+    return;
+  }
   namespace fui = freeink::ui;
   const auto spec = uiScaleSpec();
   fui::GfxRendererFrame<1> ui(renderer, spec.smallFontId, spec.bodyFontId, spec.titleFontId);
@@ -1079,6 +1090,10 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
 void BaseTheme::drawTopStatusBarClock(const GfxRenderer& renderer, int topY, const char* previewTime,
                                       const bool readerContext, const int textYOffset, const bool darkMode,
                                       const bool forceVisible) const {
+  if (TouchUi::enabled() && previewTime == nullptr) {
+    TouchUi::drawStatus(renderer, darkMode);
+    return;
+  }
   if (!forceVisible &&
       !(readerContext ? SETTINGS.shouldShowClockInReader() : SETTINGS.shouldShowClockOutsideReader())) {
     return;

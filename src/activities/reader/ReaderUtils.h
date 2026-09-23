@@ -11,7 +11,9 @@
 #include "GlobalActions.h"
 #include "MappedInputManager.h"
 #include "ReaderStatusBarTapTarget.h"
+#include "components/TouchUi.h"
 #include "components/UITheme.h"
+#include "fontIds.h"
 
 namespace ReaderUtils {
 
@@ -72,6 +74,11 @@ inline int getTopClockStatusBarHeight() {
 }
 
 inline int getTopClockStatusBarReservedHeight(const GfxRenderer& renderer) {
+  if (TouchUi::enabled()) {
+    int top, right, bottom, left;
+    renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+    return TouchUi::statusHeight(renderer) - top;
+  }
   const int statusBarHeight = getTopClockStatusBarHeight();
   if (statusBarHeight <= 0) {
     return 0;
@@ -80,7 +87,8 @@ inline int getTopClockStatusBarReservedHeight(const GfxRenderer& renderer) {
   return UITheme::getInstance().getMetrics().topPadding + UITheme::getTopStatusBarInset(renderer) + statusBarHeight;
 }
 
-inline int getReaderFooterReservedHeight(const bool automaticPageTurnActive) {
+inline int getReaderFooterReservedHeight(const bool automaticPageTurnActive, const GfxRenderer& renderer) {
+  if (TouchUi::enabled()) return renderer.getLineHeight(UI_10_FONT_ID) + 4;
   const uint8_t statusBarHeight = UITheme::getInstance().getStatusBarHeight();
   if (automaticPageTurnActive &&
       (statusBarHeight == 0 || statusBarHeight == UITheme::getInstance().getProgressBarHeight())) {
@@ -191,15 +199,28 @@ inline bool isTopStatusBarTap(const GfxRenderer& renderer, const int y, const in
 inline bool isTouchMenuGesture(const MappedInputManager& input) {
   // The capacitive Home key is independent from screen touch. Its configured
   // long-press reader-menu action must still work when screen touch is disabled.
-  return input.wasReaderMenuHold() ||
-         (SETTINGS.touchReaderControls && input.hasTouch() && input.wasReaderMenuGesture());
+  return input.wasReaderMenuHold() || (SETTINGS.touchReaderControls && input.hasTouch() &&
+                                       (TouchUi::enabled(input) ? input.wasSwipe() == MappedInputManager::SwipeDir::Down
+                                                                : input.wasReaderMenuGesture()));
 }
 
-// X4 Pro opens the reader menu with an upward swipe. Its top-edge downward
-// swipe is the opposite gesture and dismisses the menu instead of opening the
-// frontlight panel. Other touch boards retain their existing menu behavior.
+// The upward gesture dismisses the X4 Pro drawer; top-edge down remains Light.
 inline bool isTouchMenuDismissGesture(const MappedInputManager& input) {
-  return SETTINGS.touchReaderControls && input.hasTouch() && input.hasHomeKey() && input.wasLightPanelGesture();
+  return SETTINGS.touchReaderControls && input.hasTouch() &&
+         (TouchUi::enabled(input) ? input.wasSwipe() == MappedInputManager::SwipeDir::Up
+                                  : input.hasHomeKey() && input.wasLightPanelGesture());
+}
+
+inline void drawCompactProgress(const GfxRenderer& renderer, float percent, int page, int count) {
+  TouchUi::drawStatus(renderer, readerDarkModeEnabled());
+  int top, right, bottom, left;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  char text[48];
+  snprintf(text, sizeof(text), "%d / %d   %d%%", page, count, std::clamp(static_cast<int>(percent), 0, 100));
+  const int height = getReaderFooterReservedHeight(false, renderer);
+  const int y = renderer.getScreenHeight() - bottom - height;
+  renderer.fillRect(left, y, renderer.getScreenWidth() - left - right, height, !readerForegroundBlack());
+  renderer.drawCenteredText(UI_10_FONT_ID, y + 2, text, readerForegroundBlack());
 }
 
 inline PageTurnResult detectPageTurn(const MappedInputManager& input) {

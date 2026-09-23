@@ -116,20 +116,8 @@ uint8_t FontCacheManager::resolveScanStyle(int fontId, EpdFontFamily::Style styl
 void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::Style style) {
   if (!text || *text == '\0') return;
 
-  uint8_t fontSlot = scanFontCount_;
-  for (uint8_t i = 0; i < scanFontCount_; i++) {
-    if (scanFontIds_[i] == fontId) {
-      fontSlot = i;
-      break;
-    }
-  }
-  if (fontSlot == scanFontCount_) {
-    if (scanFontCount_ >= MAX_SCAN_FONTS) return;
-    scanFontIds_[scanFontCount_++] = fontId;
-  }
-
-  const uint8_t resolvedStyle = resolveScanStyle(fontId, style);
-  const uint8_t group = fontSlot * 4 + resolvedStyle;
+  const auto family = fontMap_.find(fontId);
+  const uint8_t primaryStyle = resolveScanStyle(fontId, style);
   const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text);
   while (*cursor) {
     uint32_t codepoint = utf8NextCodepoint(&cursor);
@@ -139,6 +127,29 @@ void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::S
       codepoint -= 'a' - 'A';
     }
 
+    // The rendering face can differ from the primary face for Japanese,
+    // symbols, or missing styled glyphs. Warm its compressed bitmap once per
+    // page instead of decompressing groups repeatedly for each drawn glyph.
+    const EpdFontData* fallbackData = nullptr;
+    if (family != fontMap_.end()) {
+      const auto* owner = family->second.getCoverageData(codepoint, style);
+      if (owner && owner->groups && owner != family->second.getData(style)) fallbackData = owner;
+    }
+    uint8_t fontSlot = scanFontCount_;
+    for (uint8_t i = 0; i < scanFontCount_; ++i) {
+      if (scanFontData_[i] == fallbackData && (fallbackData || scanFontIds_[i] == fontId)) {
+        fontSlot = i;
+        break;
+      }
+    }
+    if (fontSlot == scanFontCount_) {
+      if (scanFontCount_ >= MAX_SCAN_FONTS) continue;
+      scanFontIds_[fontSlot] = fontId;
+      scanFontData_[fontSlot] = fallbackData;
+      ++scanFontCount_;
+    }
+    const uint8_t resolvedStyle = fallbackData ? 0 : primaryStyle;
+    const uint8_t group = fontSlot * 4 + resolvedStyle;
     const uint32_t packed = (static_cast<uint32_t>(fontSlot) << SCAN_FONT_SHIFT) |
                             (static_cast<uint32_t>(resolvedStyle) << SCAN_STYLE_SHIFT) | codepoint;
     bool found = false;
@@ -207,7 +218,16 @@ bool FontCacheManager::PrewarmScope::endScanAndPrewarm() {
 
     const uint8_t fontSlot = static_cast<uint8_t>(group) / 4;
     const uint8_t style = static_cast<uint8_t>(group) & 0x03;
-    if (!manager_->prewarmCache(manager_->scanFontIds_[fontSlot], utf8Text, 1 << style, policy_)) {
+    if (const auto* data = manager_->scanFontData_[fontSlot]) {
+      if (!manager_->fontDecompressor_) {
+        ok = false;
+      } else {
+        const int missed = manager_->fontDecompressor_->prewarmCache(data, utf8Text);
+        // Match primary compressed-font preparation: allocation pressure can
+        // fall back to on-demand decompression without dropping the page.
+        if (missed > 0) LOG_DBG("FCM", "Fallback prewarm: %d glyph(s) remain on demand", missed);
+      }
+    } else if (!manager_->prewarmCache(manager_->scanFontIds_[fontSlot], utf8Text, 1 << style, policy_)) {
       ok = false;
     }
   }
@@ -221,6 +241,15 @@ bool FontCacheManager::PrewarmScope::endScanAndPrewarm() {
 FontCacheManager::PrewarmScope::~PrewarmScope() {
   if (active_) {
     endScanAndPrewarm();  // no-op if already called
+    if (auto* decompressor = manager_->getDecompressor()) {
+      const auto& stats = decompressor->getStats();
+      if (stats.getBitmapTimeUs >= 1000000) {
+        LOG_INF("FCM", "Slow glyph rendering: bitmap=%luus calls=%lu hits=%lu misses=%lu decompress=%lums",
+                static_cast<unsigned long>(stats.getBitmapTimeUs), static_cast<unsigned long>(stats.getBitmapCalls),
+                static_cast<unsigned long>(stats.cacheHits), static_cast<unsigned long>(stats.cacheMisses),
+                static_cast<unsigned long>(stats.decompressTimeMs));
+      }
+    }
     manager_->clearCache();
   }
 }

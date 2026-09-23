@@ -1,13 +1,13 @@
 #include "ReviewStateStore.h"
 
-#include "AnkiDeck.h"
-
 #include <HalStorage.h>
 #include <Logging.h>
 
 #include <algorithm>
 #include <array>
 #include <limits>
+
+#include "AnkiDeck.h"
 namespace {
 constexpr char kLogTag[] = "AnkiState";
 constexpr uint16_t kStateVersion = 2;
@@ -36,12 +36,8 @@ void writeLe32(uint8_t* data, uint32_t value) {
 void writeLe64(uint8_t* data, uint64_t value) {
   for (uint8_t index = 0; index < 8; ++index) data[index] = static_cast<uint8_t>(value >> (index * 8));
 }
-bool readExactly(FsFile& file, void* data, size_t size) {
-  return file.read(data, size) == static_cast<int>(size);
-}
-bool writeExactly(FsFile& file, const void* data, size_t size) {
-  return file.write(data, size) == size;
-}
+bool readExactly(FsFile& file, void* data, size_t size) { return file.read(data, size) == static_cast<int>(size); }
+bool writeExactly(FsFile& file, const void* data, size_t size) { return file.write(data, size) == size; }
 void encodeStateHeader(uint8_t* data, uint64_t deckId, uint32_t count, uint32_t reviewCount) {
   data[0] = 'C';
   data[1] = 'K';
@@ -91,14 +87,15 @@ bool ReviewStateStore::open(AnkiDeck& deck) {
   deck_ = &deck;
   deckId_ = deck.deckId_;
   cardCount_ = deck.cardCount_;
+  persistedCardCount_ = cardCount_;
   statePath_ = deck.getCachePath() + "/review.bin";
 
   uint32_t persistedReviewCount = 0;
-  const StateFileStatus primaryStatus = inspectStateFile(statePath_, &persistedReviewCount);
-  if (primaryStatus == StateFileStatus::Valid) {
+  const StateFileStatus primaryStatus = inspectStateFile(statePath_, &persistedReviewCount, &persistedCardCount_);
+  if (primaryStatus == StateFileStatus::Valid || primaryStatus == StateFileStatus::Appendable) {
     reviewCount_ = persistedReviewCount;
     activeStatePath_ = statePath_;
-    return true;
+    return primaryStatus == StateFileStatus::Valid || writeStateAtomically(true);
   }
   if (primaryStatus == StateFileStatus::Mismatch) {
     LOG_ERR(kLogTag, "Review state belongs to a different deck");
@@ -109,12 +106,12 @@ bool ReviewStateStore::open(AnkiDeck& deck) {
   }
 
   const std::string backupPath = statePath_ + ".bak";
-  const StateFileStatus backupStatus = inspectStateFile(backupPath, &persistedReviewCount);
-  if (backupStatus == StateFileStatus::Valid) {
+  const StateFileStatus backupStatus = inspectStateFile(backupPath, &persistedReviewCount, &persistedCardCount_);
+  if (backupStatus == StateFileStatus::Valid || backupStatus == StateFileStatus::Appendable) {
     LOG_DBG(kLogTag, "Recovered review state from backup");
     reviewCount_ = persistedReviewCount;
     activeStatePath_ = backupPath;
-    return true;
+    return backupStatus == StateFileStatus::Valid || writeStateAtomically(true);
   }
   if (backupStatus == StateFileStatus::Mismatch) {
     LOG_ERR(kLogTag, "Review state backup belongs to a different deck");
@@ -124,35 +121,36 @@ bool ReviewStateStore::open(AnkiDeck& deck) {
   return initializeState();
 }
 
-ReviewStateStore::StateFileStatus ReviewStateStore::inspectStateFile(const std::string& path,
-                                                                      uint32_t* reviewCount) const {
+ReviewStateStore::StateFileStatus ReviewStateStore::inspectStateFile(const std::string& path, uint32_t* reviewCount,
+                                                                     uint32_t* savedCount) const {
   if (!Storage.exists(path.c_str())) return StateFileStatus::Missing;
   FsFile file;
   if (!Storage.openFileForRead(kLogTag, path, file)) return StateFileStatus::Malformed;
-  const uint64_t expectedSize = kStateHeaderSize + static_cast<uint64_t>(cardCount_) * kStateRecordSize;
   std::array<uint8_t, kStateHeaderSize> header{};
-  const bool headerRead = file.fileSize64() == expectedSize && readExactly(file, header.data(), header.size());
-  bool valid = headerRead && header[0] == 'C' && header[1] == 'K' && header[2] == 'R' && header[3] == 'S' &&
-               readLe16(header.data() + 4) == kStateVersion && readLe16(header.data() + 6) == kStateHeaderSize;
-  const bool identityMatches = valid && readLe64(header.data() + 8) == deckId_ && readLe32(header.data() + 16) == cardCount_;
-  if (valid && identityMatches) {
+  bool valid = readExactly(file, header.data(), header.size()) && header[0] == 'C' && header[1] == 'K' &&
+               header[2] == 'R' && header[3] == 'S' && readLe16(header.data() + 4) == kStateVersion &&
+               readLe16(header.data() + 6) == kStateHeaderSize;
+  const uint32_t count = readLe32(header.data() + 16);
+  valid = valid && count > 0 && file.fileSize64() == kStateHeaderSize + static_cast<uint64_t>(count) * kStateRecordSize;
+  const bool appendable = valid && deck_->getPath() == AnkiDeck::kSavedTermsPath &&
+                          deckId_ == AnkiDeck::kSavedTermsId && count < cardCount_;
+  // Preserve imported-deck recovery semantics: a differently sized primary
+  // must still allow its correctly sized backup to be considered.
+  if (!appendable && count != cardCount_) valid = false;
+  const bool identityMatches = valid && readLe64(header.data() + 8) == deckId_ && (count == cardCount_ || appendable);
+  if (identityMatches) {
     std::array<uint8_t, kStateRecordSize> record{};
-    for (uint32_t index = 0; index < cardCount_; ++index) {
-      if (!readExactly(file, record.data(), record.size())) {
-        valid = false;
-        break;
-      }
+    for (uint32_t index = 0; valid && index < count; ++index) {
       ReviewState decoded;
-      if (!decodeStateRecord(record.data(), decoded)) {
-        valid = false;
-        break;
-      }
+      valid = readExactly(file, record.data(), record.size()) && decodeStateRecord(record.data(), decoded);
     }
   }
   file.close();
   if (!valid) return StateFileStatus::Malformed;
-  if (identityMatches && reviewCount != nullptr) *reviewCount = readLe32(header.data() + 20);
-  return identityMatches ? StateFileStatus::Valid : StateFileStatus::Mismatch;
+  if (!identityMatches) return StateFileStatus::Mismatch;
+  if (reviewCount) *reviewCount = readLe32(header.data() + 20);
+  if (savedCount) *savedCount = count;
+  return appendable ? StateFileStatus::Appendable : StateFileStatus::Valid;
 }
 
 bool ReviewStateStore::writeInitialStateRecord(uint32_t index, const AnkiDeckMetadata& metadata, void* context) {
@@ -218,8 +216,7 @@ bool ReviewStateStore::read(uint32_t index, ReviewState& out) {
 bool ReviewStateStore::beginStream() {
   endStream();
   if (deck_ == nullptr || activeStatePath_.empty() ||
-      !Storage.openFileForRead(kLogTag, activeStatePath_, streamFile_) ||
-      !streamFile_.seek64(kStateHeaderSize)) {
+      !Storage.openFileForRead(kLogTag, activeStatePath_, streamFile_) || !streamFile_.seek64(kStateHeaderSize)) {
     LOG_ERR(kLogTag, "Could not open review state stream");
     endStream();
     return false;
@@ -253,7 +250,8 @@ void ReviewStateStore::endStream() {
 
 bool ReviewStateStore::replace(uint32_t index, const ReviewState& value, uint64_t nowMilliseconds) {
   if (index >= cardCount_ || value.intervalDays == 0 ||
-      static_cast<uint8_t>(value.kind) > static_cast<uint8_t>(ReviewKind::Learning)) return false;
+      static_cast<uint8_t>(value.kind) > static_cast<uint8_t>(ReviewKind::Learning))
+    return false;
   for (uint32_t pendingIndex = 0; pendingIndex < pendingCount_; ++pendingIndex) {
     if (pending_[pendingIndex].index == index) {
       pending_[pendingIndex].state = value;
@@ -299,9 +297,7 @@ bool ReviewStateStore::shouldFlush(uint64_t nowMilliseconds) const {
           nowMilliseconds - lastFlushMilliseconds_ >= kFlushIntervalMilliseconds);
 }
 
-bool ReviewStateStore::flushIfDue(uint64_t nowMilliseconds) {
-  return !shouldFlush(nowMilliseconds) || flush();
-}
+bool ReviewStateStore::flushIfDue(uint64_t nowMilliseconds) { return !shouldFlush(nowMilliseconds) || flush(); }
 
 bool ReviewStateStore::writeStateAtomically(bool fromExisting) {
   const std::string temporaryPath = statePath_ + ".tmp";
@@ -336,11 +332,17 @@ bool ReviewStateStore::writeStateAtomically(bool fromExisting) {
     for (uint32_t first = 0; wrote && first < cardCount_;) {
       const uint32_t count = std::min(kRecordsPerChunk, cardCount_ - first);
       const size_t bytes = count * kStateRecordSize;
-      wrote = readExactly(source, records.data(), bytes);
+      const uint32_t oldCount = first < persistedCardCount_ ? std::min(count, persistedCardCount_ - first) : 0;
+      wrote = oldCount == 0 || readExactly(source, records.data(), oldCount * kStateRecordSize);
       for (uint32_t offset = 0; wrote && offset < count; ++offset) {
         uint8_t* const record = records.data() + offset * kStateRecordSize;
         ReviewState state;
-        wrote = decodeStateRecord(record, state);
+        if (offset < oldCount) {
+          wrote = decodeStateRecord(record, state);
+        } else {
+          // Only the device-owned append-only deck can have new tail records.
+          encodeStateRecord(record, state);
+        }
         if (wrote) {
           if (const PendingUpdate* pending = pendingFor(first + offset); pending != nullptr) {
             encodeStateRecord(record, pending->state);
@@ -369,7 +371,8 @@ bool ReviewStateStore::writeStateAtomically(bool fromExisting) {
     }
     if (!Storage.rename(temporaryPath.c_str(), statePath_.c_str())) {
       LOG_ERR(kLogTag, "Could not replace recovered review state");
-      if (Storage.exists(backupPath.c_str()) && !Storage.exists(statePath_.c_str())) Storage.rename(backupPath.c_str(), statePath_.c_str());
+      if (Storage.exists(backupPath.c_str()) && !Storage.exists(statePath_.c_str()))
+        Storage.rename(backupPath.c_str(), statePath_.c_str());
       Storage.remove(temporaryPath.c_str());
       return false;
     }
@@ -386,11 +389,13 @@ bool ReviewStateStore::writeStateAtomically(bool fromExisting) {
     }
     if (!Storage.rename(temporaryPath.c_str(), statePath_.c_str())) {
       LOG_ERR(kLogTag, "Could not replace review state");
-      if (Storage.exists(backupPath.c_str()) && !Storage.exists(statePath_.c_str())) Storage.rename(backupPath.c_str(), statePath_.c_str());
+      if (Storage.exists(backupPath.c_str()) && !Storage.exists(statePath_.c_str()))
+        Storage.rename(backupPath.c_str(), statePath_.c_str());
       Storage.remove(temporaryPath.c_str());
       return false;
     }
   }
+  persistedCardCount_ = cardCount_;
   activeStatePath_ = statePath_;
   clearPending();
   reviewCountDirty_ = false;

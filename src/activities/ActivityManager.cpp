@@ -1,3 +1,4 @@
+#include <AnkiDeck.h>
 #include "ActivityManager.h"
 
 #include <CrossInkHalFrontlight.h>
@@ -21,12 +22,13 @@
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
 #include "components/TouchRegistry.h"
+#include "components/TouchUi.h"
 #include "home/AlertActivity.h"
 #include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
-#include "home/RecentBookProgress.h"
 #include "home/LibraryActivity.h"
+#include "home/RecentBookProgress.h"
 #include "home/RecentBooksActivity.h"
 #include "home/RecentBooksGridActivity.h"
 #include "home/ToolsActivity.h"
@@ -313,12 +315,13 @@ void ActivityManager::loop() {
         return;
       }
 
-      // Frontlight quick panel: top-edge down-swipe on home-key boards, except
-      // that the open EPUB reader exposes the same action across the whole page.
+      // X4 Pro reserves top-edge down for Light and page-body down for menus.
+      // Other touch readers retain their full-page Light gesture.
       // Pushed, so it returns to whatever was underneath — including mid-book.
-      const bool lightPanelGesture = currentActivity->usesFullScreenReaderVerticalSwipes()
-                                         ? mappedInput.wasReaderLightPanelGesture()
-                                         : mappedInput.wasLightPanelGesture();
+      const bool lightPanelGesture =
+          (!TouchUi::enabled(mappedInput) && currentActivity->usesFullScreenReaderVerticalSwipes())
+              ? mappedInput.wasReaderLightPanelGesture()
+              : mappedInput.wasLightPanelGesture();
       if (supportsFrontlightDrawer(mappedInput.hasTouchHardware(), Frontlight.present(),
                                    hasStickyReaderDetailsPanel()) &&
           currentActivity->name != "FrontlightPanel" && currentActivity->allowFrontlightPanelGesture() &&
@@ -715,7 +718,13 @@ void ActivityManager::goToLibrary() {
     LOG_ERR("ACT", "Cannot allocate Library");
 }
 void ActivityManager::goToAnki() {
-  auto screen = makeUniqueNoThrow<FileBrowserActivity>(renderer, mappedInput, "/", FileBrowserActivity::Mode::Anki);
+  AnkiDeck::recoverSavedTerms();
+  const char* directory = "/decks";
+  if (!Storage.ensureDirectoryExists(directory)) {
+    LOG_ERR("ACT", "Cannot create Anki upload directory; opening SD root");
+    directory = "/";
+  }
+  auto screen = makeUniqueNoThrow<FileBrowserActivity>(renderer, mappedInput, directory, FileBrowserActivity::Mode::Anki);
   if (screen)
     replaceActivity(std::move(screen));
   else
@@ -1091,3 +1100,8 @@ void RenderLock::unlock() {
  * @note Must not be called from ISR context — xSemaphoreGetMutexHolder is not ISR-safe.
  */
 bool RenderLock::peek() { return xSemaphoreGetMutexHolder(activityManager.renderingMutex) != nullptr; }
+
+bool ActivityManager::showFrontlightPanel() {
+  if (!currentActivity || currentActivity->name == "FrontlightPanel" || !Frontlight.present()) return false;
+  return openFrontlightPanel(*currentActivity, renderer, mappedInput);
+}

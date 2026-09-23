@@ -23,6 +23,11 @@ class EpdFontFamily {
     return styleData[REGULAR];
   }
 
+  const EpdFontData* coverageFallback = nullptr;
+  const EpdFontData* getCoverageData(uint32_t cp, Style style) const {
+    return cp >= 0x3000 && coverageFallback ? coverageFallback : getData(style);
+  }
+
  private:
   const EpdFontData* styleData[4] = {};
 };

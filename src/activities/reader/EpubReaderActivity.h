@@ -12,6 +12,7 @@
 #include <optional>
 #include <string>
 
+#include "AppCapabilities.h"
 #include "BookReadingStats.h"
 #include "BookmarkStore.h"
 #include "EndOfBookOptions.h"
@@ -21,6 +22,9 @@
 #include "ManualPageTurnQueue.h"
 #include "ReaderProgressSaveDebouncer.h"
 #include "activities/Activity.h"
+#if CROSSINK_APP_DEVICE_X4PRO
+#include "ReaderTouchLookupHold.h"
+#endif
 #include "components/OptionPopup.h"
 #if CROSSINK_APP_CAP_TOUCH
 #include "activities/reader/ReaderPinchGesture.h"
@@ -201,6 +205,9 @@ class EpubReaderActivity final : public Activity {
   bool sideButtonLongPressHandled = false;
   bool frontButtonLongPressHandled = false;
   bool touchDictionaryLookupHandled = false;
+#if CROSSINK_APP_DEVICE_X4PRO
+  ReaderTouchLookupHold touchLookupHold;
+#endif
   EpubLookupAvailabilityCache dictionaryLookupAvailability;
   int pageLoadRetryCount = 0;
   enum class BookmarkFeedbackType : uint8_t {
@@ -475,6 +482,10 @@ class EpubReaderActivity final : public Activity {
   void restoreSavedPosition();
 
  public:
+#ifdef SIMULATOR
+  bool simulatorFirstWordTouchPoint(int& x, int& y);
+#endif
+
   explicit EpubReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Epub> epub,
                               const BookReaderSettingsData& readerSettings, int initialRefreshCountdown,
                               bool cleanImageBaseOnEntry = false, bool skipRecentBookUpdateOnEntry = false)

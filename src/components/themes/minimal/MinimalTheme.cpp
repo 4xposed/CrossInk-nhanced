@@ -23,6 +23,7 @@
 #include "activities/reader/GlobalReadingStats.h"
 #include "activities/reader/ReadingStatsUtils.h"
 #include "components/TouchRegistry.h"
+#include "components/TouchUi.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
@@ -411,6 +412,10 @@ void drawBookCover(const GfxRenderer& renderer, const Rect& coverRect, const Rec
 
 void MinimalTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const char* title, const char* subtitle,
                               const bool readerContext) const {
+  if (TouchUi::enabled()) {
+    BaseTheme::drawHeader(renderer, rect, title, subtitle, readerContext);
+    return;
+  }
   (void)subtitle;
 
   renderer.fillRect(rect.x, rect.y, rect.width, rect.height, false);

@@ -631,6 +631,10 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
     add(SettingInfo::Enum(StrId::STR_UI_SCALE, &CrossPointSettings::uiScale, {StrId::STR_SMALL, StrId::STR_LARGE},
                           "uiScale", StrId::STR_CAT_DISPLAY)
             .withEnumRawValues({CrossPointSettings::UI_SCALE_SMALL, CrossPointSettings::UI_SCALE_LARGE}));
+    add(SettingInfo::Enum(StrId::STR_ANKI_FRONT_SIZE, &CrossPointSettings::ankiFontScale,
+                          {StrId::STR_SMALL, StrId::STR_LARGE, StrId::STR_X_LARGE}, "ankiFontScale",
+                          StrId::STR_CAT_READER)
+            .withEnumRawValues({1, 2, 3}));
     add(SettingInfo::Enum(StrId::STR_RECENT_BOOKS_VIEW, &CrossPointSettings::recentBooksView,
                           {StrId::STR_LIST_VIEW, StrId::STR_GRID_VIEW}, "recentBooksView", StrId::STR_CAT_DISPLAY));
     add(SettingInfo::Toggle(StrId::STR_SUNLIGHT_FADING_FIX, &CrossPointSettings::fadingFix, "fadingFix",
@@ -1225,6 +1229,7 @@ inline std::vector<SettingInfo> buildReaderFontSettingsList(const std::vector<Se
   addSettingByName(settings, allSettings, StrId::STR_FONT_SIZE);
   addSettingByName(settings, allSettings, StrId::STR_DICTIONARY_FONT);
   addSettingByName(settings, allSettings, StrId::STR_DICTIONARY_FONT_SIZE);
+  addSettingByName(settings, allSettings, StrId::STR_ANKI_FRONT_SIZE);
   addSettingByName(settings, allSettings, StrId::STR_LINE_SPACING);
   addSettingByName(settings, allSettings, StrId::STR_WORD_SPACING);
   addSettingByName(settings, allSettings, StrId::STR_TEXT_AA);

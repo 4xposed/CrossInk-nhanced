@@ -90,6 +90,7 @@ uint8_t posMask(WordCondition condition) {
 
 JapaneseDictStatus WordLookup::find(std::string_view text, size_t byteOffset, Match& match) {
   match = Match{};
+  if (index_.cancellationRequested()) return JapaneseDictStatus::Cancelled;
   if (byteOffset >= text.size() || !validUtf8(text) ||
       (byteOffset > 0 && (static_cast<uint8_t>(text[byteOffset]) & 0xC0) == 0x80)) {
     return JapaneseDictStatus::NotFound;
@@ -108,6 +109,7 @@ JapaneseDictStatus WordLookup::find(std::string_view text, size_t byteOffset, Ma
   }
 
   for (uint8_t windowCharacters = characterCount; windowCharacters > 0; --windowCharacters) {
+    if (index_.cancellationRequested()) return JapaneseDictStatus::Cancelled;
     const size_t windowLength = ends[windowCharacters] - byteOffset;
     const std::string_view window = text.substr(byteOffset, windowLength);
     uint8_t dictMask = DictIndex::DICT_JMDICT | DictIndex::DICT_GRAMMAR;
@@ -132,8 +134,10 @@ JapaneseDictStatus WordLookup::find(std::string_view text, size_t byteOffset, Ma
       continue;
     }
 
-    Deinflector::deinflect(window, candidates_);
+    Deinflector::deinflect(window, candidates_, index_.cancellation());
+    if (index_.cancellationRequested()) return JapaneseDictStatus::Cancelled;
     for (uint8_t candidateIndex = 1; candidateIndex < candidates_.count; ++candidateIndex) {
+      if (index_.cancellationRequested()) return JapaneseDictStatus::Cancelled;
       const DeinflectionCandidate& candidate = candidates_.candidates[candidateIndex];
       const std::string_view headword(candidate.text, candidate.byteLength);
       const uint8_t requiredPos = posMask(candidate.condition);
@@ -171,6 +175,10 @@ JapaneseDictStatus WordLookup::probe(std::string_view text, size_t byteOffset, W
       (isHiragana(first) || (first >= 0x30A0 && first <= 0x30FF) || (first >= 0xFF66 && first <= 0xFF9D))) {
     const auto markerStatus =
         index_.checkUsuallyKana({match.headword, match.headwordLength}, out.usuallyKana, match.dictMask, match.posMask);
+    if (markerStatus == JapaneseDictStatus::Cancelled) {
+      out = {};
+      return JapaneseDictStatus::Cancelled;
+    }
     out.markerCheckFailed = markerStatus != JapaneseDictStatus::Found;
   }
   return JapaneseDictStatus::Found;

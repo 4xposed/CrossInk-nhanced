@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "AppCapabilities.h"
 #include "CrossPointSettings.h"
 #include "activities/Activity.h"
 #include "components/OptionPopup.h"
@@ -231,6 +232,17 @@ class SettingsActivity final : public Activity {
   int selectedCategoryIndex = 0;  // Currently selected category
   int selectedSettingIndex = 0;
   int settingsCount = 0;
+  // Fixed, non-owning view into the existing catalogs; rebuilt with those catalogs.
+  const SettingInfo* touchSettings[CROSSINK_APP_DEVICE_X4PRO ? 32 : 1]{};
+  int touchCategory = -1;
+  static constexpr int touchCategoryCount = 7;
+  static const StrId touchCategoryNames[touchCategoryCount];
+  bool usesTouchCategories() const;
+  const SettingInfo& settingAt(int index) const;
+  void buildTouchCategory();
+  void openTouchCategory(int index);
+  void backTouchCategory();
+  void loopTouchCategories();
 
   // Per-category settings derived from shared list + device-only actions
   std::vector<SettingInfo> displaySettings;
@@ -292,6 +304,7 @@ class SettingsActivity final : public Activity {
   static void onTabEvent(const freeink::ui::ActionEvent& event, void* user);
   static std::string settingValueText(const SettingInfo& setting);
   void buildSettingsScreen(UiApp::ScreenType& screen);
+  void buildTouchSettingsScreen(UiApp::ScreenType& screen);
   void applyUiSettingChange(uint8_t CrossPointSettings::* valuePtr);
 
   void enterCategory(int categoryIndex);

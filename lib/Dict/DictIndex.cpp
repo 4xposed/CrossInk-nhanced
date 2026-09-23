@@ -56,6 +56,7 @@ struct CoarseEntry {
 };
 
 struct SourceState {
+  CooperativeCancellation cancellation{};
   HalFile idxFile;
   HalFile datFile;
   HalFile spxFile;
@@ -123,18 +124,34 @@ struct RankedSibling {
 };
 static_assert(sizeof(RankedSibling) == 8);
 
-bool readExact(HalFile& file, size_t offset, void* destination, size_t length) {
+bool readExact(HalFile& file, size_t offset, void* destination, size_t length,
+               CooperativeCancellation cancellation = {}) {
+  if (cancellation.requested()) return false;
   if (!file.seek(offset)) {
     LOG_ERR("DICT", "Dictionary seek failed at %u", static_cast<unsigned>(offset));
     return false;
   }
-  const int read = file.read(destination, length);
-  if (read != static_cast<int>(length)) {
-    LOG_ERR("DICT", "Dictionary short read at %u: %d/%u", static_cast<unsigned>(offset), read,
-            static_cast<unsigned>(length));
-    return false;
+  auto* output = static_cast<uint8_t*>(destination);
+  size_t completed = 0;
+  while (completed < length) {
+    if (cancellation.requested()) return false;
+    // Check cancellation between bounded SD reads, including long senses.
+    // Keep the existing single-read contract for callers without cancellation.
+    const size_t chunk = cancellation.callback ? std::min<size_t>(512, length - completed) : length - completed;
+    const int read = file.read(output + completed, chunk);
+    if (cancellation.requested()) return false;
+    if (read != static_cast<int>(chunk)) {
+      LOG_ERR("DICT", "Dictionary short read at %u: %d/%u", static_cast<unsigned>(offset + completed), read,
+              static_cast<unsigned>(chunk));
+      return false;
+    }
+    completed += chunk;
   }
-  return true;
+  return !cancellation.requested();
+}
+
+JapaneseDictStatus readFailureStatus(const SourceState& source) {
+  return source.cancellation.requested() ? JapaneseDictStatus::Cancelled : JapaneseDictStatus::ReadError;
 }
 
 bool validUtf8(const char* data, size_t length) {
@@ -190,7 +207,8 @@ bool decodeRecord(const uint8_t* bytes, size_t datSize, DictIndexRecord& out) {
 }
 
 JapaneseDictStatus readRecord(SourceState& source, size_t recordIndex, DictIndexRecord& out) {
-  if (recordIndex >= source.recordCount) return JapaneseDictStatus::ReadError;
+  if (source.cancellation.requested()) return JapaneseDictStatus::Cancelled;
+  if (recordIndex >= source.recordCount) return readFailureStatus(source);
 
   std::array<uint8_t, sizeof(DictIndexRecord)> direct{};
   const uint8_t* recordBytes = direct.data();
@@ -201,22 +219,24 @@ JapaneseDictStatus readRecord(SourceState& source, size_t recordIndex, DictIndex
       const size_t start = recordIndex > halfBlock ? recordIndex - halfBlock : 0;
       const size_t count = std::min(BLOCK_RECORDS, source.recordCount - start);
       const size_t bytes = count * sizeof(DictIndexRecord);
-      if (!readExact(source.idxFile, start * sizeof(DictIndexRecord), source.blockCache.get(), bytes)) {
+      if (!readExact(source.idxFile, start * sizeof(DictIndexRecord), source.blockCache.get(), bytes,
+                     source.cancellation)) {
         source.blockStart = SIZE_MAX;
         source.blockCount = 0;
-        return JapaneseDictStatus::ReadError;
+        return readFailureStatus(source);
       }
       source.blockStart = start;
       source.blockCount = count;
     }
     recordBytes = source.blockCache.get() + (recordIndex - source.blockStart) * sizeof(DictIndexRecord);
-  } else if (!readExact(source.idxFile, recordIndex * sizeof(DictIndexRecord), direct.data(), direct.size())) {
-    return JapaneseDictStatus::ReadError;
+  } else if (!readExact(source.idxFile, recordIndex * sizeof(DictIndexRecord), direct.data(), direct.size(),
+                        source.cancellation)) {
+    return readFailureStatus(source);
   }
 
   if (!decodeRecord(recordBytes, source.datSize, out)) {
     LOG_ERR("DICT", "Malformed dictionary record %u", static_cast<unsigned>(recordIndex));
-    return JapaneseDictStatus::ReadError;
+    return readFailureStatus(source);
   }
   return JapaneseDictStatus::Found;
 }
@@ -230,6 +250,7 @@ const PathPair* resolvePath(const PathPair (&paths)[Count]) {
 }
 
 JapaneseDictStatus openSource(SourceState& source, const PathPair& path, uint8_t sourceId) {
+  if (source.cancellation.requested()) return JapaneseDictStatus::Cancelled;
   source.idxPath = path.idx;
   source.datPath = path.dat;
   source.source = sourceId;
@@ -258,6 +279,7 @@ JapaneseDictStatus openSource(SourceState& source, const PathPair& path, uint8_t
 }
 
 void loadSparseIndex(SourceState& source) {
+  if (source.cancellation.requested()) return;
   source.spxTried = true;
   char spxPath[64]{};
   const size_t pathLength = std::strlen(source.idxPath);
@@ -274,7 +296,7 @@ void loadSparseIndex(SourceState& source) {
   }
 
   std::array<uint8_t, SPX_HEADER_SIZE> header{};
-  if (!readExact(source.spxFile, 0, header.data(), header.size())) return;
+  if (!readExact(source.spxFile, 0, header.data(), header.size(), source.cancellation)) return;
   if (std::memcmp(header.data(), SPX_MAGIC, sizeof(SPX_MAGIC)) != 0) {
     LOG_ERR("DICT", "Sparse index %s has invalid magic", spxPath);
     return;
@@ -315,9 +337,10 @@ void loadSparseIndex(SourceState& source) {
     return;
   }
   for (size_t index = 0; index < coarseCount; ++index) {
+    if (source.cancellation.requested()) return;
     const uint32_t fineIndex = static_cast<uint32_t>(index) * coarseStride;
     if (!readExact(source.spxFile, SPX_HEADER_SIZE + static_cast<size_t>(fineIndex) * SPX_KEY_SIZE, coarse[index].key,
-                   SPX_KEY_SIZE)) {
+                   SPX_KEY_SIZE, source.cancellation)) {
       return;
     }
     coarse[index].fineIndex = fineIndex;
@@ -360,7 +383,7 @@ bool narrowWithSparseIndex(SourceState& source, const char* key, size_t& lo, siz
   if (count == 0 || count * SPX_KEY_SIZE > source.fineCacheBytes) return false;
   if (source.fineCacheFirst != fineFirst || source.fineCacheCount != count) {
     if (!readExact(source.spxFile, SPX_HEADER_SIZE + static_cast<size_t>(fineFirst) * SPX_KEY_SIZE,
-                   source.fineCache.get(), count * SPX_KEY_SIZE)) {
+                   source.fineCache.get(), count * SPX_KEY_SIZE, source.cancellation)) {
       source.fineCacheFirst = UINT32_MAX;
       source.fineCacheCount = 0;
       return false;
@@ -404,7 +427,9 @@ JapaneseDictStatus binarySearch(SourceState& source, const char* key, size_t lo,
 }
 
 JapaneseDictStatus findMatch(SourceState& source, const char* key, size_t& match) {
+  if (source.cancellation.requested()) return JapaneseDictStatus::Cancelled;
   if (!source.spxTried) loadSparseIndex(source);
+  if (source.cancellation.requested()) return JapaneseDictStatus::Cancelled;
   if (source.spxOk) {
     size_t lo = 0;
     size_t hi = source.recordCount;
@@ -427,6 +452,7 @@ JapaneseDictStatus findMatch(SourceState& source, const char* key, size_t& match
       // A damaged checkpoint must cost performance, never correctness.
     }
   }
+  if (source.cancellation.requested()) return JapaneseDictStatus::Cancelled;
   return binarySearch(source, key, 0, source.recordCount, match);
 }
 
@@ -532,9 +558,9 @@ bool addSourceSignature(SourceState& source, uint64_t& hash, uint8_t* sample, si
 
   const size_t sampleSize = std::min(sampleCapacity, source.idxSize);
   if (sampleSize == 0) return true;
-  if (!readExact(source.idxFile, 0, sample, sampleSize)) return false;
+  if (!readExact(source.idxFile, 0, sample, sampleSize, source.cancellation)) return false;
   hash = fnvUpdate(hash, sample, sampleSize);
-  if (!readExact(source.idxFile, source.idxSize - sampleSize, sample, sampleSize)) return false;
+  if (!readExact(source.idxFile, source.idxSize - sampleSize, sample, sampleSize, source.cancellation)) return false;
   hash = fnvUpdate(hash, sample, sampleSize);
   return true;
 }
@@ -567,6 +593,7 @@ DictIndex::~DictIndex() { close(); }
 
 JapaneseDictStatus DictIndex::open() {
   close();
+  if (cancellationRequested()) return JapaneseDictStatus::Cancelled;
   // One fixed sizeof(Impl) session object owns handles and scratch across calls;
   // it cannot live on a transient lookup stack or in process-lifetime static DRAM.
   impl_ = makeUniqueNoThrow<Impl>();
@@ -574,6 +601,8 @@ JapaneseDictStatus DictIndex::open() {
     LOG_ERR("DICT", "Dictionary session allocation failed");
     return JapaneseDictStatus::OutOfMemory;
   }
+
+  for (SourceState* source : {&impl_->vocab, &impl_->grammar, &impl_->names}) source->cancellation = cancellation_;
 
   const PathPair* vocabPath = resolvePath(VOCAB_PATHS);
   if (!vocabPath) {
@@ -597,6 +626,10 @@ JapaneseDictStatus DictIndex::open() {
       impl_->grammar.close();
     }
   }
+  if (cancellationRequested()) {
+    close();
+    return JapaneseDictStatus::Cancelled;
+  }
   const PathPair* namesPath = resolvePath(NAMES_PATHS);
   if (namesPath) {
     status = openSource(impl_->names, *namesPath, DICT_NAMES);
@@ -609,15 +642,24 @@ JapaneseDictStatus DictIndex::open() {
   }
 
   for (SourceState* source : {&impl_->vocab, &impl_->grammar, &impl_->names}) {
+    if (cancellationRequested()) {
+      close();
+      return JapaneseDictStatus::Cancelled;
+    }
     if (source->available) prepareAccelerators(*source);
   }
 
+  if (cancellationRequested()) {
+    close();
+    return JapaneseDictStatus::Cancelled;
+  }
   uint64_t hash = 14695981039346656037ULL;
   for (SourceState* source : {&impl_->vocab, &impl_->grammar, &impl_->names}) {
     if (source->available &&
         !addSourceSignature(*source, hash, impl_->signatureScratch.data(), impl_->signatureScratch.size())) {
+      const auto status = readFailureStatus(*source);
       close();
-      return JapaneseDictStatus::ReadError;
+      return status;
     }
   }
   signature_ = hash;
@@ -626,6 +668,7 @@ JapaneseDictStatus DictIndex::open() {
 
 JapaneseDictStatus DictIndex::probeExact(std::string_view headword, DictProbe& out, uint8_t dictMask, uint8_t posMask) {
   clearProbe(out);
+  if (cancellationRequested()) return JapaneseDictStatus::Cancelled;
   if (!impl_ || availableSources_ == 0) return JapaneseDictStatus::Unavailable;
   char key[DictIndexRecord::HEADWORD_SIZE];
   if (!makeKey(headword, key)) return JapaneseDictStatus::NotFound;
@@ -649,6 +692,7 @@ JapaneseDictStatus DictIndex::probeExact(std::string_view headword, DictProbe& o
 JapaneseDictStatus DictIndex::checkUsuallyKana(std::string_view headword, bool& found, uint8_t dictMask,
                                                uint8_t posMask) {
   found = false;
+  if (cancellationRequested()) return JapaneseDictStatus::Cancelled;
   if (!impl_ || availableSources_ == 0) return JapaneseDictStatus::Unavailable;
   char key[DictIndexRecord::HEADWORD_SIZE];
   if (!makeKey(headword, key)) return JapaneseDictStatus::NotFound;
@@ -675,10 +719,11 @@ JapaneseDictStatus DictIndex::checkUsuallyKana(std::string_view headword, bool& 
       size_t offset = 0;
       size_t retained = 0;
       while (offset < sense.length) {
+        if (cancellationRequested()) return JapaneseDictStatus::Cancelled;
         const size_t bytes = std::min(kChunkBytes - retained, static_cast<size_t>(sense.length) - offset);
-        if (!readExact(source->datFile, sense.offset + offset, scratch.get() + retained, bytes)) {
-          LOG_ERR("DICT", "Kana marker definition read failed");
-          return JapaneseDictStatus::ReadError;
+        if (!readExact(source->datFile, sense.offset + offset, scratch.get() + retained, bytes, source->cancellation)) {
+          if (!cancellationRequested()) LOG_ERR("DICT", "Kana marker definition read failed");
+          return readFailureStatus(*source);
         }
         const size_t available = retained + bytes;
         if (std::string_view(scratch.get(), available).find(kMarker) != std::string_view::npos) {
@@ -698,6 +743,7 @@ JapaneseDictStatus DictIndex::checkUsuallyKana(std::string_view headword, bool& 
 JapaneseDictStatus DictIndex::lookupExact(std::string_view headword, DictEntry& out, uint8_t dictMask,
                                           uint8_t posMask) {
   clearEntry(out);
+  if (cancellationRequested()) return JapaneseDictStatus::Cancelled;
   if (!impl_ || availableSources_ == 0) return JapaneseDictStatus::Unavailable;
   char key[DictIndexRecord::HEADWORD_SIZE];
   if (!makeKey(headword, key)) return JapaneseDictStatus::NotFound;
@@ -729,9 +775,9 @@ JapaneseDictStatus DictIndex::lookupExact(std::string_view headword, DictEntry& 
       LOG_ERR("DICT", "Best dictionary sense allocation failed (%u bytes)", static_cast<unsigned>(best.length + 1));
       return JapaneseDictStatus::OutOfMemory;
     }
-    if (!readExact(source->datFile, best.offset, bestDefinition.get(), best.length)) {
-      LOG_ERR("DICT", "Best dictionary sense read failed");
-      return JapaneseDictStatus::ReadError;
+    if (!readExact(source->datFile, best.offset, bestDefinition.get(), best.length, source->cancellation)) {
+      if (!cancellationRequested()) LOG_ERR("DICT", "Best dictionary sense read failed");
+      return readFailureStatus(*source);
     }
     bestDefinition[best.length] = '\0';
     out.definition = std::move(bestDefinition);
@@ -765,10 +811,11 @@ JapaneseDictStatus DictIndex::lookupExact(std::string_view headword, DictEntry& 
       std::memcpy(merged.get() + writeOffset, MERGE_SEPARATOR, sizeof(MERGE_SEPARATOR) - 1);
       writeOffset += sizeof(MERGE_SEPARATOR) - 1;
       const RankedSibling& sibling = impl_->siblingScratch[selected[index]];
-      if (!readExact(source->datFile, sibling.offset, merged.get() + writeOffset, sibling.length)) {
-        LOG_ERR("DICT", "Dictionary sense merge read failed");
+      if (!readExact(source->datFile, sibling.offset, merged.get() + writeOffset, sibling.length,
+                     source->cancellation)) {
+        if (!cancellationRequested()) LOG_ERR("DICT", "Dictionary sense merge read failed");
         clearEntry(out);
-        return JapaneseDictStatus::ReadError;
+        return readFailureStatus(*source);
       }
       writeOffset += sibling.length;
     }

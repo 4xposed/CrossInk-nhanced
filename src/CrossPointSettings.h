@@ -411,6 +411,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // together so touch targets grow uniformly.
   enum UI_SCALE { UI_SCALE_SMALL = 0, UI_SCALE_LARGE = 1, UI_SCALE_COUNT };
   static uint8_t defaultUiScale();
+  static uint8_t defaultAnkiFontScale();
 
   // Sleep screen settings
   uint8_t sleepScreen = DARK;
@@ -564,6 +565,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t recentBooksView = RECENT_BOOKS_LIST;
   // UI scale (list fonts + row heights); touch boards default one step larger
   uint8_t uiScale = defaultUiScale();
+  uint8_t ankiFontScale = defaultAnkiFontScale();
   // Sunlight fading compensation
   uint8_t fadingFix = 0;
   // Quick-return from footnotes when a footnote shortcut is active.

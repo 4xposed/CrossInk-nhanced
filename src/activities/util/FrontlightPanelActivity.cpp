@@ -17,6 +17,7 @@
 #include "components/DrawerHandle.h"
 #include "components/HeaderDate.h"
 #include "components/TouchHeaderBackButton.h"
+#include "components/TouchUi.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
@@ -80,6 +81,11 @@ void FrontlightPanelActivity::onEnter() {
   mappedInput.setReaderTouchscreenOverride(true);
 
   uiReady = false;
+  if (TouchUi::enabled(mappedInput)) {
+    uiTarget.setFont(fui::GfxRendererTarget::FONT_BODY, TouchUi::bodyFont());
+    uiTarget.setFont(fui::GfxRendererTarget::FONT_SMALL, TouchUi::smallFont());
+    uiTarget.setFont(fui::GfxRendererTarget::FONT_TITLE, TouchUi::titleFont());
+  }
   applySharedUiTheme(app, uiTarget);
   app.on(ACTION_BRIGHTNESS, &FrontlightPanelActivity::onBrightnessEvent, this);
   app.on(ACTION_WARMTH, &FrontlightPanelActivity::onWarmthEvent, this);
@@ -293,6 +299,11 @@ void FrontlightPanelActivity::loop() {
   }
 
   const Rect homeButton = homeButtonRect();
+  if (TouchUi::enabled(mappedInput) &&
+      mappedInput.wasTapInRect(homeButton.x, homeButton.y, homeButton.width, homeButton.height)) {
+    close();
+    return;
+  }
   if (context.activeReaderBook &&
       mappedInput.wasTapInRect(homeButton.x, homeButton.y, homeButton.width, homeButton.height)) {
     activityManager.goHome();
@@ -342,6 +353,12 @@ void FrontlightPanelActivity::loop() {
 
 Rect FrontlightPanelActivity::homeButtonRect() const {
   const auto& metrics = UITheme::getInstance().getMetrics();
+  if (TouchUi::enabled(mappedInput)) {
+    const int margin = renderer.getScreenWidth() * 45 / 1000;
+    return Rect{
+        renderer.getScreenWidth() - margin - HEADER_BUTTON_WIDTH, TouchUi::statusHeight(renderer), HEADER_BUTTON_WIDTH,
+        TouchHeaderBackButton::height(metrics, mappedInput) - TouchUi::statusHeight(renderer) + metrics.topPadding};
+  }
   return Rect{renderer.getScreenWidth() - HEADER_BUTTON_WIDTH, metrics.topPadding, HEADER_BUTTON_WIDTH,
               TouchHeaderBackButton::height(metrics, mappedInput)};
 }
@@ -372,7 +389,7 @@ int FrontlightPanelActivity::computePanelBottom() const {
   if (Frontlight.hasColorTemperature()) {
     y += lh + tokens.spaceSm + tokens.rowHeight + tokens.spaceLg;  // warmth label + slider
   }
-  y += tokens.spaceLg + ACTION_BAR_HEIGHT;  // trailing padding + actions
+  y += tokens.spaceLg + (TouchUi::enabled(mappedInput) ? 0 : ACTION_BAR_HEIGHT);
   const auto sheet = frontlightSheetProps();
   return y + DrawerHandle::bandHeight(sheet);
 }
@@ -437,20 +454,22 @@ void FrontlightPanelActivity::buildPanelScreen(UiApp::ScreenType& screen) {
       fui::Insets{static_cast<int16_t>(metrics.topPadding + TouchHeaderBackButton::height(metrics, mappedInput)), 0,
                   bottomInset, 0});
 
-  const fui::Rect actionBar = screen.takeBottom(ACTION_BAR_HEIGHT);
-  const int16_t slotWidth = static_cast<int16_t>(actionBar.width / 5);
-  const std::array<fui::BitmapRef, 5> icons = {
-      fui::bitmapFromIcon(icon_reading_stats_24), fui::bitmapFromIcon(icon_transfer_24),
-      fui::bitmapFromIcon(icon_tabler_moon_filled_24), fui::bitmapFromIcon(icon_sliders_horizontal_24),
-      fui::bitmapFromIcon(pendingTouchscreenDisabled ? icon_device_tablet_off_24 : icon_device_tablet_24)};
-  for (int16_t i = 0; i < 5; ++i) {
-    const int16_t x = static_cast<int16_t>(actionBar.x + i * slotWidth);
-    const int16_t width = i == 4 ? static_cast<int16_t>(actionBar.right() - x) : slotWidth;
-    const fui::Rect slot{x, actionBar.y, width, actionBar.height};
-    screen.frame().hit(slot, ACTION_QUICK, i);
-    screen.target().bitmap(slot, icons[static_cast<size_t>(i)], fui::BitmapMode::Center);
+  if (!TouchUi::enabled(mappedInput)) {
+    const fui::Rect actionBar = screen.takeBottom(ACTION_BAR_HEIGHT);
+    const int16_t slotWidth = static_cast<int16_t>(actionBar.width / 5);
+    const std::array<fui::BitmapRef, 5> icons = {
+        fui::bitmapFromIcon(icon_reading_stats_24), fui::bitmapFromIcon(icon_transfer_24),
+        fui::bitmapFromIcon(icon_tabler_moon_filled_24), fui::bitmapFromIcon(icon_sliders_horizontal_24),
+        fui::bitmapFromIcon(pendingTouchscreenDisabled ? icon_device_tablet_off_24 : icon_device_tablet_24)};
+    for (int16_t i = 0; i < 5; ++i) {
+      const int16_t x = static_cast<int16_t>(actionBar.x + i * slotWidth);
+      const int16_t width = i == 4 ? static_cast<int16_t>(actionBar.right() - x) : slotWidth;
+      const fui::Rect slot{x, actionBar.y, width, actionBar.height};
+      screen.frame().hit(slot, ACTION_QUICK, i);
+      screen.target().bitmap(slot, icons[static_cast<size_t>(i)], fui::BitmapMode::Center);
+    }
+    screen.target().fill(fui::Rect{actionBar.x, actionBar.y, actionBar.width, 1}, fui::Paint::solid(fui::Color::Black));
   }
-  screen.target().fill(fui::Rect{actionBar.x, actionBar.y, actionBar.width, 1}, fui::Paint::solid(fui::Color::Black));
 
   if (context.showReaderDetails) {
     drawReaderDetails(screen);
@@ -506,6 +525,17 @@ void FrontlightPanelActivity::drawHeader() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int headerHeight = TouchHeaderBackButton::height(metrics, mappedInput);
   const Rect header{0, metrics.topPadding, renderer.getScreenWidth(), headerHeight};
+  if (TouchUi::enabled(mappedInput)) {
+    TouchUi::drawStatus(renderer);
+    const int titleFont = TouchUi::titleFont();
+    const int y = header.y + header.height - renderer.getLineHeight(titleFont) - 8;
+    renderer.drawText(titleFont, renderer.getScreenWidth() * 45 / 1000, y, tr(STR_FRONTLIGHT));
+    const Rect done = homeButtonRect();
+    UITheme::drawCenteredText(renderer, done, TouchUi::bodyFont(),
+                              y + (renderer.getLineHeight(titleFont) - renderer.getLineHeight(TouchUi::bodyFont())) / 2,
+                              tr(STR_DONE));
+    return;
+  }
 
   char date[16] = {};
   const char* title = context.showReaderDetails ? "" : tr(STR_FRONTLIGHT);
@@ -574,8 +604,24 @@ void FrontlightPanelActivity::addStepSlider(UiApp::ScreenType& screen, const fui
   slider.max = 100;
   slider.action = sliderAction;
   slider.inputMask = fui::InputTouch | fui::InputDrag;
+  if (TouchUi::enabled(mappedInput)) {
+    slider.track = fui::Paint::solid(fui::Color::Black);
+    slider.trackHeight = 1;
+    slider.knob = fui::Paint::solid(fui::Color::White);
+    slider.knobWidth = 36;
+    slider.knobHeight = 36;
+    slider.radius = 18;
+  }
   const int16_t sideGap = static_cast<int16_t>(stepWidth + theme.spaceSm);
-  fui::slider(screen.frame(), row.inset(fui::Insets{0, sideGap, 0, sideGap}), slider);
+  const auto sliderRect = row.inset(fui::Insets{0, sideGap, 0, sideGap});
+  if (TouchUi::enabled(mappedInput)) {
+    const int16_t trackX = sliderRect.x + slider.horizontalPadding;
+    const int travel = std::max(0, sliderRect.width - slider.horizontalPadding * 2 - slider.knobWidth);
+    const int16_t filled = slider.knobWidth / 2 + travel * value / 100;
+    screen.target().fill(fui::Rect{trackX, static_cast<int16_t>(row.y + row.height / 2 - 2), filled, 4},
+                         fui::Paint::solid(fui::Color::Black));
+  }
+  fui::slider(screen.frame(), sliderRect, slider);
 }
 
 void FrontlightPanelActivity::render(RenderLock&&) {

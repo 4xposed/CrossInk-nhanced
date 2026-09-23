@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "AnkiDeckTypes.h"
 
@@ -20,6 +21,11 @@ class ReviewStateStore;
 
 class AnkiDeck {
  public:
+  static constexpr const char* kSavedTermsPath = "/decks/Saved terms.cdeck";
+  static constexpr uint64_t kSavedTermsId = 0x43524F5353544552ULL;
+  enum class AddTermResult : uint8_t { Added, AlreadyAdded, Error };
+  static AddTermResult addSavedTerm(std::string_view term, std::string_view answer, std::string_view title);
+  static bool recoverSavedTerms();
   bool load(const std::string& path);
   const char* title() const;
   uint32_t cardCount() const;

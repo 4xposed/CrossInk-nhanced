@@ -408,6 +408,16 @@ DictionaryFontActivation SdCardFontSystem::activateDictionaryFont(GfxRenderer& r
                           ? manager_.currentPointSize()
                           : CrossPointSettings::getReaderFontPointSize(SETTINGS.getEffectiveReaderFontSize());
   }
+  // An exact live font needs no SD directory scan. A dirty registry or a
+  // closest-size match must still resolve through the existing discovery path.
+  if (!registryDirty_.load(std::memory_order_acquire) && manager_.currentFamilyName() == familyName &&
+      manager_.currentPointSize() == targetPointSize) {
+    const int fontId = manager_.getFontId(manager_.currentFamilyName());
+    if (fontId != 0 && renderer.isSdCardFont(fontId)) {
+      MemoryBudget::logHeapShape("dict.font_reused_reader");
+      return {fontId, true};
+    }
+  }
   if (!findInstalledFontFile(familyName, targetPointSize, FontFileSelection::Closest, path, sizeof(path),
                              selectedPointSize)) {
     LOG_DBG("SDFS", "Dictionary font not found on card: %s", familyName);
@@ -488,6 +498,17 @@ int SdCardFontSystem::restoreReaderFont(GfxRenderer& renderer) {
     loadedFontPointSize_ = 0;
     MemoryBudget::logHeapShape("dict.font_after_restore");
     return SETTINGS.getBuiltInReaderFontId();
+  }
+
+  // Keep the loaded family's glyph/advance caches on a no-op restoration.
+  // Do not bypass discovery after font uploads or for nearest-size selection.
+  if (!registryDirty_.load(std::memory_order_acquire) && manager_.currentFamilyName() == familyName &&
+      manager_.currentPointSize() == SETTINGS.getSdFontTargetPointSize()) {
+    const int fontId = manager_.getFontId(manager_.currentFamilyName());
+    if (fontId != 0 && renderer.isSdCardFont(fontId)) {
+      MemoryBudget::logHeapShape("dict.font_after_restore");
+      return fontId;
+    }
   }
 
   char path[160] = {};

@@ -47,6 +47,58 @@ struct Item {
   size_t offset = 0, length = 0, runOffset = 0;
   int region = 0;
 };
+// Bubble-only OCR has no glyph boxes. Estimate equal cells in source coordinates
+// before the existing crop/rotation transform. State is reused across the walk;
+// each line is counted once and no additional glyph array is allocated.
+struct ApproximateBlockGeometry {
+  int region = -1;
+  uint32_t lines = 1, line = 0, column = 0, columns = 1;
+  bool vertical = false;
+
+  static uint32_t lineLength(std::string_view text) {
+    uint32_t count = 0;
+    while (!text.empty()) {
+      const auto d = decode(text);
+      if (hard(d)) break;
+      ++count;
+      text.remove_prefix(d.bytes);
+    }
+    return std::max<uint32_t>(1, count);
+  }
+  manga::format::Rect next(const Item& item) {
+    if (item.block.empty()) return {};
+    if (region != item.region) {
+      region = item.region;
+      lines = 1;
+      line = column = 0;
+      bool japanese = false;
+      auto text = item.block;
+      while (!text.empty()) {
+        const auto d = decode(text);
+        if (hard(d)) ++lines;
+        japanese = japanese || japaneseGlyph(d.cp);
+        text.remove_prefix(d.bytes);
+      }
+      vertical = japanese && item.box.h > item.box.w;
+      columns = lineLength(item.block);
+    }
+    if (hard(decode(item.block.substr(item.offset)))) {
+      ++line;
+      column = 0;
+      columns = lineLength(item.block.substr(item.offset + item.length));
+      return {};
+    }
+    const auto& b = item.box;
+    const uint32_t x0 = vertical ? b.w * (lines - 1 - line) / lines : b.w * column / columns;
+    const uint32_t x1 = vertical ? b.w * (lines - line) / lines : b.w * (column + 1) / columns;
+    const uint32_t y0 = vertical ? b.h * column / columns : b.h * line / lines;
+    const uint32_t y1 = vertical ? b.h * (column + 1) / columns : b.h * (line + 1) / lines;
+    ++column;
+    if (!b.w || !b.h || b.x + x0 > UINT16_MAX || b.y + y0 > UINT16_MAX) return {};
+    return {uint16_t(b.x + x0), uint16_t(b.y + y0), uint16_t(std::max<uint32_t>(1, x1 - x0)),
+            uint16_t(std::max<uint32_t>(1, y1 - y0))};
+  }
+};
 // One ordinal/boundary policy for building and reconstruction; no temporary text
 // allocations, no strlen on borrowed format bytes. Return false for malformed views.
 template <class Sink>
@@ -126,14 +178,21 @@ bool mapMangaLookupBlock(manga::format::Rect box, const MangaLookupGeometry& g, 
   if (g.views.screenWidth != (delta % 2 ? g.layout.screenHeight : g.layout.screenWidth) ||
       g.views.screenHeight != (delta % 2 ? g.layout.screenWidth : g.layout.screenHeight))
     return false;
-  int64_t l = std::min<int64_t>(box.x, g.sourceWidth), t = std::min<int64_t>(box.y, g.sourceHeight);
-  int64_t r = std::min<int64_t>(int64_t(box.x) + box.w, g.sourceWidth);
-  int64_t b = std::min<int64_t>(int64_t(box.y) + box.h, g.sourceHeight);
+  const bool cropped = g.sourceCrop.w != 0 || g.sourceCrop.h != 0;
+  const int cropX = cropped ? g.sourceCrop.x : 0, cropY = cropped ? g.sourceCrop.y : 0;
+  const int sourceWidth = cropped ? g.sourceCrop.w : g.sourceWidth;
+  const int sourceHeight = cropped ? g.sourceCrop.h : g.sourceHeight;
+  if (sourceWidth <= 0 || sourceHeight <= 0 || cropX + sourceWidth > g.sourceWidth ||
+      cropY + sourceHeight > g.sourceHeight)
+    return false;
+  int64_t l = std::max<int64_t>(box.x, cropX), t = std::max<int64_t>(box.y, cropY);
+  int64_t r = std::min<int64_t>(int64_t(box.x) + box.w, cropX + sourceWidth);
+  int64_t b = std::min<int64_t>(int64_t(box.y) + box.h, cropY + sourceHeight);
   if (l >= r || t >= b) return false;
-  l = fit.x + l * fit.width / g.sourceWidth;
-  t = fit.y + t * fit.height / g.sourceHeight;
-  r = fit.x + (r * fit.width + g.sourceWidth - 1) / g.sourceWidth;
-  b = fit.y + (b * fit.height + g.sourceHeight - 1) / g.sourceHeight;
+  l = fit.x + (l - cropX) * fit.width / sourceWidth;
+  t = fit.y + (t - cropY) * fit.height / sourceHeight;
+  r = fit.x + ((r - cropX) * fit.width + sourceWidth - 1) / sourceWidth;
+  b = fit.y + ((b - cropY) * fit.height + sourceHeight - 1) / sourceHeight;
   int64_t w = g.layout.screenWidth, h = g.layout.screenHeight;
   for (int i = 0; i < delta; ++i) {
     const int64_t nl = t, nt = w - r, nr = b, nb = w - l;
@@ -203,9 +262,25 @@ int mangaLookupRegionAtPoint(manga::format::PageView page, int panel, const Mang
   return selected;
 }
 
+bool mangaLookupRegionHasSingleToken(manga::format::PageView page, const int panel, const int region) {
+  uint16_t word = PageTextGlyph::kSyntheticPageWord;
+  size_t glyphCount = 0;
+  bool multipleWords = false, japanese = false;
+  const bool valid = walk(page, panel, [&](const Item& item) {
+    if (item.region != region || item.glyph.pageWord == PageTextGlyph::kSyntheticPageWord) return;
+    if (word != PageTextGlyph::kSyntheticPageWord && word != item.glyph.pageWord) multipleWords = true;
+    word = item.glyph.pageWord;
+    japanese = japanese || japaneseGlyph(item.glyph.codepoint);
+    ++glyphCount;
+  });
+  // OCR stores block rectangles, not character boxes. A Japanese lexical run
+  // can contain several dictionary words without spaces, so it is ambiguous.
+  return valid && glyphCount != 0 && !multipleWords && (!japanese || glyphCount == 1);
+}
+
 DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int panel,
                                             const MangaLookupGeometry& geometry, OwnedLookupTextSource& out,
-                                            const int region) {
+                                            const int region, const MangaTextMeasure measure) {
   out.clear();
   if (geometry.textOnly &&
       (!validRect(geometry.views.base) || geometry.cellWidth <= 0 || geometry.lineHeight <= 0 ||
@@ -249,11 +324,12 @@ DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int pa
   }
   size_t used = 0, complete = 0;
   bool stopped = false;
-  int column = 0, row = 0;
+  int column = 0, row = 0, textX = 0;
   const int columns = geometry.textOnly ? geometry.views.base.width / geometry.cellWidth : 0;
   const int textHeight = region >= 0 ? INT16_MAX - geometry.views.base.y : geometry.views.base.height;
   const int rows = geometry.textOnly ? textHeight / geometry.lineHeight : 0;
   uint16_t previousWord = PageTextGlyph::kSyntheticPageWord;
+  ApproximateBlockGeometry approximation;
   walk(page, panel, [&](const Item& item) {
     if (region >= 0 && item.region != region) return;
     if (stopped) return;
@@ -266,7 +342,34 @@ DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int pa
     }
     PageTextGlyph glyph = item.glyph;
     PageTextBounds bounds;
-    if (geometry.textOnly) {
+    const auto estimated = geometry.approximateTextPositions ? approximation.next(item) : item.box;
+    if (geometry.textOnly && measure.advance) {
+      const bool separator = glyph.pageWord == PageTextGlyph::kSyntheticPageWord;
+      if (separator && hard({glyph.codepoint, 1, glyph.codepoint != 0xfffd})) {
+        textX = 0;
+        ++row;
+      } else {
+        const int advance = std::clamp(measure.advance(measure.context, glyph.codepoint), 1, geometry.views.base.width);
+        if (textX + advance > geometry.views.base.width) {
+          textX = 0;
+          ++row;
+          // A wrapping space is not indentation on the next line.
+          if (separator) {
+            glyphs[used++] = glyph;
+            return;
+          }
+        }
+        if (!separator) {
+          if (row >= rows) {
+            stopped = true;
+            return;
+          }
+          bounds = {int16_t(geometry.views.base.x + textX), int16_t(geometry.views.base.y + row * geometry.lineHeight),
+                    int16_t(advance), int16_t(geometry.lineHeight)};
+        }
+        textX += advance;
+      }
+    } else if (geometry.textOnly) {
       if (glyph.pageWord == PageTextGlyph::kSyntheticPageWord) {
         if (hard({glyph.codepoint, 1, glyph.codepoint != 0xfffd})) {
           column = 0;
@@ -291,7 +394,7 @@ DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int pa
     } else if (glyph.pageWord != PageTextGlyph::kSyntheticPageWord) {
       // Keep text/ordinal identity even if its box is entirely clipped. An
       // invisible block must not acquire a fabricated selectable rectangle.
-      mapMangaLookupBlock(item.box, geometry, bounds);
+      mapMangaLookupBlock(estimated, geometry, bounds);
     }
     glyph.x = bounds.x;
     glyph.y = bounds.y;

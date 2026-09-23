@@ -1135,6 +1135,12 @@ XtcReaderActivity::StatusBarInfo XtcReaderActivity::getStatusBarInfo(const uint3
 
 void XtcReaderActivity::renderStatusBarOverlay(const StatusBarOverlayPosition position,
                                                const uint32_t pageToRender) const {
+  if (TouchUi::enabled(mappedInput)) {
+    const int count = static_cast<int>(xtc->getPageCount());
+    ReaderUtils::drawCompactProgress(renderer, count ? (pageToRender + 1) * 100.0f / count : 0, pageToRender + 1,
+                                     count);
+    return;
+  }
   const bool drawBottom = SETTINGS.xtcStatusBarMode == CrossPointSettings::XTC_STATUS_BAR_MODE::XTC_STATUS_BAR_BOTTOM &&
                           position == StatusBarOverlayPosition::Bottom;
   const bool drawTop = SETTINGS.xtcStatusBarMode == CrossPointSettings::XTC_STATUS_BAR_MODE::XTC_STATUS_BAR_TOP &&
@@ -1200,7 +1206,20 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
       renderer.drawCenteredText(UI_12_FONT_ID, 300, message, true, EpdFontFamily::BOLD);
       renderer.displayBuffer();
     };
-    const auto clearHiddenStatusBar = [this, pageToRender] {
+    const auto clearHiddenStatusBar = [this, pageToRender](bool grayMask = false) {
+      if (TouchUi::enabled(mappedInput)) {
+        if (grayMask) {
+          int top, right, bottom, left;
+          renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+          const int footer = ReaderUtils::getReaderFooterReservedHeight(false, renderer);
+          renderer.fillRect(0, 0, renderer.getScreenWidth(), TouchUi::statusHeight(renderer), true);
+          renderer.fillRect(0, renderer.getScreenHeight() - bottom - footer, renderer.getScreenWidth(), bottom + footer,
+                            true);
+        } else {
+          renderStatusBarOverlay(StatusBarOverlayPosition::Bottom, pageToRender);
+        }
+        return;
+      }
       if (statusBarVisible) {
         return;
       }
@@ -1234,7 +1253,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
       showStreamError();
       return;
     }
-    clearHiddenStatusBar();
+    clearHiddenStatusBar(true);
     renderer.copyGrayscaleLsbBuffers();
 
     renderer.clearScreen(0x00);
@@ -1242,7 +1261,7 @@ void XtcReaderActivity::renderPage(const uint32_t pageToRender) {
       showStreamError();
       return;
     }
-    clearHiddenStatusBar();
+    clearHiddenStatusBar(true);
     renderer.copyGrayscaleMsbBuffers();
     renderer.displayGrayBuffer();
 

@@ -301,11 +301,13 @@ DictionaryStatus PageWordScanner::allocateCandidates(const bool preferFullCapaci
 
 DictionaryStatus PageWordScanner::begin(const PageTextSourceView source, const DictionaryBackendKind backend,
                                         const DictionaryProbeFn probe,
-                                        const PageWordScannerMemoryRecoveryFn memoryRecovery) {
+                                        const PageWordScannerMemoryRecoveryFn memoryRecovery,
+                                        const bool geometryOnlyStarDict) {
   clear();
   if ((source.glyphCount != 0 && !source.glyphs) || !probe.call) return DictionaryStatus::Unavailable;
   source_ = source;
   backend_ = backend;
+  geometryOnlyStarDict_ = geometryOnlyStarDict;
   probe_ = probe;
   const DictionaryStatus status = allocateCandidates(true);
   if (status != DictionaryStatus::Found) {
@@ -351,17 +353,19 @@ DictionaryStatus PageWordScanner::scanStarDict() {
   token[tokenBytes] = '\0';
   if (!utf8ContainsLookupCharacter(token)) return DictionaryStatus::NotFound;
 
-  DictionaryProbeResult result;
-  const DictionaryStatus status =
-      probe_.call(probe_.context, {{token, tokenBytes}, 0, DictionaryLookupMode::Token}, result);
-  if (status != DictionaryStatus::Found && status != DictionaryStatus::NotFound) return status;
-  if (result.status != status) return DictionaryStatus::ReadError;
-  size_t matchedBytes = tokenBytes;
-  if (status == DictionaryStatus::Found) {
-    if (result.matchedBytes != tokenBytes || result.matchedBytes == 0 || result.matchedBytes > UINT8_MAX) {
+  // StarDict exposes whole source tokens even when the dictionary has no entry.
+  // Touch selection needs only those bounds; probing every earlier word adds SD
+  // reads without changing candidates. The selected word is looked up normally.
+  if (!geometryOnlyStarDict_) {
+    DictionaryProbeResult result;
+    const DictionaryStatus status =
+        probe_.call(probe_.context, {{token, tokenBytes}, 0, DictionaryLookupMode::Token}, result);
+    if (status != DictionaryStatus::Found && status != DictionaryStatus::NotFound) return status;
+    if (result.status != status) return DictionaryStatus::ReadError;
+    if (status == DictionaryStatus::Found &&
+        (result.matchedBytes != tokenBytes || result.matchedBytes == 0 || result.matchedBytes > UINT8_MAX)) {
       return DictionaryStatus::ReadError;
     }
-    matchedBytes = result.matchedBytes;
   }
   if (candidateCount_ >= candidateCapacity_) {
     LOG_ERR("WLS", "Page candidate capacity exhausted at %u entries", static_cast<unsigned>(candidateCount_));
@@ -370,7 +374,7 @@ DictionaryStatus PageWordScanner::scanStarDict() {
     return DictionaryStatus::OutOfMemory;
   }
   candidates_[candidateCount_++] = {firstGlyph, static_cast<uint8_t>(end - firstGlyph),
-                                    static_cast<uint8_t>(matchedBytes), pageWord, pageWord};
+                                    static_cast<uint8_t>(tokenBytes), pageWord, pageWord};
   return DictionaryStatus::Found;
 }
 
@@ -566,6 +570,7 @@ void PageWordScanner::clear() {
   candidates_.reset();
   source_ = {};
   probe_ = {};
+  geometryOnlyStarDict_ = false;
   terminalStatus_ = DictionaryStatus::Found;
   candidateCapacity_ = 0;
   candidateCount_ = 0;

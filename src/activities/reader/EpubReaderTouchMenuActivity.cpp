@@ -1909,13 +1909,19 @@ void EpubReaderTouchMenuActivity::renderPreviewWithAntiAliasing() {
       renderer, [this, &previewSettings, previewFontId] { renderPreviewText(previewSettings, previewFontId); });
 }
 
+bool EpubReaderTouchMenuActivity::allowFrontlightPanelGesture() const { return TouchUi::enabled(mappedInput); }
+
 void EpubReaderTouchMenuActivity::loop() {
   if (mappedInput.wasBottomEdgeUpSwipe()) {
-    closeAndReturn(false, EpubReaderMenuAction::GO_HOME, false);
+    if (TouchUi::enabled(mappedInput))
+      closeAndReturn(true);
+    else
+      closeAndReturn(false, EpubReaderMenuAction::GO_HOME, false);
     return;
   }
   if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
-  if (DrawerHandle::wasDismissSwipe(mappedInput, drawerHandleRect, fui::SheetEdge::Bottom)) {
+  if (DrawerHandle::wasDismissSwipe(mappedInput, drawerHandleRect,
+                                    TouchUi::enabled(mappedInput) ? fui::SheetEdge::Top : fui::SheetEdge::Bottom)) {
     closeAndReturn(true);
     return;
   }
@@ -2013,6 +2019,7 @@ void EpubReaderTouchMenuActivity::render(RenderLock&&) {
   app.render();
   uiReady = true;
   if (optionPopup.isActive()) optionPopup.render(renderer);
+  if (TouchUi::enabled(mappedInput)) TouchUi::drawStatus(renderer);
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   if (shouldRenderReaderDrawerAntiAliasing(previewRendered, draft.textAntiAliasing,
                                            ReaderUtils::readerForegroundBlack())) {

@@ -41,6 +41,35 @@ using manga::MenuAction;
 constexpr unsigned long MIN_READING_STATS_PAGE_MS = 2000UL;
 constexpr unsigned long LONG_PRESS_MENU_MS = 600UL;
 
+void encodeMangaGlyph(const uint32_t cp, char (&text)[5]) {
+  if (cp < 0x80)
+    text[0] = static_cast<char>(cp);
+  else if (cp < 0x800) {
+    text[0] = 0xc0 | (cp >> 6);
+    text[1] = 0x80 | (cp & 63);
+  } else if (cp < 0x10000) {
+    text[0] = 0xe0 | (cp >> 12);
+    text[1] = 0x80 | ((cp >> 6) & 63);
+    text[2] = 0x80 | (cp & 63);
+  } else {
+    text[0] = 0xf0 | (cp >> 18);
+    text[1] = 0x80 | ((cp >> 12) & 63);
+    text[2] = 0x80 | ((cp >> 6) & 63);
+    text[3] = 0x80 | (cp & 63);
+  }
+}
+
+int measureMangaGlyph(void* context, const uint32_t cp) {
+  auto& renderer = *static_cast<GfxRenderer*>(context);
+  char text[5]{};
+  encodeMangaGlyph(cp, text);
+  const int font = SETTINGS.getReaderFontId();
+  if (renderer.isSdCardFont(font)) renderer.ensureSdCardFontReady(font, text, 0x01);
+  // Ink bounds omit whitespace and side bearings. Layout needs the pen
+  // advance used by drawText, including the real width of a space.
+  return renderer.getTextAdvanceX(font, text, EpdFontFamily::REGULAR);
+}
+
 std::string bookmarkMetadataLabel(std::string_view text) {
   // Portable metadata fields can be 64 KiB each. Bookmark headers need only a
   // display label; do not duplicate the adapter's entire optional metadata buffer.
@@ -149,6 +178,7 @@ void MangaReaderActivity::onExit() {
 }
 
 bool MangaReaderActivity::loadPageLocked(uint32_t number) {
+  deferredBubbleTapX = deferredBubbleTapY = -1;
   available = {};
   page = {};
   position.page = number;
@@ -251,13 +281,26 @@ bool MangaReaderActivity::openReaderSettingsMenu() {
   autoTurn.cancel();
   if (menu.isActive()) return true;
   pendingLookup = false;
+  pendingLookupTouchX = pendingLookupTouchY = -1;
+  deferredBubbleTapX = deferredBubbleTapY = -1;
   pendingInput.requestMenu();
   foregroundReadyLocked();
   return true;
 }
 
-void MangaReaderActivity::showMenuLocked() {
+void MangaReaderActivity::showMenuLocked(const bool fullMenu) {
   pauseReadingStatsTimer();
+  if (TouchUi::enabled(mappedInput) && !fullMenu) {
+    const char* options[] = {tr(STR_MANGA_SHOW_OVERVIEWS), tr(STR_TOGGLE_BOOKMARK), tr(STR_LOOKUP), tr(STR_LIGHT),
+                             tr(STR_MORE)};
+    menu.show(tr(STR_READER_MENU), options, 5, 0, [this](int index) {
+      static constexpr MenuAction actions[] = {MenuAction::Overview, MenuAction::ToggleBookmark, MenuAction::Lookup,
+                                               MenuAction::Light, MenuAction::More};
+      if (index >= 0 && index < 5) pendingMenuAction = actions[index];
+    });
+    requestUpdate();
+    return;
+  }
   char autoLabel[80];
   const StrId rateLabels[] = {StrId::STR_OFF, StrId::STR_MANGA_AUTO_ONE, StrId::STR_MANGA_AUTO_THREE,
                               StrId::STR_MANGA_AUTO_SIX, StrId::STR_MANGA_AUTO_TWELVE};
@@ -327,6 +370,25 @@ void MangaReaderActivity::toggleBookmark() {
 void MangaReaderActivity::handleMenuAction(const MenuAction action) {
   autoTurn.cancel();
   switch (action) {
+    case MenuAction::More: {
+      // This handler runs after the popup callback has returned. Replacing the
+      // popup here preserves every legacy control without mutating it mid-event.
+      RenderLock lock(*this);
+      showMenuLocked(true);
+      return;
+    }
+    case MenuAction::Overview: {
+      RenderLock lock(*this);
+      if (available.overview) {
+        position.panel = -1;
+        imageDirty = true;
+        observeProgressLocked();
+      }
+      break;
+    }
+    case MenuAction::Light:
+      activityManager.showFrontlightPanel();
+      break;
     case MenuAction::Chapter:
       showSelection(false);
       break;
@@ -432,6 +494,7 @@ void MangaReaderActivity::openAutoTurnMenu() {
   menu.show(tr(STR_AUTO_TURN_ENABLED), rates, 5, autoTurn.rateIndex(), [this](int choice) {
     pendingInput = {};
     pendingBack = pendingLookup = false;
+    pendingLookupTouchX = pendingLookupTouchY = -1;
     autoTurn.select(choice, millis());
     // The popup's normal dismissal path restores BW before the next deadline.
     pendingMenuAction = MenuAction::None;
@@ -528,14 +591,17 @@ void MangaReaderActivity::deleteCacheWhenReady() {
                                                       : StrId::STR_CLEAR_CACHE_FAILED));
 }
 
-bool MangaReaderActivity::queueShortcut(const MenuAction action) {
+bool MangaReaderActivity::queueShortcut(const MenuAction action, const int touchX, const int touchY) {
   RenderLock lock(*this);
   if (!ready || menu.isActive() || inputLocked || suspended || childActive || pendingInput.hasMenu() ||
       pendingCacheDelete || pendingFeedback != StrId::STR_NONE_OPT || foregroundDraining)
     return false;
   autoTurn.cancel();
+  deferredBubbleTapX = deferredBubbleTapY = -1;
   if (action == MenuAction::Lookup) {
     pendingLookup = true;
+    pendingLookupTouchX = touchX;
+    pendingLookupTouchY = touchY;
     foregroundReadyLocked();
   } else if (action == MenuAction::Screenshot) {
     pendingScreenshot = true;
@@ -583,6 +649,14 @@ void MangaReaderActivity::drawStatusLocked(const bool grayMask) {
   else
     snprintf(counter, sizeof(counter), "%d/%u  %lu/%lu", position.panel + 1, available.panelCount,
              static_cast<unsigned long>(position.page + 1), static_cast<unsigned long>(book.pageCount()));
+  if (TouchUi::enabled(mappedInput)) {
+    if (!grayMask)
+      ReaderUtils::drawCompactProgress(renderer, book.pageCount() ? (position.page + 1) * 100.0f / book.pageCount() : 0,
+                                       position.panel >= 0 ? position.panel + 1 : position.page + 1,
+                                       position.panel >= 0 ? available.panelCount : book.pageCount());
+    renderer.setOrientation(base);
+    return;
+  }
   const char* hint = tr(STR_MANGA_PANELS_HINT);
   const auto layout = manga::layoutStatus(
       left, top, renderer.getScreenWidth() - left - right, renderer.getScreenHeight() - top - bottom,
@@ -616,9 +690,16 @@ void MangaReaderActivity::lookupBackgroundLocked(PageTextSourceView source) {
   const auto savedOrientation = renderer.getOrientation();
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
   renderer.setRenderMode(GfxRenderer::BW);
-  renderer.clearScreen();
-  if (!lookupGeometry.textOnly || lookupTextPopup) {
-    position.panel = -1;
+  const bool fullTextSelector = TouchUi::enabled(mappedInput) && lookupTextPopup && lookupGeometry.textOnly;
+  const bool foregroundBlack = !fullTextSelector || ReaderUtils::readerForegroundBlack();
+  if (fullTextSelector)
+    renderer.clearScreen(ReaderUtils::readerBackgroundColor());
+  else
+    renderer.clearScreen();
+  // The full selector covers the image. Avoid reopening/decoding its source on
+  // every dictionary redraw; childReturned() restores the reader via imageDirty.
+  if (!fullTextSelector && (!lookupGeometry.textOnly || lookupTextPopup)) {
+    position.panel = lookupImagePanel;
     if (!drawImageLocked(lookupTextPopup ? nullptr : &lookupGeometry.views)) {
       LOG_ERR("MANGA", "Cannot redraw OCR overview background");
       renderer.drawCenteredText(UI_10_FONT_ID, renderer.getScreenHeight() / 2, tr(STR_PAGE_LOAD_ERROR));
@@ -626,7 +707,7 @@ void MangaReaderActivity::lookupBackgroundLocked(PageTextSourceView source) {
     pixelCache.close();
   }
   if (lookupGeometry.textOnly) {
-    if (lookupTextPopup) {
+    if (lookupTextPopup && !fullTextSelector) {
       const auto& box = lookupGeometry.views.base;
       renderer.fillRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8, false);
       renderer.drawRect(box.x - 4, box.y - 4, box.width + 8, box.height + 8);
@@ -642,25 +723,10 @@ void MangaReaderActivity::lookupBackgroundLocked(PageTextSourceView source) {
         clip = clipPageTextBounds(clip, {int16_t(box.x), int16_t(box.y), int16_t(box.width), int16_t(box.height)});
         if (clip.width <= 0 || clip.height <= 0) continue;
       }
-      const uint32_t cp = glyph.codepoint;
       char text[5]{};
-      if (cp < 0x80)
-        text[0] = static_cast<char>(cp);
-      else if (cp < 0x800) {
-        text[0] = 0xc0 | (cp >> 6);
-        text[1] = 0x80 | (cp & 63);
-      } else if (cp < 0x10000) {
-        text[0] = 0xe0 | (cp >> 12);
-        text[1] = 0x80 | ((cp >> 6) & 63);
-        text[2] = 0x80 | (cp & 63);
-      } else {
-        text[0] = 0xf0 | (cp >> 18);
-        text[1] = 0x80 | ((cp >> 12) & 63);
-        text[2] = 0x80 | ((cp >> 6) & 63);
-        text[3] = 0x80 | (cp & 63);
-      }
+      encodeMangaGlyph(glyph.codepoint, text);
       renderer.beginTextClip(clip.x, clip.y, clip.width, clip.height);
-      renderer.drawText(SETTINGS.getReaderFontId(), glyph.x, glyph.y, text);
+      renderer.drawText(SETTINGS.getReaderFontId(), glyph.x, glyph.y, text, foregroundBlack);
       renderer.endTextClip();
     }
   }
@@ -669,7 +735,34 @@ void MangaReaderActivity::lookupBackgroundLocked(PageTextSourceView source) {
   imageDirty = true;
 }
 
-void MangaReaderActivity::openLookup(const int region) {
+bool MangaReaderActivity::touchHitsOcrLocked(const int x, const int y) {
+  manga::format::IndexRecord info{};
+  if (!book.readPageInfo(position.page, info)) return false;
+  MangaLookupGeometry geometry;
+  geometry.sourceWidth = info.imageWidth;
+  geometry.sourceHeight = info.imageHeight;
+  geometry.views = viewports;
+  geometry.layout.geometry = imageGeometry;
+  geometry.layout.orientation = static_cast<int>(imageOrientation);
+  const int delta = (static_cast<int>(imageOrientation) - viewports.orientation + 4) % 4;
+  geometry.layout.screenWidth = delta % 2 ? viewports.screenHeight : viewports.screenWidth;
+  geometry.layout.screenHeight = delta % 2 ? viewports.screenWidth : viewports.screenHeight;
+  if (position.panel >= 0) {
+    auto panels = page.panels;
+    for (int i = 0; i <= position.panel; ++i) {
+      manga::format::PanelView panel;
+      if (panels.next(panel) != manga::format::Error::None) return false;
+      if (i == position.panel) geometry.sourceCrop = panel.box;
+    }
+  }
+  return mangaLookupRegionAtPoint(page, position.panel, geometry, x, y) >= 0;
+}
+
+void MangaReaderActivity::openLookup(const int region, const bool deferToTouchSelection) {
+  const int touchX = pendingLookupTouchX, touchY = pendingLookupTouchY;
+  pendingLookupTouchX = pendingLookupTouchY = -1;
+  const bool touchLookup = touchX >= 0 && touchY >= 0;
+  int selectedRegion = region;
   OwnedLookupTextSource source;
   std::unique_ptr<MangaRegionSelectionActivity> selection;
   DictionaryStatus status;
@@ -687,13 +780,36 @@ void MangaReaderActivity::openLookup(const int region) {
     captureViewportsLocked();
     lookupGeometry = {};
     lookupTextPopup = false;
+    lookupImagePanel = touchLookup ? scope.panel : -1;
     lookupGeometry.views = viewports;
-    manga::format::IndexRecord info;
+    manga::format::IndexRecord info{};
     const bool metadataReady = book.readPageInfo(scope.page, info);
     lookupGeometry.sourceWidth = info.imageWidth;
     lookupGeometry.sourceHeight = info.imageHeight;
     lookupGeometry.textOnly = !available.overview || !metadataReady || !info.imageWidth || !info.imageHeight;
-    if (!lookupGeometry.textOnly) {
+    if (touchLookup) {
+      // Preserve the geometry of the image actually held, including crop and
+      // automatic rotation. Do not replace it with the overview selector layout.
+      lookupGeometry.layout.geometry = imageGeometry;
+      lookupGeometry.layout.orientation = static_cast<int>(imageOrientation);
+      const int delta = (static_cast<int>(imageOrientation) - viewports.orientation + 4) % 4;
+      lookupGeometry.layout.screenWidth = delta % 2 ? viewports.screenHeight : viewports.screenWidth;
+      lookupGeometry.layout.screenHeight = delta % 2 ? viewports.screenWidth : viewports.screenHeight;
+      lookupGeometry.textOnly = !metadataReady || !info.imageWidth || !info.imageHeight;
+      if (scope.panel >= 0) {
+        auto panels = page.panels;
+        for (int index = 0; index <= scope.panel; ++index) {
+          manga::format::PanelView panel;
+          if (panels.next(panel) != manga::format::Error::None) {
+            lookupGeometry.textOnly = true;
+            break;
+          }
+          if (index == scope.panel) lookupGeometry.sourceCrop = panel.box;
+        }
+      }
+      selectedRegion = mangaLookupRegionAtPoint(page, scope.panel, lookupGeometry, touchX, touchY);
+      lookupGeometry.approximateTextPositions = true;
+    } else if (!lookupGeometry.textOnly) {
       if (region < 0) {
         const auto bar = MangaRegionSelectionActivity::toolbar(renderer);
         auto& viewport = lookupGeometry.views.base;
@@ -715,12 +831,23 @@ void MangaReaderActivity::openLookup(const int region) {
       lookupGeometry.layout.screenHeight =
           imageOrientation == renderer.getOrientation() ? viewports.screenHeight : viewports.screenWidth;
     }
-    if (region >= 0) {
+    if (!touchLookup && region >= 0) {
       lookupTextPopup = true;
       lookupGeometry.textOnly = true;
       const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
       lookupGeometry.views.base = {safe.x + 8, safe.y + 8, std::max(1, safe.width - 16),
                                    std::max(1, safe.height / 4 - 16)};
+      if (TouchUi::enabled(mappedInput)) {
+        int top = 0, right = 0, bottom = 0, left = 0;
+        renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+        const int padding = std::max(12, renderer.getScreenWidth() / 24);
+        const int contentTop = TouchUi::statusHeight(renderer) + padding;
+        // The shared selector owns its instruction and close target at the foot.
+        const int contentBottom = renderer.getScreenHeight() - bottom - 52;
+        lookupGeometry.views.base = {left + padding, contentTop,
+                                     std::max(1, renderer.getScreenWidth() - left - right - padding * 2),
+                                     std::max(1, contentBottom - contentTop)};
+      }
     }
     if (lookupGeometry.textOnly) {
       lookupGeometry.lineHeight = std::max(1, renderer.getLineHeight(SETTINGS.getReaderFontId()));
@@ -728,7 +855,12 @@ void MangaReaderActivity::openLookup(const int region) {
           std::max(lookupGeometry.lineHeight, renderer.getTextWidth(SETTINGS.getReaderFontId(), "W"));
       if (!lookupTextPopup) lookupGeometry.views.base.height /= 2;
     }
-    if (region < 0 && !lookupGeometry.textOnly) {
+    if (touchLookup) {
+      if (selectedRegion < 0)
+        status = DictionaryStatus::NotFound;
+      else
+        status = buildMangaLookupTextSource(page, scope.panel, lookupGeometry, source, selectedRegion);
+    } else if (region < 0 && !lookupGeometry.textOnly) {
       const int first = nextMangaLookupRegion(page, scope.panel, lookupGeometry, -1, true);
       status = first < 0 ? DictionaryStatus::NotFound : DictionaryStatus::Found;
       if (first >= 0) {
@@ -742,7 +874,10 @@ void MangaReaderActivity::openLookup(const int region) {
         }
       }
     } else {
-      status = buildMangaLookupTextSource(page, scope.panel, lookupGeometry, source, region);
+      const MangaTextMeasure measure = TouchUi::enabled(mappedInput) && lookupTextPopup
+                                           ? MangaTextMeasure{&renderer, measureMangaGlyph}
+                                           : MangaTextMeasure{};
+      status = buildMangaLookupTextSource(page, scope.panel, lookupGeometry, source, region, measure);
     }
     imageDirty = true;
   }
@@ -768,6 +903,13 @@ void MangaReaderActivity::openLookup(const int region) {
     return;
   }
   EpubLookupPageRequest request;
+  request.deferToTouchSelection = deferToTouchSelection;
+  if (touchLookup) {
+    request.initialTouchX = touchX;
+    request.initialTouchY = touchY;
+    request.autoLookupInitialWord = true;
+    request.approximateSourceTerms = true;
+  }
   if (lookupTextPopup) {
     const auto& box = lookupGeometry.views.base;
     request.externalTextViewport = {int16_t(box.x), int16_t(box.y), int16_t(box.width), int16_t(box.height)};
@@ -778,9 +920,9 @@ void MangaReaderActivity::openLookup(const int region) {
   request.pageIndex = static_cast<uint16_t>(scope.panel + 1);
   char leaf[64];
   if (!statsCachePath.empty()) {
-    if (region >= 0) {
+    if (selectedRegion >= 0) {
       snprintf(leaf, sizeof(leaf), "ocr_%lu_%d_region%d.scan", static_cast<unsigned long>(scope.page), scope.panel,
-               region);
+               selectedRegion);
       request.scanCacheFilePath = statsCachePath + "/" + leaf;
     } else if (mangaLookupCacheFileName(scope.page, scope.panel, leaf, sizeof(leaf))) {
       request.scanCacheFilePath = statsCachePath + "/" + leaf;
@@ -952,6 +1094,8 @@ void MangaReaderActivity::loop() {
     {
       RenderLock lock(*this);
       pendingLookup = false;
+      pendingLookupTouchX = pendingLookupTouchY = -1;
+      deferredBubbleTapX = deferredBubbleTapY = -1;
       overview = ready && position.panel >= 0 && available.overview && !progress.panelsOnly;
       if (overview && !foregroundReadyLocked()) {
         pendingBack = true;
@@ -974,6 +1118,14 @@ void MangaReaderActivity::loop() {
     openReaderSettingsMenu();
     return;
   }
+  if (TouchUi::enabled(mappedInput) && SETTINGS.touchReaderControls) {
+    int x = 0, y = 0;
+    unsigned long held = 0;
+    if (mappedInput.isScreenTouchTapCandidate(x, y, held) && held >= 500) {
+      if (queueShortcut(MenuAction::Lookup, x, y)) mappedInput.suppressCurrentTouchContact();
+      return;
+    }
+  }
   const bool confirmReleased = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
   if (longPressMenuHandled) {
     if (!mappedInput.isPressed(MappedInputManager::Button::Confirm)) longPressMenuHandled = false;
@@ -995,6 +1147,8 @@ void MangaReaderActivity::loop() {
       panelLookup = position.panel >= 0;
       if (panelLookup) {
         pendingInput.takeMenu();
+        pendingLookupTouchX = pendingLookupTouchY = -1;
+      deferredBubbleTapX = deferredBubbleTapY = -1;
         pendingLookup = true;  // Repeated Confirm edges coalesce while prefetch drains.
         foregroundReadyLocked();
       }
@@ -1003,9 +1157,78 @@ void MangaReaderActivity::loop() {
     return;
   }
   ReaderUtils::TouchPageTurn touch{};
+  bool touchBubble = false;
   {
     RenderLock lock(*this);
     touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
+    if (deferredBubbleTapX >= 0) {
+      const bool superseded = touch.tapped || touch.next || touch.prev ||
+                              mappedInput.wasSwipe() != MappedInputManager::SwipeDir::None ||
+                              mappedInput.wasReleased(MappedInputManager::Button::PageBack) ||
+                              mappedInput.wasReleased(MappedInputManager::Button::PageForward) ||
+                              mappedInput.wasReleased(MappedInputManager::Button::Left) ||
+                              mappedInput.wasReleased(MappedInputManager::Button::Right);
+      if (!superseded) {
+        if (!foregroundReadyLocked()) return;
+        touch.tapped = true;
+        touch.x = deferredBubbleTapX;
+        touch.y = deferredBubbleTapY;
+      }
+      deferredBubbleTapX = deferredBubbleTapY = -1;
+    }
+    if (TouchUi::enabled(mappedInput) && SETTINGS.touchReaderControls && mappedInput.hasTouch()) {
+      const auto swipe = mappedInput.wasSwipe();
+      touch.next = swipe == MappedInputManager::SwipeDir::Right;
+      touch.prev = swipe == MappedInputManager::SwipeDir::Left;
+      if (touch.tapped) {
+        if (!foregroundReadyLocked()) {
+          deferredBubbleTapX = touch.x;
+          deferredBubbleTapY = touch.y;
+          return;
+        }
+        if (touchHitsOcrLocked(touch.x, touch.y)) {
+          touchBubble = true;
+          touch.next = touch.prev = false;
+        } else if (!mappedInput.isInVerticalEdgeGestureZone(touch.y)) {
+          // An overview selects actual manifest panels before considering page turns.
+          if (position.panel < 0 && foregroundReadyLocked()) {
+            manga::format::IndexRecord info;
+            if (book.readPageInfo(position.page, info)) {
+              MangaLookupGeometry geometry;
+              geometry.sourceWidth = info.imageWidth;
+              geometry.sourceHeight = info.imageHeight;
+              geometry.views = viewports;
+              geometry.layout.geometry = imageGeometry;
+              geometry.layout.orientation = static_cast<int>(imageOrientation);
+              geometry.layout.screenWidth =
+                  imageOrientation == renderer.getOrientation() ? viewports.screenWidth : viewports.screenHeight;
+              geometry.layout.screenHeight =
+                  imageOrientation == renderer.getOrientation() ? viewports.screenHeight : viewports.screenWidth;
+              auto panels = page.panels;
+              for (int i = 0; panels.remaining; ++i) {
+                manga::format::PanelView panel;
+                PageTextBounds bounds;
+                if (panels.next(panel) != manga::format::Error::None) break;
+                if (available.hasCrop(i) && mapMangaLookupBlock(panel.box, geometry, bounds) &&
+                    pageTextViewportContains(bounds, touch.x, touch.y)) {
+                  position.panel = i;
+                  imageDirty = true;
+                  observeProgressLocked();
+                  requestUpdate();
+                  return;
+                }
+              }
+            }
+          }
+          touch.next = touch.x < renderer.getScreenWidth() / 2;
+          touch.prev = !touch.next;
+        }
+      }
+    }
+  }
+  if (touchBubble) {
+    queueShortcut(MenuAction::Lookup, touch.x, touch.y);
+    return;
   }
   if (touch.prev || mappedInput.wasReleased(MappedInputManager::Button::PageBack) ||
       mappedInput.wasReleased(MappedInputManager::Button::Left))
@@ -1401,6 +1624,10 @@ void MangaReaderActivity::captureViewportsLocked() {
   const auto capture = [&]() {
     int top, right, bottom, left;
     renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+    if (TouchUi::enabled(mappedInput)) {
+      top = std::max(top, TouchUi::statusHeight(renderer));
+      bottom += ReaderUtils::getReaderFooterReservedHeight(false, renderer);
+    }
     return manga::ImageViewport{left, top, renderer.getScreenWidth() - left - right,
                                 renderer.getScreenHeight() - top - bottom};
   };
@@ -1501,6 +1728,34 @@ bool MangaReaderActivity::simulatorNoOcrFeedback() {
 bool MangaReaderActivity::simulatorMenuOptionCenter(const int index, int& x, int& y) {
   RenderLock lock(*this);
   return menu.simulatorOptionCenter(renderer, index, x, y);
+}
+bool MangaReaderActivity::simulatorOcrRegionCenter(const int region, int& x, int& y) {
+  RenderLock lock(*this);
+  if (!ready || imageDirty || !foregroundReadyLocked()) return false;
+  manga::format::IndexRecord info{};
+  if (!book.readPageInfo(position.page, info)) return false;
+  MangaLookupGeometry geometry;
+  geometry.sourceWidth = info.imageWidth;
+  geometry.sourceHeight = info.imageHeight;
+  geometry.views = viewports;
+  geometry.layout.geometry = imageGeometry;
+  geometry.layout.orientation = static_cast<int>(imageOrientation);
+  const int delta = (static_cast<int>(imageOrientation) - viewports.orientation + 4) % 4;
+  geometry.layout.screenWidth = delta % 2 ? viewports.screenHeight : viewports.screenWidth;
+  geometry.layout.screenHeight = delta % 2 ? viewports.screenWidth : viewports.screenHeight;
+  if (position.panel >= 0) {
+    auto panels = page.panels;
+    for (int index = 0; index <= position.panel; ++index) {
+      manga::format::PanelView panel;
+      if (panels.next(panel) != manga::format::Error::None) return false;
+      if (index == position.panel) geometry.sourceCrop = panel.box;
+    }
+  }
+  PageTextBounds bounds;
+  if (!mangaLookupRegionBounds(page, position.panel, geometry, region, bounds)) return false;
+  x = bounds.x + bounds.width / 2;
+  y = bounds.y + bounds.height / 2;
+  return true;
 }
 bool MangaReaderActivity::simulatorMenuActive() {
   RenderLock lock(*this);

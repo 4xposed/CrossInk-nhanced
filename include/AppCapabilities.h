@@ -21,6 +21,13 @@
 
 // Native simulator BoardConfig intentionally exposes only simulated runtime
 // profiles, so keep this firmware-image identity available at the app layer.
+#if CROSSINK_APP_CAP_TOUCH && \
+    ((defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO) || defined(SIMULATOR_DEVICE_X4_PRO))
+#define CROSSINK_APP_DEVICE_X4PRO 1
+#else
+#define CROSSINK_APP_DEVICE_X4PRO 0
+#endif
+
 #if defined(FREEINK_DEVICE_X4CLASSIC) && FREEINK_DEVICE_X4CLASSIC
 #define CROSSINK_APP_DEVICE_X4CLASSIC 1
 #else

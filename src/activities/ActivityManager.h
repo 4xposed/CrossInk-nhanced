@@ -104,6 +104,7 @@ class ActivityManager {
   bool restoreBackdropBehindCurrentOverlay();
 
  public:
+  bool showFrontlightPanel();
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
       : renderer(renderer), mappedInput(mappedInput), renderingMutex(xSemaphoreCreateMutex()) {
     assert(renderingMutex != nullptr && "Failed to create rendering mutex");

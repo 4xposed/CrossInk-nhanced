@@ -161,3 +161,49 @@ TEST(FontCacheManagerTest, PrewarmScanDoesNotAllocateHeapMemory) {
 
   EXPECT_EQ(0U, heapAllocationCount);
 }
+
+TEST(FontCacheManagerTest, PrewarmIncludesSharedJapaneseFallbackWithoutDuplicateStyleSlots) {
+  EpdFontData regular{reinterpret_cast<const void*>(1)};
+  EpdFontData japanese{reinterpret_cast<const void*>(2)};
+  EpdFontFamily family(&regular, nullptr, nullptr, nullptr);
+  family.coverageFallback = &japanese;
+  const std::map<int, EpdFontFamily> fonts{{5, family}, {6, family}};
+  const std::map<int, SdCardFont*> noSdFonts;
+  FontDecompressor decompressor;
+  FontCacheManager manager(fonts, noSdFonts);
+  manager.setFontDecompressor(&decompressor);
+  auto scope = manager.createPrewarmScope();
+  manager.recordText("A猫", 5, EpdFontFamily::REGULAR);
+  manager.recordText("犬猫", 5, EpdFontFamily::BOLD);
+  manager.recordText("鳥", 6, EpdFontFamily::REGULAR);
+  ASSERT_TRUE(scope.endScanAndPrewarm());
+  int japaneseCalls = 0;
+  for (int i = 0; i < decompressor.prewarmCallCount; ++i) {
+    const auto& call = decompressor.prewarmCalls[i];
+    if (call.fontData == &japanese) {
+      ++japaneseCalls;
+      EXPECT_STREQ("犬猫鳥", call.text);
+    } else {
+      EXPECT_STREQ("A", call.text);
+    }
+  }
+  EXPECT_EQ(1, japaneseCalls);
+}
+
+TEST(FontCacheManagerTest, FallbackPreparationRetainsOnDemandRenderingUnderMemoryPressure) {
+  EpdFontData primary{reinterpret_cast<const void*>(1)};
+  EpdFontData japanese{reinterpret_cast<const void*>(2)};
+  EpdFontFamily family(&primary, nullptr, nullptr, nullptr);
+  family.coverageFallback = &japanese;
+  const std::map<int, EpdFontFamily> fonts{{5, family}};
+  const std::map<int, SdCardFont*> noSdFonts;
+  FontDecompressor decompressor;
+  decompressor.missedGlyphs = 1;
+  FontCacheManager manager(fonts, noSdFonts);
+  manager.setFontDecompressor(&decompressor);
+  auto scope = manager.createPrewarmScope();
+  manager.recordText("猫", 5, EpdFontFamily::REGULAR);
+  EXPECT_TRUE(scope.endScanAndPrewarm());
+  ASSERT_EQ(decompressor.prewarmCallCount, 1);
+  EXPECT_EQ(decompressor.prewarmCalls[0].fontData, &japanese);
+}

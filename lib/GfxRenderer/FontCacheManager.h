@@ -67,6 +67,8 @@ class FontCacheManager {
 
   uint8_t resolveScanStyle(int fontId, EpdFontFamily::Style style) const;
   int scanFontIds_[MAX_SCAN_FONTS] = {};
+  // Borrowed compressed fallback faces share the existing bounded scan slots.
+  const EpdFontData* scanFontData_[MAX_SCAN_FONTS] = {};
   uint32_t scanCodepoints_[MAX_SCAN_CODEPOINTS + 1] = {};
   uint16_t scanGroupCounts_[SCAN_GROUP_COUNT] = {};
   uint16_t scanCodepointCount_ = 0;

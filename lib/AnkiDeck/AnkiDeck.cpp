@@ -75,7 +75,7 @@ bool validUtf8(const uint8_t* bytes, size_t size) {
   return true;
 }
 
-uint64_t fnv1a64(const std::string& value) {
+uint64_t fnv1a64(const std::string_view value) {
   uint64_t hash = 14695981039346656037ULL;
   for (const unsigned char byte : value) {
     hash ^= byte;
@@ -214,6 +214,7 @@ bool readV2Side(FsFile& file, uint64_t start, std::array<CardField, kMaxCardFiel
 }  // namespace
 
 bool AnkiDeck::load(const std::string& path) {
+  if (path == kSavedTermsPath && !recoverSavedTerms()) return false;
   FsFile file;
   if (!Storage.openFileForRead(kLogTag, path, file)) {
     LOG_ERR(kLogTag, "Could not open deck: %s", path.c_str());
@@ -403,4 +404,172 @@ bool AnkiDeck::readCardFields(uint32_t index, CardFields& out) {
     return false;
   }
   return true;
+}
+
+namespace {
+void putSavedLe(uint8_t* out, uint64_t value, size_t bytes) {
+  for (size_t i = 0; i < bytes; ++i) out[i] = static_cast<uint8_t>(value >> (i * 8));
+}
+bool copySavedRange(FsFile& source, FsFile& target, uint64_t offset, uint64_t length) {
+  // Bounded streaming keeps growing decks out of the C3 heap and task stack.
+  std::array<uint8_t, 128> bytes{};
+  if (!source.seek64(offset)) return false;
+  while (length) {
+    const size_t count = static_cast<size_t>(std::min<uint64_t>(length, bytes.size()));
+    if (!readExactly(source, bytes.data(), count) || target.write(bytes.data(), count) != count) return false;
+    length -= count;
+  }
+  return true;
+}
+}  // namespace
+
+bool AnkiDeck::recoverSavedTerms() {
+  const std::string backup = std::string(kSavedTermsPath) + ".bak";
+  if (Storage.exists(kSavedTermsPath)) return true;
+  if (Storage.exists(backup.c_str())) {
+    if (Storage.rename(backup.c_str(), kSavedTermsPath)) return true;
+    LOG_ERR(kLogTag, "Could not recover saved terms deck");
+    return false;
+  }
+  return true;
+}
+
+AnkiDeck::AddTermResult AnkiDeck::addSavedTerm(const std::string_view term, const std::string_view answer,
+                                               const std::string_view title) {
+  const auto valid = [](std::string_view text, size_t maximum) {
+    return !text.empty() && text.size() <= maximum && text.find('\0') == std::string_view::npos &&
+           validUtf8(reinterpret_cast<const uint8_t*>(text.data()), text.size());
+  };
+  if (!valid(term, kMaxCardFieldTextBytes) || !valid(answer, kMaxCardFieldTextBytes) || !valid(title, 128)) {
+    LOG_ERR(kLogTag, "Saved term fields are invalid or too long");
+    return AddTermResult::Error;
+  }
+  if (!recoverSavedTerms() || !Storage.ensureDirectoryExists("/decks")) {
+    LOG_ERR(kLogTag, "Could not prepare saved terms directory");
+    return AddTermResult::Error;
+  }
+  AnkiDeck previous;
+  const bool exists = Storage.exists(kSavedTermsPath);
+  if (exists && (!previous.load(kSavedTermsPath) || previous.deckId_ != kSavedTermsId || previous.version_ != 1 ||
+                 !previous.validateFullIndex() ||
+                 previous.fileSize_ - previous.textOffset_ >
+                     static_cast<uint64_t>(previous.cardCount_) * kMaxCardFieldTextBytes * 2)) {
+    LOG_ERR(kLogTag, "Refusing to replace an invalid or unrelated saved terms deck");
+    return AddTermResult::Error;
+  }
+  if (!exists) {
+    // A deleted deck must not donate its old grades to a newly created deck.
+    char hash[17]{};
+    std::snprintf(hash, sizeof(hash), "%016llx", static_cast<unsigned long long>(fnv1a64(kSavedTermsPath)));
+    const std::string statePath = std::string("/.crosspoint/anki_") + hash + "/review.bin";
+    for (const char* suffix : {"", ".bak", ".tmp"}) {
+      const std::string path = statePath + suffix;
+      if (Storage.exists(path.c_str()) && !Storage.remove(path.c_str())) {
+        LOG_ERR(kLogTag, "Could not clear orphan saved terms review state");
+        return AddTermResult::Error;
+      }
+    }
+  }
+  const uint32_t count = exists ? previous.cardCount_ : 0;
+  uint64_t id = fnv1a64(term);
+  if (!id) id = 1;
+  FsFile source;
+  if (exists) {
+    if (!Storage.openFileForRead(kLogTag, kSavedTermsPath, source)) {
+      LOG_ERR(kLogTag, "Could not open saved terms source");
+      return AddTermResult::Error;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+      CardMetadata record;
+      if (!readMetadataFromFile(source, previous.indexOffset_, i, record) ||
+          !validUtf8FileRange(source, previous.textOffset_ + record.promptOffset, record.promptLength) ||
+          !validUtf8FileRange(source, previous.textOffset_ + record.answerOffset, record.answerLength)) {
+        source.close();
+        LOG_ERR(kLogTag, "Could not validate saved term fields");
+        return AddTermResult::Error;
+      }
+      if (record.sourceCardId == id) {
+        // Verify text as well as its hash, so collisions cannot discard a term.
+        bool equal = record.promptLength == term.size() && source.seek64(previous.textOffset_ + record.promptOffset);
+        for (size_t n = 0; equal && n < term.size(); ++n) {
+          char byte;
+          equal = readExactly(source, &byte, 1) && byte == term[n];
+        }
+        source.close();
+        if (!equal) LOG_ERR(kLogTag, "Saved term identity collision or read failure");
+        return equal ? AddTermResult::AlreadyAdded : AddTermResult::Error;
+      }
+    }
+  }
+  if (count >= kMaxCards) {
+    source.close();
+    LOG_ERR(kLogTag, "Saved terms deck is full");
+    return AddTermResult::Error;
+  }
+  const std::string temporary = std::string(kSavedTermsPath) + ".tmp";
+  const std::string backup = std::string(kSavedTermsPath) + ".bak";
+  FsFile target;
+  if (!Storage.openFileForWrite(kLogTag, temporary, target)) {
+    source.close();
+    LOG_ERR(kLogTag, "Could not open saved terms temporary file");
+    return AddTermResult::Error;
+  }
+  const std::string_view deckTitle = exists ? std::string_view(previous.title()) : title;
+  const uint32_t indexOffset = kHeaderSize + deckTitle.size();
+  const uint32_t textOffset = indexOffset + (count + 1) * kIndexSize;
+  const uint32_t oldTextBytes = exists ? static_cast<uint32_t>(previous.fileSize_ - previous.textOffset_) : 0;
+  std::array<uint8_t, kHeaderSize> header{};
+  std::memcpy(header.data(), "CKDK", 4);
+  putSavedLe(header.data() + 4, 1, 2);
+  putSavedLe(header.data() + 6, kHeaderSize, 2);
+  putSavedLe(header.data() + 8, kSavedTermsId, 8);
+  putSavedLe(header.data() + 16, count + 1, 4);
+  putSavedLe(header.data() + 20, deckTitle.size(), 2);
+  putSavedLe(header.data() + 24, indexOffset, 4);
+  putSavedLe(header.data() + 28, textOffset, 4);
+  bool ok = target.write(header.data(), header.size()) == header.size() &&
+            target.write(deckTitle.data(), deckTitle.size()) == deckTitle.size();
+  if (ok && exists) ok = copySavedRange(source, target, previous.indexOffset_, count * kIndexSize);
+  std::array<uint8_t, kIndexSize> record{};
+  putSavedLe(record.data(), id, 8);
+  putSavedLe(record.data() + 8, oldTextBytes, 4);
+  putSavedLe(record.data() + 12, term.size(), 2);
+  putSavedLe(record.data() + 14, oldTextBytes + term.size(), 4);
+  putSavedLe(record.data() + 18, answer.size(), 2);
+  putSavedLe(record.data() + 24, 1, 2);
+  if (ok) ok = target.write(record.data(), record.size()) == record.size();
+  if (ok && exists) ok = copySavedRange(source, target, previous.textOffset_, oldTextBytes);
+  if (ok)
+    ok = target.write(term.data(), term.size()) == term.size() &&
+         target.write(answer.data(), answer.size()) == answer.size();
+  const bool sourceClosed = !source.isOpen() || source.close();
+  const bool synced = target.sync();
+  const bool closed = target.close();
+  if (!ok || !sourceClosed || !synced || !closed) {
+    LOG_ERR(kLogTag, "Could not write saved terms deck");
+    Storage.remove(temporary.c_str());
+    return AddTermResult::Error;
+  }
+  AnkiDeck verified;
+  if (!verified.load(temporary) || !verified.validateFullIndex()) {
+    LOG_ERR(kLogTag, "Saved terms temporary deck did not validate");
+    Storage.remove(temporary.c_str());
+    return AddTermResult::Error;
+  }
+  if ((Storage.exists(backup.c_str()) && !Storage.remove(backup.c_str())) ||
+      (exists && !Storage.rename(kSavedTermsPath, backup.c_str()))) {
+    LOG_ERR(kLogTag, "Could not preserve saved terms backup");
+    Storage.remove(temporary.c_str());
+    return AddTermResult::Error;
+  }
+  if (!Storage.rename(temporary.c_str(), kSavedTermsPath)) {
+    LOG_ERR(kLogTag, "Could not publish saved terms deck");
+    recoverSavedTerms();
+    return AddTermResult::Error;
+  }
+  // Promotion is complete; the backup is only an interrupted-transaction
+  // recovery source, not a second deck that could resurrect a later deletion.
+  if (Storage.exists(backup.c_str()) && !Storage.remove(backup.c_str()))
+    LOG_ERR(kLogTag, "Could not remove committed saved terms backup");
+  return AddTermResult::Added;
 }

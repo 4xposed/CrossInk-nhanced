@@ -48,6 +48,8 @@ struct EpubLookupPageRequest {
   int reservedBottomHeight = 0;
   int initialTouchX = -1;
   int initialTouchY = -1;
+  bool deferToTouchSelection = false;
+  bool approximateSourceTerms = false;
   bool autoLookupInitialWord = false;
   bool framebufferContainsPage = false;
   bool recordLookupHistory = true;

@@ -5,8 +5,8 @@
 #include <HalGPIO.h>
 #include <I18n.h>
 #include <Logging.h>
-#include <WiFi.h>
 #include <Memory.h>
+#include <WiFi.h>
 
 #include <algorithm>
 #include <cctype>
@@ -36,6 +36,7 @@
 #include "SettingsList.h"
 #include "SilentRestart.h"
 #include "StatusBarSettingsActivity.h"
+#include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/GlobalReadingStats.h"
 #include "activities/util/ConfirmationActivity.h"
@@ -44,10 +45,13 @@
 #include "activities/util/OptionSelectionActivity.h"
 #include "components/CompactHeader.h"
 #include "components/TouchHeaderBackButton.h"
+#include "components/TouchUi.h"
 #include "components/UITheme.h"
 #include "components/UIThemeTokens.h"
 #include "components/UiAppHelpers.h"
 #include "components/icons/frontlightHeaderIcons.h"
+#include "components/icons/listIcons.h"
+#include "components/icons/tablerIcons.h"
 #include "fontIds.h"
 #include "util/DictionaryRegistry.h"
 #include "util/FrontlightSchedule.h"
@@ -63,7 +67,20 @@ constexpr int16_t TOUCH_TAB_BAR_HEIGHT = 50;
 const StrId SettingsActivity::categoryNames[categoryCount] = {StrId::STR_CAT_DISPLAY, StrId::STR_CAT_READER,
                                                               StrId::STR_CAT_CONTROLS, StrId::STR_CAT_SYSTEM};
 
+const StrId SettingsActivity::touchCategoryNames[touchCategoryCount] = {
+    StrId::STR_SETTINGS_APPEARANCE, StrId::STR_SETTINGS_READING,       StrId::STR_CAT_CONTROLS,
+    StrId::STR_SETTINGS_NETWORK,    StrId::STR_SETTINGS_LANGUAGE_TIME, StrId::STR_SETTINGS_POWER,
+    StrId::STR_SYSTEM_DEVICE};
+
 namespace {
+Rect touchSettingsHeader(const GfxRenderer& renderer) {
+  int top, right, bottom, left;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  const int width = renderer.getScreenWidth();
+  const int headerTop = TouchUi::statusHeight(renderer) + width * 5 / 100;
+  const int headerHeight = width * 21 / 100;
+  return Rect{left + 22, headerTop, width - left - right - 44, headerHeight};
+}
 constexpr int systemVersionFooterSideMargin = 20;
 constexpr int systemVersionFooterBottomInset = 15;
 constexpr size_t controlsParentBaseCount = 4;
@@ -370,7 +387,98 @@ void SettingsActivity::rebuildSettingsLists() {
   setCurrentSettingsForCategory();
 }
 
+bool SettingsActivity::usesTouchCategories() const { return !isFileBrowserView() && TouchUi::enabled(mappedInput); }
+
+const SettingInfo& SettingsActivity::settingAt(const int index) const {
+  if (usesTouchCategories() && activeSubmenu == SettingAction::None) return *touchSettings[index];
+  return (*currentSettings)[index];
+}
+
+void SettingsActivity::buildTouchCategory() {
+  settingsCount = 0;
+  if (touchCategory < 0) {
+    settingsCount = touchCategoryCount;
+    return;
+  }
+  const auto append = [this](const SettingInfo& setting) {
+    if (settingsCount < static_cast<int>(std::size(touchSettings)))
+      touchSettings[settingsCount++] = &setting;
+    else
+      LOG_ERR("SET", "Touch settings category exceeds reference capacity");
+  };
+  const auto network = [](const SettingInfo& setting) {
+    return setting.action == SettingAction::Network || setting.action == SettingAction::KOReaderSync ||
+           setting.action == SettingAction::OPDSBrowser;
+  };
+  const auto language = [](const SettingInfo& setting) {
+    return setting.action == SettingAction::Language || setting.action == SettingAction::KeyboardLayouts ||
+           setting.action == SettingAction::ClockSync || setting.nameId == StrId::STR_CLOCK_FORMAT ||
+           setting.nameId == StrId::STR_CLOCK_UTC_OFFSET || setting.nameId == StrId::STR_DATE_FORMAT ||
+           setting.nameId == StrId::STR_DATE_SEPARATOR;
+  };
+  if (touchCategory <= 2) {
+    const auto& source = touchCategory == 0 ? displaySettings : touchCategory == 1 ? readerSettings : controlsSettings;
+    for (const auto& setting : source) append(setting);
+  } else if (touchCategory == 3) {
+    for (const auto& setting : systemSettings)
+      if (network(setting)) append(setting);
+  } else if (touchCategory == 4) {
+    for (const auto& setting : systemDeviceSettings)
+      if (language(setting)) append(setting);
+  } else if (touchCategory == 5) {
+    for (const auto& setting : systemDeviceSettings)
+      if (setting.nameId == StrId::STR_TIME_TO_SLEEP) append(setting);
+    for (const auto& setting : controlsSettings) {
+      if (setting.action == SettingAction::ControlsPowerButton || setting.action == SettingAction::ControlsHomeButton)
+        append(setting);
+    }
+  } else {
+    for (const auto& setting : systemDeviceSettings) {
+      if (!language(setting) && setting.nameId != StrId::STR_TIME_TO_SLEEP) append(setting);
+    }
+    for (const auto& setting : systemSettings) {
+      if (!network(setting) && setting.action != SettingAction::SystemDevice) append(setting);
+    }
+  }
+}
+
+void SettingsActivity::openTouchCategory(const int index) {
+  if (index < 0 || index >= touchCategoryCount) return;
+  touchCategory = index;
+  showSettingSelection = false;
+  selectedCategoryIndex = index <= 2 ? index : 3;
+  activeSubmenu = parentSubmenu = SettingAction::None;
+  buildTouchCategory();
+  selectedSettingIndex = 1;
+  topIndex = 0;
+  uiReady = false;
+  requestUpdate();
+}
+
+void SettingsActivity::backTouchCategory() {
+  if (touchCategory < 0) {
+    closeRootSettings();
+  } else if (activeSubmenu != SettingAction::None) {
+    closeSubmenu();
+    topIndex = 0;
+    uiReady = false;
+    requestUpdate();
+  } else {
+    const int previousCategory = touchCategory;
+    touchCategory = -1;
+    buildTouchCategory();
+    selectedSettingIndex = previousCategory + 1;
+    topIndex = followListSelection(previousCategory, 0, visibleRows, settingsCount);
+    uiReady = false;
+    requestUpdate();
+  }
+}
+
 void SettingsActivity::setCurrentSettingsForCategory() {
+  if (usesTouchCategories() && activeSubmenu == SettingAction::None) {
+    buildTouchCategory();
+    return;
+  }
   if (isFileBrowserView()) {
     currentSettings = &fileBrowserSettings;
     settingsCount = static_cast<int>(currentSettings->size());
@@ -497,6 +605,12 @@ StrId SettingsActivity::activeSubmenuTitleId() const {
 }
 
 void SettingsActivity::openSubmenu(SettingAction action) {
+  if (usesTouchCategories()) {
+    if (action == SettingAction::ControlsPowerButton || action == SettingAction::ControlsHomeButton)
+      selectedCategoryIndex = 2;
+    topIndex = 0;
+    uiReady = false;
+  }
   parentSubmenu = activeSubmenu;
   activeSubmenu = action;
   if (action == SettingAction::ReaderFontOptions) rebuildSettingsLists();
@@ -504,7 +618,7 @@ void SettingsActivity::openSubmenu(SettingAction action) {
   selectedSettingIndex = 1;
   showSettingSelection = true;
   while (selectedSettingIndex > 0 && selectedSettingIndex <= settingsCount &&
-         (*currentSettings)[selectedSettingIndex - 1].type == SettingType::SECTION_HEADER) {
+         settingAt(selectedSettingIndex - 1).type == SettingType::SECTION_HEADER) {
     selectedSettingIndex = ButtonNavigator::nextIndex(selectedSettingIndex, settingsCount + 1);
   }
 }
@@ -723,6 +837,10 @@ void SettingsActivity::onEnter() {
   }
 
   rebuildSettingsLists();
+  if (usesTouchCategories()) {
+    selectedSettingIndex = 1;
+    showSettingSelection = false;
+  }
 
   uiReady = false;
   visibleRows = 1;
@@ -752,9 +870,14 @@ void SettingsActivity::onRowEvent(const fui::ActionEvent& event, void* user) {
   auto* self = static_cast<SettingsActivity*>(user);
   if (self->optionPopup.isActive()) return;
   if (event.value < 0 || event.value >= static_cast<int16_t>(self->settingsCount)) return;
-  if ((*self->currentSettings)[event.value].type == SettingType::SECTION_HEADER) return;
+  if (self->usesTouchCategories() && self->touchCategory < 0) {
+    self->app.clearTapFlash();
+    self->openTouchCategory(event.value);
+    return;
+  }
+  if (self->settingAt(event.value).type == SettingType::SECTION_HEADER) return;
   self->selectedSettingIndex = event.value + 1;
-  if (self->isFileBrowserView()) self->showSettingSelection = false;
+  if (self->isFileBrowserView() || self->usesTouchCategories()) self->showSettingSelection = false;
   // Most rows repaint a different surface (popup, sub-activity, new value);
   // a lingering tap flash would gray an unrelated element.
   self->app.clearTapFlash();
@@ -809,8 +932,72 @@ void SettingsActivity::applyUiSettingChange(uint8_t CrossPointSettings::* valueP
   }
 }
 
+void SettingsActivity::loopTouchCategories() {
+  const Rect header = touchSettingsHeader(renderer);
+  int x = 0, y = 0;
+  if (mappedInput.wasScreenTapped(x, y) && y >= header.y && y < header.y + header.height) {
+    if (x >= header.x && x < header.x + 56) {
+      backTouchCategory();
+      return;
+    }
+    if (x >= header.x + header.width - 56 && x < header.x + header.width) {
+      activityManager.showFrontlightPanel();
+      return;
+    }
+  }
+  if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    backTouchCategory();
+    return;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    if (touchCategory < 0)
+      openTouchCategory(selectedSettingIndex - 1);
+    else
+      toggleCurrentSetting();
+    requestUpdate();
+    return;
+  }
+  if (uiReady) {
+    const fui::InputSnapshot snap = touchSnapshotFrom(mappedInput);
+    if (snap.touchPressed || snap.touchReleased) {
+      const auto event = app.route(snap);
+      if (app.invalidated()) requestUpdate();
+      if (event) return;
+    }
+  }
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+    const int next = scrollListBy(topIndex, swipe == MappedInputManager::SwipeDir::Up ? visibleRows : -visibleRows,
+                                  visibleRows, settingsCount);
+    if (next != topIndex) {
+      topIndex = next;
+      requestUpdate();
+    }
+    return;
+  }
+  const auto move = [this](const bool forward) {
+    if (settingsCount == 0) return;
+    int index = selectedSettingIndex - 1;
+    for (int attempts = 0; attempts < settingsCount; ++attempts) {
+      index = forward ? ButtonNavigator::nextIndex(index, settingsCount)
+                      : ButtonNavigator::previousIndex(index, settingsCount);
+      if (touchCategory < 0 || settingAt(index).type != SettingType::SECTION_HEADER) break;
+    }
+    selectedSettingIndex = index + 1;
+    showSettingSelection = true;
+    topIndex = followListSelection(index, topIndex, visibleRows, settingsCount);
+    requestUpdate();
+  };
+  buttonNavigator.onNextRelease([&move] { move(true); });
+  buttonNavigator.onPreviousRelease([&move] { move(false); });
+}
+
 void SettingsActivity::loop() {
   if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+  if (usesTouchCategories()) {
+    loopTouchCategories();
+    return;
+  }
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   if (TouchHeaderBackButton::wasTapped(mappedInput, settingsHeaderRect(metrics, renderer.getScreenWidth()))) {
@@ -902,7 +1089,7 @@ void SettingsActivity::loop() {
 
   // Buttons walk the tab band (index 0) plus the rows (1..settingsCount).
   const auto moveSelection = [this](int index, const bool forward) {
-    while (index > 0 && index <= settingsCount && (*currentSettings)[index - 1].type == SettingType::SECTION_HEADER) {
+    while (index > 0 && index <= settingsCount && settingAt(index - 1).type == SettingType::SECTION_HEADER) {
       index = forward ? ButtonNavigator::nextIndex(index, settingsCount + 1)
                       : ButtonNavigator::previousIndex(index, settingsCount + 1);
     }
@@ -947,7 +1134,7 @@ void SettingsActivity::loop() {
     setCurrentSettingsForCategory();
     // Advance past any leading section headers
     while (selectedSettingIndex > 0 && selectedSettingIndex <= settingsCount &&
-           (*currentSettings)[selectedSettingIndex - 1].type == SettingType::SECTION_HEADER) {
+           settingAt(selectedSettingIndex - 1).type == SettingType::SECTION_HEADER) {
       const int nextIndex = ButtonNavigator::nextIndex(selectedSettingIndex, settingsCount + 1);
       if (nextIndex <= selectedSettingIndex) {
         selectedSettingIndex = settingsCount;
@@ -964,7 +1151,7 @@ void SettingsActivity::toggleCurrentSetting() {
     return;
   }
 
-  const auto& setting = (*currentSettings)[selectedSetting];
+  const auto& setting = settingAt(selectedSetting);
   const bool sleepScreenChanged = setting.valuePtr == &CrossPointSettings::sleepScreen;
   const bool quickResumeTimeoutChanged = setting.valuePtr == &CrossPointSettings::quickResumeSleepScreen;
 
@@ -1294,7 +1481,84 @@ void SettingsActivity::settingsScreen(UiApp::ScreenType& screen, void* user) {
   static_cast<SettingsActivity*>(user)->buildSettingsScreen(screen);
 }
 
+void SettingsActivity::buildTouchSettingsScreen(UiApp::ScreenType& screen) {
+  // Rebind after theme refresh so captions retain their smaller, distinct font.
+  uiTarget.setFont(fui::GfxRendererTarget::FONT_BODY, TouchUi::bodyFont());
+  uiTarget.setFont(fui::GfxRendererTarget::FONT_SMALL, TouchUi::smallFont());
+  const Rect header = touchSettingsHeader(renderer);
+  const fui::Rect safe = screen.frame().safeRect();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int versionHeight = touchCategory == 6 ? renderer.getLineHeight(SMALL_FONT_ID) * 2 + 24 : 0;
+  screen.setContentMargin(fui::Insets{static_cast<int16_t>(header.y + header.height - safe.y), 22,
+                                      static_cast<int16_t>(metrics.buttonHintsHeight + versionHeight), 22});
+  const int subtitleHeight = touchCategory < 0 ? screen.target().lineHeight(screen.theme().smallText.font) + 2 : 0;
+  const int minRowHeight = std::max(56, screen.target().lineHeight(screen.theme().bodyText.font) + subtitleHeight + 24);
+  const int rowHeight =
+      touchCategory < 0 ? std::max(minRowHeight, screen.body().height / touchCategoryCount) : minRowHeight;
+  visibleRows = std::max(1, screen.body().height / rowHeight);
+  topIndex = scrollListBy(topIndex, 0, visibleRows, settingsCount);
+  const int last = std::min(settingsCount, topIndex + visibleRows);
+  for (int index = topIndex; index < last; ++index) {
+    fui::SettingRowProps row;
+    row.labelText = screen.theme().bodyText;
+    row.labelText.font = fui::GfxRendererTarget::FONT_BODY;
+    row.valueText = screen.theme().smallText;
+    row.valueText.font = fui::GfxRendererTarget::FONT_SMALL;
+    row.action = ACTION_ROW;
+    row.valueId = static_cast<int16_t>(index);
+    row.inputMask = fui::InputTouch;
+    row.state = showSettingSelection && selectedSettingIndex == index + 1 ? fui::StateSelected : fui::StateNormal;
+    const fui::Rect bounds = screen.takeTop(static_cast<int16_t>(rowHeight));
+    if (touchCategory < 0) {
+      static constexpr StrId descriptions[] = {StrId::STR_SETTINGS_APPEARANCE_DESC,    StrId::STR_SETTINGS_READING_DESC,
+                                               StrId::STR_SETTINGS_CONTROLS_DESC,      StrId::STR_SETTINGS_NETWORK_DESC,
+                                               StrId::STR_SETTINGS_LANGUAGE_TIME_DESC, StrId::STR_SETTINGS_POWER_DESC,
+                                               StrId::STR_SETTINGS_DEVICE_DESC};
+      static const freeink::Icon* const icons[] = {&icon_image_32, &icon_book_open_32,      &icon_sliders_horizontal_32,
+                                                   &icon_wifi_32,  &icon_case_sensitive_32, &icon_tabler_moon_filled_24,
+                                                   &icon_cog_32};
+      row.icon = fui::bitmapFromIcon(*icons[index]);
+      row.iconSize = 32;
+      row.sidePadding = 0;
+      row.textGap = 20;
+      row.titleSubtitleGap = 6;
+      row.label = I18N.get(touchCategoryNames[index]);
+      row.subtitle = I18N.get(descriptions[index]);
+      row.subtitleText = screen.theme().smallText;
+      row.subtitleText.font = fui::GfxRendererTarget::FONT_SMALL;
+      row.drawChevron = true;
+      fui::settingRow(screen.frame(), bounds, row);
+    } else {
+      const SettingInfo& setting = settingAt(index);
+      row.label = I18N.get(setting.nameId);
+      row.enabled = setting.type != SettingType::SECTION_HEADER;
+      row.drawChevron = settingShowsNavigationCaret(setting) || setting.type == SettingType::ACTION;
+      if (setting.type == SettingType::TOGGLE && setting.valuePtr != nullptr) {
+        fui::ToggleRowProps toggle;
+        toggle.row = row;
+        toggle.checked = SETTINGS.*(setting.valuePtr) != 0;
+        toggle.toggleAction = ACTION_ROW;
+        toggle.toggleValue = static_cast<int16_t>(index);
+        fui::toggleRow(screen.frame(), bounds, toggle);
+      } else {
+        const std::string value = settingShowsNavigationCaret(setting) ? std::string{} : settingValueText(setting);
+        row.value = value.empty() ? nullptr : value.c_str();
+        fui::settingRow(screen.frame(), bounds, row);
+      }
+    }
+    screen.target().line(fui::Point{static_cast<int16_t>(bounds.x + (touchCategory < 0 ? 52 : 0)),
+                                    static_cast<int16_t>(bounds.bottom() - 1)},
+                         fui::Point{static_cast<int16_t>(bounds.right() - (touchCategory < 0 ? 28 : 0)),
+                                    static_cast<int16_t>(bounds.bottom() - 1)},
+                         1, fui::Paint::solid(fui::Color::Black));
+  }
+}
+
 void SettingsActivity::buildSettingsScreen(UiApp::ScreenType& screen) {
+  if (usesTouchCategories()) {
+    buildTouchSettingsScreen(screen);
+    return;
+  }
   const auto& metrics = UITheme::getInstance().getMetrics();
 #if CROSSINK_APP_CAP_TOUCH
   const bool landscapeTouch = useLandscapeTouchLayout(renderer);
@@ -1504,6 +1768,41 @@ void SettingsActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const char* title = isFileBrowserView() ? tr(STR_FILE_BROWSER_SETTINGS) : tr(STR_SETTINGS_TITLE);
 
+  if (usesTouchCategories()) {
+    TouchUi::drawStatus(renderer);
+    const Rect header = touchSettingsHeader(renderer);
+    const int cy = header.y + header.height / 2;
+    renderer.drawLine(header.x + 24, cy - 10, header.x + 14, cy, 2, true);
+    renderer.drawLine(header.x + 14, cy, header.x + 24, cy + 10, 2, true);
+    const StrId submenuTitle = activeSubmenuTitleId();
+    const char* touchTitle = touchCategory < 0                     ? tr(STR_SETTINGS_TITLE)
+                             : submenuTitle != StrId::STR_NONE_OPT ? I18N.get(submenuTitle)
+                                                                   : I18N.get(touchCategoryNames[touchCategory]);
+    renderer.beginTextClip(header.x + 56, header.y, header.width - 112, header.height);
+    renderer.drawText(TouchUi::titleFont(), header.x + 56,
+                      header.y + (header.height - renderer.getLineHeight(TouchUi::titleFont())) / 2, touchTitle);
+    renderer.endTextClip();
+    const int sunX = header.x + header.width - 28;
+    renderer.drawRoundedRect(sunX - 7, cy - 7, 14, 14, 2, 7, true);
+    renderer.drawLine(sunX, cy - 17, sunX, cy - 12, 2, true);
+    renderer.drawLine(sunX, cy + 12, sunX, cy + 17, 2, true);
+    renderer.drawLine(sunX - 17, cy, sunX - 12, cy, 2, true);
+    renderer.drawLine(sunX + 12, cy, sunX + 17, cy, 2, true);
+    renderer.drawLine(sunX - 12, cy - 12, sunX - 9, cy - 9, 2, true);
+    renderer.drawLine(sunX + 9, cy + 9, sunX + 12, cy + 12, 2, true);
+    renderer.drawLine(sunX + 9, cy - 9, sunX + 12, cy - 12, 2, true);
+    renderer.drawLine(sunX - 12, cy + 12, sunX - 9, cy + 9, 2, true);
+    renderer.drawLine(header.x, header.y + header.height - 1, header.x + header.width,
+                      header.y + header.height - 1, 1, true);
+    uiReady = false;
+    app.render();
+    uiReady = true;
+    if (touchCategory == 6) drawSystemVersionFooter(renderer, pageWidth, renderer.getScreenHeight(), metrics);
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    renderer.displayBuffer();
+    return;
+  }
   if (mappedInput.hasTouchHardware()) {
     TouchHeaderBackButton::drawCompact(renderer, title, false, !isFileBrowserView());
   } else {
@@ -1523,23 +1822,19 @@ void SettingsActivity::render(RenderLock&&) {
       (!isFileBrowserView() && selectedSettingIndex == 0)
           ? I18N.get(categoryNames[(selectedCategoryIndex + 1) % categoryCount])
           : (selectedSettingIndex > 0 &&
-                     (currentSettingUsesOptionMenu((*currentSettings)[selectedSettingIndex - 1]) ||
-                      (*currentSettings)[selectedSettingIndex - 1].type == SettingType::SUBMENU ||
-                      (*currentSettings)[selectedSettingIndex - 1].type == SettingType::ACTION ||
-                      (*currentSettings)[selectedSettingIndex - 1].nameId == StrId::STR_FONT_FAMILY ||
-                      (*currentSettings)[selectedSettingIndex - 1].nameId == StrId::STR_TIME_TO_SLEEP ||
-                      (*currentSettings)[selectedSettingIndex - 1].type == SettingType::STRING ||
-                      (*currentSettings)[selectedSettingIndex - 1].valuePtr == &CrossPointSettings::lineHeightPercent ||
-                      (*currentSettings)[selectedSettingIndex - 1].valuePtr ==
+                     (currentSettingUsesOptionMenu(settingAt(selectedSettingIndex - 1)) ||
+                      settingAt(selectedSettingIndex - 1).type == SettingType::SUBMENU ||
+                      settingAt(selectedSettingIndex - 1).type == SettingType::ACTION ||
+                      settingAt(selectedSettingIndex - 1).nameId == StrId::STR_FONT_FAMILY ||
+                      settingAt(selectedSettingIndex - 1).nameId == StrId::STR_TIME_TO_SLEEP ||
+                      settingAt(selectedSettingIndex - 1).type == SettingType::STRING ||
+                      settingAt(selectedSettingIndex - 1).valuePtr == &CrossPointSettings::lineHeightPercent ||
+                      settingAt(selectedSettingIndex - 1).valuePtr ==
                           &CrossPointSettings::readingIdleTimeThresholdUnits ||
-                      (*currentSettings)[selectedSettingIndex - 1].valuePtr ==
-                          &CrossPointSettings::screenMarginVertical ||
-                      (*currentSettings)[selectedSettingIndex - 1].valuePtr ==
-                          &CrossPointSettings::screenMarginHorizontal ||
-                      (*currentSettings)[selectedSettingIndex - 1].value16Ptr ==
-                          &CrossPointSettings::frontlightScheduleStart ||
-                      (*currentSettings)[selectedSettingIndex - 1].value16Ptr ==
-                          &CrossPointSettings::frontlightScheduleEnd)
+                      settingAt(selectedSettingIndex - 1).valuePtr == &CrossPointSettings::screenMarginVertical ||
+                      settingAt(selectedSettingIndex - 1).valuePtr == &CrossPointSettings::screenMarginHorizontal ||
+                      settingAt(selectedSettingIndex - 1).value16Ptr == &CrossPointSettings::frontlightScheduleStart ||
+                      settingAt(selectedSettingIndex - 1).value16Ptr == &CrossPointSettings::frontlightScheduleEnd)
                  ? tr(STR_SELECT)
                  : tr(STR_TOGGLE));
 

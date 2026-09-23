@@ -22,7 +22,6 @@
 #include <utility>
 #include <vector>
 
-#include "test/UniqueTempDirectory.h"
 #include "Arduino.h"
 #include "Deinflector.h"
 #include "DictIndex.h"
@@ -47,6 +46,7 @@
 #include "WordLookup.h"
 #include "activities/RenderLock.h"
 #include "freertos/task.h"
+#include "test/UniqueTempDirectory.h"
 
 namespace dictionary_definition_model_test {
 using ReadyPublishHook = void (*)(void*);
@@ -1197,6 +1197,27 @@ TEST_F(DictionaryRegistryTest, ReadOnlyLookupDiscoveryDoesNotPersistAnAutomaticS
   ASSERT_TRUE(registry.discover(/*autoSelectDefault=*/false));
   EXPECT_TRUE(registry.lookupAvailable("en-US", "/book-cache"));
   EXPECT_FALSE(std::filesystem::exists(resolve("/.crosspoint/dictionary.bin")));
+}
+
+TEST_F(DictionaryRegistryTest, TransientJapaneseLookupSkipsStarDictDirectoryDiscovery) {
+  writeVocab({{"猫", "cat", 200, DictIndexRecord::POS_OTHER}});
+  writeRegistryDictionary("/dictionaries/jp/fallback/dict-data");
+  hal_storage_test::directoryAllocationFailurePath = "/dictionaries";
+  std::string starDictPath = "stale";
+  EXPECT_TRUE(resolveTransientDictionaryLookupRoute("ja-JP", "/book-cache", starDictPath));
+  EXPECT_TRUE(starDictPath.empty());
+  EXPECT_EQ(hal_storage_test::matchingDirectoryOpenCount, 0u);
+}
+
+TEST_F(DictionaryRegistryTest, TransientMalformedJapaneseLookupStillDiscoversStarDictFallback) {
+  writeBytes(resolve("/dictionaries/jp/vocab.idx"), {1});
+  writeBytes(resolve("/dictionaries/jp/vocab.dat"), {});
+  writeRegistryDictionary("/dictionaries/jp/fallback/dict-data");
+  hal_storage_test::directoryAllocationFailurePath = "/dictionaries";
+  std::string starDictPath;
+  EXPECT_TRUE(resolveTransientDictionaryLookupRoute("ja", "/book-cache", starDictPath));
+  EXPECT_EQ(starDictPath, "/dictionaries/jp/fallback/dict-data");
+  EXPECT_GT(hal_storage_test::matchingDirectoryOpenCount, 0u);
 }
 
 TEST_F(DictionaryRegistryTest, TransientLookupRoutingLeavesAPreviouslyDiscoveredRegistryIntact) {
@@ -3483,6 +3504,74 @@ TEST(PageWordScannerTest, StarDictProbesAndPublishesOneExactSourceToken) {
   EXPECT_EQ(candidate->firstPageWord, 4);
   EXPECT_EQ(candidate->lastPageWord, 4);
   EXPECT_TRUE(scanner.done());
+}
+
+TEST(PageWordScannerTest, GeometryOnlyStarDictReachesLaterTouchedWordWithoutAnyProbes) {
+  auto glyphs = makeScannerGlyphs(U"cat–dog!bird—café");
+  for (uint16_t index = 0; index < glyphs.size(); ++index)
+    glyphs[index].pageWord = index <= 7 ? 0 : index <= 12 ? 1 : 2;
+  ScannerProbeRecorder baselineProbe{{{"cat"}, {"bird"}, {"café"}}};
+  ScannerProbeRecorder touchProbe{{{"cat"}, {"bird"}, {"café"}}};
+  const PageTextSourceView source{glyphs.data(), static_cast<uint16_t>(glyphs.size()), 7};
+  PageWordScanner baseline;
+  PageWordScanner touch;
+  ASSERT_EQ(baseline.begin(source, DictionaryBackendKind::StarDict, {&baselineProbe, ScannerProbeRecorder::call}),
+            DictionaryStatus::Found);
+  ASSERT_EQ(touch.begin(source, DictionaryBackendKind::StarDict, {&touchProbe, ScannerProbeRecorder::call}, {}, true),
+            DictionaryStatus::Found);
+  scanToEnd(baseline);
+  scanToEnd(touch);
+  ASSERT_EQ(baseline.candidateCount(), 4);
+  ASSERT_EQ(touch.candidateCount(), baseline.candidateCount());
+  EXPECT_EQ(baselineProbe.texts.size(), 4);
+  EXPECT_TRUE(touchProbe.texts.empty());
+  EXPECT_TRUE(touch.hasProcessedGlyph(15));
+  EXPECT_TRUE(touch.cacheable());
+  for (uint16_t index = 0; index < baseline.candidateCount(); ++index) {
+    const auto& expected = *baseline.candidate(index);
+    const auto& actual = *touch.candidate(index);
+    EXPECT_EQ(actual.firstGlyph, expected.firstGlyph);
+    EXPECT_EQ(actual.glyphCount, expected.glyphCount);
+    EXPECT_EQ(actual.matchedBytes, expected.matchedBytes);
+    EXPECT_EQ(actual.firstPageWord, expected.firstPageWord);
+    EXPECT_EQ(actual.lastPageWord, expected.lastPageWord);
+  }
+  // The final touched accented token retains its full UTF-8 byte count.
+  EXPECT_EQ(touch.candidate(3)->firstGlyph, 13);
+  EXPECT_EQ(touch.candidate(3)->matchedBytes, 5);
+}
+
+TEST(PageWordScannerTest, GeometryOnlyStarDictSurvivesRestartButNewBeginDefaultsToProbing) {
+  auto glyphs = makeScannerGlyphs(U"cat");
+  for (auto& glyph : glyphs) glyph.pageWord = 0;
+  const PageTextSourceView source{glyphs.data(), static_cast<uint16_t>(glyphs.size()), 7};
+  ScannerProbeRecorder probe{{{"cat"}}};
+  PageWordScanner scanner;
+  ASSERT_EQ(scanner.begin(source, DictionaryBackendKind::StarDict, {&probe, ScannerProbeRecorder::call}, {}, true),
+            DictionaryStatus::Found);
+  scanToEnd(scanner);
+  ASSERT_EQ(scanner.restart(), DictionaryStatus::Found);
+  scanToEnd(scanner);
+  EXPECT_TRUE(probe.texts.empty());
+  ASSERT_EQ(scanner.begin(source, DictionaryBackendKind::StarDict, {&probe, ScannerProbeRecorder::call}),
+            DictionaryStatus::Found);
+  scanToEnd(scanner);
+  EXPECT_EQ(probe.texts, (std::vector<std::string>{"cat"}));
+}
+
+TEST(PageWordScannerTest, GeometryOnlyOptionDoesNotBypassJapaneseWordBoundaryProbes) {
+  auto glyphs = makeScannerGlyphs(U"日本語辞書猫犬鳥魚");
+  ScannerProbeRecorder probe{{{"日本語辞書", DictionaryStatus::Found, SIZE_MAX, false, DictIndex::DICT_GRAMMAR, 220}}};
+  PageWordScanner scanner;
+  ASSERT_EQ(scanner.begin({glyphs.data(), static_cast<uint16_t>(glyphs.size()), 7}, DictionaryBackendKind::Japanese,
+                          {&probe, ScannerProbeRecorder::call}, {}, true),
+            DictionaryStatus::Found);
+  ASSERT_EQ(scanner.stepOne(), DictionaryStatus::Found);
+  ASSERT_EQ(probe.texts.size(), 1);
+  EXPECT_EQ(probe.texts[0], "日本語辞書猫犬鳥");
+  EXPECT_EQ(scanner.candidate(0)->glyphCount, 5);
+  for (int index = 0; index < 4; ++index) EXPECT_EQ(scanner.stepOne(), DictionaryStatus::NotFound);
+  EXPECT_EQ(probe.texts.size(), 1);
 }
 
 TEST(PageWordScannerTest, ReportsWhichGlyphsTheProgressiveCursorHasProcessed) {
@@ -7491,4 +7580,327 @@ TEST_F(JapaneseDictionaryTest, GrammarContextHonorsTenCharacterLimitAndCancellat
   EXPECT_EQ(engine.streamDefinition(result.definition, DictionaryDefinitionMode::Styled, {&text, acceptDefinitionSpan}),
             DictionaryStatus::Cancelled);
   EXPECT_TRUE(text.empty());
+}
+
+TEST(MangaPageTextSourceTest, CropMapsHeldBlockToItsTokenAcrossImageRotations) {
+  auto bytes = mangaOcrFixture({{"cat", "dog"}});
+  // Place the second OCR block at (60,120), beyond the first block/crop.
+  const size_t second = 2 + 12 + 10 + 3;
+  bytes[second] = 60;
+  bytes[second + 2] = 120;
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  for (int rotation = 0; rotation < 4; ++rotation) {
+    SCOPED_TRACE(rotation);
+    auto g = mangaGeometry();
+    g.sourceCrop = {50, 100, 50, 100};
+    g.views.base = {0, 0, 300, 300};
+    g.views.screenWidth = g.views.screenHeight = 300;
+    g.layout = {{50, 50, 100, 200}, 300, 300, rotation};
+    // OCR dog (60,120,30,40), relative to crop: (10,20,30,40),
+    // scales to (70,90)-(130,170) before orientation conversion.
+    int x = 100, y = 130;
+    for (int turn = 0; turn < rotation; ++turn) {
+      const int nextX = y;
+      y = 300 - x;
+      x = nextX;
+    }
+    const int region = mangaLookupRegionAtPoint(page, 0, g, x, y);
+    ASSERT_EQ(region, 1);
+    EXPECT_EQ(mangaLookupRegionAtPoint(page, 0, g, 5, 5), -1);
+    EXPECT_TRUE(mangaLookupRegionHasSingleToken(page, 0, region));
+    OwnedLookupTextSource source;
+    ASSERT_EQ(buildMangaLookupTextSource(page, 0, g, source, region), DictionaryStatus::Found);
+    ASSERT_EQ(source.glyphCount, 4);
+    EXPECT_EQ(source.glyphs[0].codepoint, uint32_t('d'));
+    EXPECT_EQ(source.glyphs[1].codepoint, uint32_t('o'));
+    EXPECT_EQ(source.glyphs[2].codepoint, uint32_t('g'));
+    const auto& glyph = source.glyphs[0];
+    EXPECT_GE(x, glyph.x);
+    EXPECT_LT(x, glyph.x + glyph.width);
+    EXPECT_GE(y, glyph.y);
+    EXPECT_LT(y, glyph.y + glyph.height);
+  }
+}
+
+TEST(MangaPageTextSourceTest, InvalidAndClippedCropsNeverInventTouchTargets) {
+  auto g = mangaGeometry();
+  PageTextBounds bounds;
+  g.sourceCrop = {10, 20, 50, 100};
+  EXPECT_FALSE(mapMangaLookupBlock({0, 0, 10, 20}, g, bounds));
+  ASSERT_TRUE(mapMangaLookupBlock({0, 0, 20, 40}, g, bounds));
+  EXPECT_EQ(bounds.x, 5);
+  EXPECT_EQ(bounds.y, 7);
+  EXPECT_EQ(bounds.width, 20);
+  EXPECT_EQ(bounds.height, 40);
+  g.sourceCrop = {80, 0, 50, 100};
+  EXPECT_FALSE(mapMangaLookupBlock({80, 0, 10, 20}, g, bounds));
+  g.sourceCrop = {0, 0, 0, 100};
+  EXPECT_FALSE(mapMangaLookupBlock({0, 0, 10, 20}, g, bounds));
+}
+
+TEST(MangaPageTextSourceTest, AmbiguousOcrBlocksRequireTypesetWordSelection) {
+  auto bytes = mangaOcrFixture({{"cat", "cat dog", "猫犬", "猫", "", " "}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  EXPECT_TRUE(mangaLookupRegionHasSingleToken(page, 0, 0));
+  EXPECT_FALSE(mangaLookupRegionHasSingleToken(page, 0, 1));
+  EXPECT_FALSE(mangaLookupRegionHasSingleToken(page, 0, 2));
+  EXPECT_TRUE(mangaLookupRegionHasSingleToken(page, 0, 3));
+  EXPECT_FALSE(mangaLookupRegionHasSingleToken(page, 0, 4));
+  EXPECT_FALSE(mangaLookupRegionHasSingleToken(page, 0, 5));
+  EXPECT_FALSE(mangaLookupRegionHasSingleToken(page, 0, 9));
+}
+
+TEST(MangaPageTextSourceTest, ProportionalTextSelectorUsesMeasuredAdvancesAndWraps) {
+  auto bytes = mangaOcrFixture({{"ii W i\nWi"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto g = mangaGeometry();
+  g.textOnly = true;
+  g.views.base = {10, 20, 25, 40};
+  g.cellWidth = 10;
+  g.lineHeight = 20;
+  MangaTextMeasure measure;
+  measure.advance = [](void*, uint32_t cp) { return cp == 'i' ? 3 : cp == ' ' ? 4 : 12; };
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, g, source, 0, measure), DictionaryStatus::Found);
+  ASSERT_GE(source.glyphCount, 9);
+  EXPECT_EQ(source.glyphs[0].x, 10);
+  EXPECT_EQ(source.glyphs[0].width, 3);
+  EXPECT_EQ(source.glyphs[1].x, 13);
+  EXPECT_EQ(source.glyphs[3].x, 20);
+  EXPECT_EQ(source.glyphs[3].width, 12);
+  EXPECT_EQ(source.glyphs[5].x, 10);
+  EXPECT_EQ(source.glyphs[5].y, 40);
+  EXPECT_EQ(source.glyphs[7].x, 10);
+  EXPECT_EQ(source.glyphs[7].y, 60);
+  EXPECT_EQ(source.glyphs[8].x, 22);
+  // Text identity and cache compatibility do not depend on presentation width.
+  const auto hash = source.contentHash;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, g, source, 0), DictionaryStatus::Found);
+  EXPECT_EQ(source.glyphs[0].width, 10);
+  EXPECT_EQ(source.glyphs[1].x, 20);
+  EXPECT_EQ(source.contentHash, hash);
+}
+
+TEST(MangaPageTextSourceTest, ProportionalTextSelectorBoundsInvalidFontAdvances) {
+  auto bytes = mangaOcrFixture({{"iW"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto g = mangaGeometry();
+  g.textOnly = true;
+  g.views.base = {10, 20, 25, 40};
+  g.cellWidth = 10;
+  g.lineHeight = 20;
+  MangaTextMeasure measure;
+  measure.advance = [](void*, uint32_t cp) { return cp == 'i' ? -1 : INT_MAX; };
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, g, source, 0, measure), DictionaryStatus::Found);
+  EXPECT_EQ(source.glyphs[0].width, 1);
+  EXPECT_EQ(source.glyphs[1].x, 10);
+  EXPECT_EQ(source.glyphs[1].y, 40);
+  EXPECT_EQ(source.glyphs[1].width, 25);
+}
+
+TEST(MangaPageTextSourceTest, ProportionalSelectorPreservesBlankSpaceAdvancesBetweenWords) {
+  auto bytes = mangaOcrFixture({{"Reader  text"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto g = mangaGeometry();
+  g.textOnly = true;
+  g.views.base = {10, 20, 200, 60};
+  g.cellWidth = 20;
+  g.lineHeight = 20;
+  int measuredSpaces = 0;
+  MangaTextMeasure measure;
+  measure.context = &measuredSpaces;
+  measure.advance = [](void* context, uint32_t cp) {
+    if (cp == ' ') {
+      ++*static_cast<int*>(context);
+      return 7;  // Positive font pen advance even though the glyph has no ink.
+    }
+    return 10;
+  };
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, -1, g, source, 0, measure), DictionaryStatus::Found);
+  ASSERT_EQ(source.glyphCount, 13);
+  EXPECT_EQ(measuredSpaces, 2);
+  const auto& lastReaderGlyph = source.glyphs[5];
+  const auto& firstTextGlyph = source.glyphs[8];
+  EXPECT_EQ(firstTextGlyph.x - lastReaderGlyph.x - lastReaderGlyph.width, 14);
+  EXPECT_EQ(source.glyphs[6].pageWord, PageTextGlyph::kSyntheticPageWord);
+  EXPECT_EQ(source.glyphs[6].width, 0);  // Blank gaps advance the pen without becoming word targets.
+  EXPECT_EQ(firstTextGlyph.codepoint, uint32_t('t'));
+}
+
+namespace {
+struct JapaneseCancelReadHook {
+  inline static const char* path = nullptr;
+  inline static bool* flag = nullptr;
+  inline static DictionaryEngine* engine = nullptr;
+  inline static size_t bytesBefore = 0;
+  inline static uint32_t stoppedAtRead = 0;
+  static void afterRead() {
+    if (!path || hal_storage_test::readBytes[path] <= bytesBefore) return;
+    stoppedAtRead = hal_storage_test::readCount;
+    if (flag) *flag = true;
+    if (engine) engine->cancel();
+    hal_storage_test::afterRead = nullptr;
+  }
+  static void arm(const char* target, bool* cancelFlag, DictionaryEngine* cancelEngine = nullptr) {
+    path = target;
+    flag = cancelFlag;
+    engine = cancelEngine;
+    bytesBefore = hal_storage_test::readBytes[target];
+    stoppedAtRead = 0;
+    hal_storage_test::afterRead = afterRead;
+  }
+};
+bool readCancellationFlag(void* context) { return *static_cast<bool*>(context); }
+}  // namespace
+
+TEST_F(JapaneseDictionaryTest, CancellationStopsSparseIndexOpenAndReopenIsSafe) {
+  writeVocab({{"猫", "cat", 200}}, true);
+  bool cancelled = false;
+  DictIndex index;
+  index.setCancellation({readCancellationFlag, &cancelled});
+  JapaneseCancelReadHook::arm("/dictionaries/jp/vocab.spx", &cancelled);
+  EXPECT_EQ(index.open(), JapaneseDictStatus::Cancelled);
+  EXPECT_TRUE(cancelled);
+  EXPECT_EQ(hal_storage_test::readCount, JapaneseCancelReadHook::stoppedAtRead);
+  index.close();
+  EXPECT_EQ(hal_storage_test::activeReaders["/dictionaries/jp/vocab.idx"], 0u);
+  EXPECT_EQ(hal_storage_test::activeReaders["/dictionaries/jp/vocab.spx"], 0u);
+  cancelled = false;
+  ASSERT_EQ(index.open(), JapaneseDictStatus::Found);
+  DictProbe result;
+  EXPECT_EQ(index.probeExact("猫", result), JapaneseDictStatus::Found);
+}
+
+TEST_F(JapaneseDictionaryTest, BackendCancellationStopsFurtherPrefixProbesAndCanReopen) {
+  writeVocab({{"猫", "cat", 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  JapaneseCancelReadHook::arm("/dictionaries/jp/vocab.idx", nullptr, &engine);
+  DictionaryProbeResult result;
+  EXPECT_EQ(engine.probe({"食べられました"}, result), DictionaryStatus::Cancelled);
+  ASSERT_NE(JapaneseCancelReadHook::stoppedAtRead, 0u);
+  EXPECT_EQ(hal_storage_test::readCount, JapaneseCancelReadHook::stoppedAtRead);
+  engine.close();
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  EXPECT_EQ(engine.probe({"猫"}, result), DictionaryStatus::Found);
+}
+
+TEST_F(JapaneseDictionaryTest, BackendCancellationStopsKanaMarkerAfterFirstChunk) {
+  writeVocab({{"かな", std::string(16000, 'x'), 100, DictIndexRecord::POS_READING}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  JapaneseCancelReadHook::arm("/dictionaries/jp/vocab.dat", nullptr, &engine);
+  DictionaryProbeResult result;
+  EXPECT_EQ(engine.probe({"かな"}, result), DictionaryStatus::Cancelled);
+  ASSERT_NE(JapaneseCancelReadHook::stoppedAtRead, 0u);
+  EXPECT_EQ(hal_storage_test::readCount, JapaneseCancelReadHook::stoppedAtRead);
+  EXPECT_LE(hal_storage_test::readBytes["/dictionaries/jp/vocab.dat"] - JapaneseCancelReadHook::bytesBefore, 128u);
+  engine.close();
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  EXPECT_EQ(engine.probe({"かな"}, result), DictionaryStatus::Found);
+}
+
+TEST_F(JapaneseDictionaryTest, BackendCancellationBoundsDefinitionReadAndLeavesNoPartialResult) {
+  writeVocab({{"猫", std::string(16000, 'x'), 200}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  JapaneseCancelReadHook::arm("/dictionaries/jp/vocab.dat", nullptr, &engine);
+  DictionaryResult result;
+  EXPECT_EQ(engine.lookup({"猫"}, result), DictionaryStatus::Cancelled);
+  ASSERT_NE(JapaneseCancelReadHook::stoppedAtRead, 0u);
+  EXPECT_EQ(hal_storage_test::readCount, JapaneseCancelReadHook::stoppedAtRead);
+  EXPECT_LE(hal_storage_test::readBytes["/dictionaries/jp/vocab.dat"] - JapaneseCancelReadHook::bytesBefore, 512u);
+  EXPECT_TRUE(result.headword.view().empty());
+  engine.close();
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  EXPECT_EQ(engine.lookup({"猫"}, result), DictionaryStatus::Found);
+}
+
+TEST_F(JapaneseDictionaryTest, BackendCancellationDuringOptionalGrammarDoesNotPublishLookup) {
+  writeVocab({{"かな", "vocabulary", 200}});
+  writeSource("/dictionaries/jp/grammar", {{"かな", std::string(16000, 'x'), 100}});
+  DictionaryEngine engine;
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  JapaneseCancelReadHook::arm("/dictionaries/jp/grammar.dat", nullptr, &engine);
+  DictionaryResult result;
+  EXPECT_EQ(engine.lookup({"かな"}, result), DictionaryStatus::Cancelled);
+  ASSERT_NE(JapaneseCancelReadHook::stoppedAtRead, 0u);
+  EXPECT_EQ(hal_storage_test::readCount, JapaneseCancelReadHook::stoppedAtRead);
+  EXPECT_TRUE(result.headword.empty());
+  engine.close();
+  ASSERT_EQ(engine.open({"ja", nullptr}), DictionaryStatus::Found);
+  EXPECT_EQ(engine.lookup({"かな"}, result), DictionaryStatus::Found);
+}
+
+TEST(DeinflectorCancellationTest, StopsDuringRuleExpansionWithoutPublishingPartialCandidates) {
+  unsigned polls = 0;
+  const CooperativeCancellation cancellation{[](void* context) { return ++*static_cast<unsigned*>(context) >= 2; },
+                                             &polls};
+  DeinflectionBuffer out;
+  Deinflector::deinflect("食べられました", out, cancellation);
+  EXPECT_EQ(polls, 2u);
+  EXPECT_EQ(out.count, 0);
+  Deinflector::deinflect("食べられました", out);
+  EXPECT_GT(out.count, 1);
+}
+
+TEST(MangaPageTextSourceTest, ApproximateBubbleSeparatesHorizontalWordsAndVerticalJapanese) {
+  auto bytes = mangaOcrFixture({{"cat dog", "猫犬鳥"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto g = mangaGeometry();
+  g.approximateTextPositions = true;
+  OwnedLookupTextSource source;
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, g, source, 0), DictionaryStatus::Found);
+  EXPECT_LT(source.glyphs[0].x, source.glyphs[4].x);
+  EXPECT_EQ(source.glyphs[0].y, source.glyphs[4].y);
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, g, source, 1), DictionaryStatus::Found);
+  EXPECT_EQ(source.glyphs[0].x, source.glyphs[1].x);
+  EXPECT_LT(source.glyphs[0].y, source.glyphs[1].y);
+}
+
+TEST(MangaPageTextSourceTest, ApproximateBubbleKeepsLineOrderAndSourceIdentity) {
+  auto bytes = mangaOcrFixture({{"cat\ndog", "猫犬\n鳥魚"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  auto g = mangaGeometry();
+  OwnedLookupTextSource original, approximate;
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, g, original, 0), DictionaryStatus::Found);
+  g.approximateTextPositions = true;
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, g, approximate, 0), DictionaryStatus::Found);
+  EXPECT_EQ(original.contentHash, approximate.contentHash);
+  EXPECT_LT(approximate.glyphs[0].y, approximate.glyphs[4].y);
+  ASSERT_EQ(buildMangaLookupTextSource(page, 0, g, approximate, 1), DictionaryStatus::Found);
+  EXPECT_GT(approximate.glyphs[0].x, approximate.glyphs[3].x);
+  EXPECT_EQ(approximate.glyphs[0].y, approximate.glyphs[3].y);
+}
+
+TEST(MangaPageTextSourceTest, ApproximateCellsFollowCropAndAllImageRotations) {
+  auto bytes = mangaOcrFixture({{"cat dog"}});
+  manga::format::PageView page;
+  ASSERT_EQ(manga::format::decodePage(bytes, page), manga::format::Error::None);
+  for (int rotation = 0; rotation < 4; ++rotation) {
+    SCOPED_TRACE(rotation);
+    auto g = mangaGeometry();
+    g.approximateTextPositions = true;
+    g.sourceCrop = {5, 10, 50, 100};
+    g.views.base = {0, 0, 300, 300};
+    g.views.screenWidth = g.views.screenHeight = 300;
+    g.layout = {{50, 50, 100, 200}, 300, 300, rotation};
+    OwnedLookupTextSource source;
+    ASSERT_EQ(buildMangaLookupTextSource(page, 0, g, source, 0), DictionaryStatus::Found);
+    PageTextBounds expected;
+    ASSERT_TRUE(mapMangaLookupBlock({27, 20, 4, 40}, g, expected));
+    EXPECT_EQ(source.glyphs[4].x, expected.x);
+    EXPECT_EQ(source.glyphs[4].y, expected.y);
+    EXPECT_EQ(source.glyphs[4].width, expected.width);
+    EXPECT_EQ(source.glyphs[4].height, expected.height);
+  }
 }

@@ -50,4 +50,10 @@ class HomeActivity final : public NavigationListActivity {
   bool showBack() const override { return false; }
   int drawAboveList() override;
   void present() override;
+  void renderTouchHome();
+  void loopTouchHome();
+  bool touchMenuOpen = false;
+  bool touchButtonFocus = false;
+  float readingPercent = -1.0f;
+  Rect lightButton, menuButton, continueButton, libraryButton, ankiButton, menuRows[4];
 };

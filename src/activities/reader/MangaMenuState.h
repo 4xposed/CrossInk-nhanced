@@ -19,7 +19,10 @@ enum class MenuAction : uint8_t {
   DeleteCache,
   OcrQr,
   None,
-  Dismiss
+  Dismiss,
+  Overview,
+  Light,
+  More
 };
 constexpr int kMenuActionCount = 15;
 constexpr MenuAction menuActionAt(int index) {

@@ -115,4 +115,7 @@ class FileBrowserActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+#ifdef SIMULATOR
+  const std::string& directoryForSimulatorTest() const { return basepath; }
+#endif
 };

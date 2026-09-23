@@ -34,10 +34,12 @@ class MangaReaderActivity final : public Activity {
   manga::Position simulatorPosition();
   bool simulatorJumpWhenIdle(manga::Position target);
   bool simulatorQueueCurrentSource();
+  bool simulatorHasDeferredBubbleTap() const { return deferredBubbleTapX >= 0; }
   bool simulatorStartWarmWhenIdle();
   bool simulatorPendingRender();
   bool simulatorMenuActive();
   bool simulatorMenuOptionCenter(int index, int& x, int& y);
+  bool simulatorOcrRegionCenter(int region, int& x, int& y);
   bool simulatorNoOcrFeedback();
   void simulatorFailNextBwRestore();
   bool simulatorFeedbackIs(StrId message);
@@ -67,6 +69,8 @@ class MangaReaderActivity final : public Activity {
   bool pendingBack = false, pendingRender = false, suspended = false;
   bool foregroundDraining = false;
   bool pendingLookup = false;
+  int pendingLookupTouchX = -1, pendingLookupTouchY = -1;
+  int deferredBubbleTapX = -1, deferredBubbleTapY = -1;
   bool longPressMenuHandled = false;
   bool inputLocked = false, childActive = false;
   bool pendingScreenshot = false, pendingCacheDelete = false, leaveAfterMessage = false;
@@ -124,7 +128,7 @@ class MangaReaderActivity final : public Activity {
   void move(bool forward);
   void moveLocked(bool forward);
   void applyMoveLocked(const manga::Move& target, bool forward);
-  void showMenuLocked();
+  void showMenuLocked(bool fullMenu = false);
   void jump(uint32_t number, int16_t panel = -1);
   bool saveProgressLocked();
   void observeProgressLocked();
@@ -137,15 +141,17 @@ class MangaReaderActivity final : public Activity {
   void openQr();
   void confirmCacheDelete();
   void deleteCacheWhenReady();
-  bool queueShortcut(manga::MenuAction action);
+  bool queueShortcut(manga::MenuAction action, int touchX = -1, int touchY = -1);
   void drawStatusLocked(bool grayMask = false);
-  void openLookup(int region = -1);
+  bool touchHitsOcrLocked(int x, int y);
+  void openLookup(int region = -1, bool deferToTouchSelection = false);
   void openLookupHistory();
   void lookupBackgroundLocked(PageTextSourceView source);
   void showLookupMessage(const char* message);
   void childReturned();
   MangaLookupGeometry lookupGeometry;
   bool lookupTextPopup = false;
+  int lookupImagePanel = -1;
   void toggleBookmark();
   void showSelection(bool bookmarks);
   void pauseReadingStatsTimer();

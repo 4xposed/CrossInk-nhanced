@@ -1,11 +1,11 @@
 #pragma once
 
-#include "AnkiDeckTypes.h"
 #include <HalStorage.h>
-
 
 #include <cstdint>
 #include <string>
+
+#include "AnkiDeckTypes.h"
 
 class AnkiDeck;
 struct AnkiDeckMetadata;
@@ -36,7 +36,7 @@ class ReviewStateStore {
     ReviewState state{};
   };
 
-  enum class StateFileStatus : uint8_t { Missing, Valid, Mismatch, Malformed };
+  enum class StateFileStatus : uint8_t { Missing, Valid, Appendable, Mismatch, Malformed };
 
   AnkiDeck* deck_ = nullptr;
   std::string statePath_;
@@ -44,6 +44,7 @@ class ReviewStateStore {
   uint64_t deckId_ = 0;
   uint32_t cardCount_ = 0;
   uint32_t reviewCount_ = 0;
+  uint32_t persistedCardCount_ = 0;
   bool reviewCountDirty_ = false;
   FsFile streamFile_;
   uint32_t nextStreamIndex_ = 0;
@@ -53,7 +54,8 @@ class ReviewStateStore {
   uint64_t lastFlushMilliseconds_ = 0;
   bool hasFlushTimestamp_ = false;
 
-  StateFileStatus inspectStateFile(const std::string& path, uint32_t* reviewCount = nullptr) const;
+  StateFileStatus inspectStateFile(const std::string& path, uint32_t* reviewCount = nullptr,
+                                   uint32_t* savedCount = nullptr) const;
   bool initializeState();
   struct InitialStateWriteContext {
     ReviewStateStore* store = nullptr;

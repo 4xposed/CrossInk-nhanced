@@ -40,7 +40,7 @@
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/minimal/MinimalTheme.h"
 #include "fontIds.h"
-#include "images/Logo120.h"
+#include "images/BongoBootLogo.h"
 #include "images/MoonIcon.h"
 
 namespace {
@@ -650,9 +650,11 @@ void SleepActivity::renderDefaultSleepScreen() const {
   const auto pageHeight = renderer.getScreenHeight();
 
   renderer.clearScreen();
-  renderer.drawImage(Logo120, (pageWidth - 120) / 2, (pageHeight - 120) / 2, 120, 120);
-  renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 70, tr(STR_CROSSINK), true, EpdFontFamily::BOLD);
-  renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 95, tr(STR_SLEEPING));
+  const int logoY = (pageHeight - BongoBootLogoHeight) / 2;
+  const int sleepingY = logoY + BongoBootLogoHeight + 12;
+  renderer.drawImage(BongoBootLogo, (pageWidth - BongoBootLogoWidth) / 2, logoY, BongoBootLogoWidth,
+                     BongoBootLogoHeight);
+  renderer.drawCenteredText(SMALL_FONT_ID, sleepingY, tr(STR_SLEEPING));
 
   // Make sleep screen dark unless light is selected in settings
   const bool lightSleepScreen = SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::LIGHT;
@@ -664,7 +666,8 @@ void SleepActivity::renderDefaultSleepScreen() const {
   const std::string buildInfo = std::string(CROSSINK_BUILD_ENV) + " " + CROSSINK_VERSION;
   const std::string visibleBuildInfo =
       renderer.truncatedText(SMALL_FONT_ID, buildInfo.c_str(), pageWidth - sleepBuildInfoSideMargin * 2);
-  renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 118, visibleBuildInfo.c_str(), lightSleepScreen);
+  renderer.drawCenteredText(SMALL_FONT_ID, sleepingY + renderer.getLineHeight(SMALL_FONT_ID) + 8,
+                            visibleBuildInfo.c_str(), lightSleepScreen);
 #endif
 
   renderer.displayBuffer(HalDisplay::HALF_REFRESH, TURN_OFF_SCREEN_AFTER_SLEEP_REFRESH);

@@ -70,3 +70,15 @@ TEST(UiSymbolFallback, SdLastResortCanBeDetachedBeforeFontDestruction) {
   EpdFontFamily::setSdLastResort(nullptr);
   EXPECT_FALSE(small.findGlyphData(0x732B).glyph);
 }
+
+TEST(UiSymbolFallback, CoverageOwnerMatchesRenderOwnerIncludingJapaneseLastResort) {
+  const EpdFont japanese(&notosansjp_joyo_12_regular);
+  const EpdFontFamily mixed(&smallRegular, &smallBold, nullptr, nullptr, &symbols, &japanese);
+  for (const auto cp : {uint32_t('A'), POWER, uint32_t(0x732B)}) {
+    EXPECT_EQ(mixed.getCoverageData(cp, EpdFontFamily::BOLD), mixed.findGlyphData(cp, EpdFontFamily::BOLD).fontData);
+  }
+  EXPECT_EQ(nullptr, mixed.getCoverageData(0x10FFFF));
+  EpdFontFamily::setBuiltinLastResort(&japanese);
+  EXPECT_EQ(small.getCoverageData(0x732B), &notosansjp_joyo_12_regular);
+  EpdFontFamily::setBuiltinLastResort(nullptr);
+}

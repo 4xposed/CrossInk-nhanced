@@ -200,9 +200,11 @@ void TxtReaderActivity::loop() {
   if (handlePinchFontResize()) return;
 #endif
   const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
-  if (touch.tapped &&
-      ReaderUtils::isBottomStatusBarTap(renderer, touch.y, UITheme::getInstance().getStatusBarHeight())) {
-    if (SETTINGS.tapToHideStatusBar) {
+  if (touch.tapped && ReaderUtils::isBottomStatusBarTap(
+                          renderer, touch.y,
+                          TouchUi::enabled(mappedInput) ? ReaderUtils::getReaderFooterReservedHeight(false, renderer)
+                                                        : UITheme::getInstance().getStatusBarHeight())) {
+    if (SETTINGS.tapToHideStatusBar && !TouchUi::enabled(mappedInput)) {
       statusBarVisible = !statusBarVisible;
       requestUpdate();
     }
@@ -635,9 +637,7 @@ void TxtReaderActivity::initializeReader() {
   } else {
     cachedOrientedMarginTop += cachedVerticalMargin;
   }
-  cachedOrientedMarginBottom += std::max(
-      cachedVerticalMargin,
-      static_cast<uint8_t>(UITheme::getInstance().getStatusBarHeight() + ReaderUtils::STATUS_BAR_TEXT_PADDING));
+  cachedOrientedMarginBottom += ReaderUtils::getReaderFooterReservedHeight(false, renderer);
 
   viewportWidth = renderer.getScreenWidth() - cachedOrientedMarginLeft - cachedOrientedMarginRight;
   const int viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
@@ -829,7 +829,7 @@ void TxtReaderActivity::renderPage() {
   // BW rendering
   renderLines();
   renderStatusBar();
-  if (statusBarVisible) {
+  if (statusBarVisible && !TouchUi::enabled(mappedInput)) {
     GUI.drawTopStatusBarClock(renderer, UITheme::getInstance().getMetrics().topPadding, nullptr, true, 0,
                               ReaderUtils::readerDarkModeEnabled());
   }
@@ -843,11 +843,15 @@ void TxtReaderActivity::renderPage() {
 }
 
 void TxtReaderActivity::renderStatusBar() const {
-  if (!statusBarVisible) {
+  if (!statusBarVisible && !TouchUi::enabled(mappedInput)) {
     return;
   }
 
   const float progress = totalPages > 0 ? (currentPage + 1) * 100.0f / totalPages : 0;
+  if (TouchUi::enabled(mappedInput)) {
+    ReaderUtils::drawCompactProgress(renderer, progress, currentPage + 1, totalPages);
+    return;
+  }
   std::string title;
   if (SETTINGS.statusBarSpec().showsTitle()) {
     title = txt->getTitle();
@@ -1098,8 +1102,7 @@ bool TxtReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gfx
   } else {
     marginTop += verticalMargin;
   }
-  marginBottom += std::max(verticalMargin, static_cast<uint8_t>(UITheme::getInstance().getStatusBarHeight() +
-                                                                ReaderUtils::STATUS_BAR_TEXT_PADDING));
+  marginBottom += ReaderUtils::getReaderFooterReservedHeight(false, renderer);
 
   const int vw = renderer.getScreenWidth() - marginLeft - marginRight;
   const int vh = renderer.getScreenHeight() - marginTop - marginBottom;

@@ -39,6 +39,8 @@ class EpdFontFamily {
   }
   void getTextDimensions(const char* string, int* w, int* h, Style style = REGULAR) const;
   const EpdFontData* getData(Style style = REGULAR) const;
+  // Resolve the rendering face using coverage only; never load SD glyph bitmaps.
+  const EpdFontData* getCoverageData(uint32_t cp, Style style = REGULAR) const;
   GlyphData findGlyphData(uint32_t cp, Style style = REGULAR) const;
   GlyphData getGlyphData(uint32_t cp, Style style = REGULAR) const;
   const EpdGlyph* getGlyph(uint32_t cp, Style style = REGULAR) const;

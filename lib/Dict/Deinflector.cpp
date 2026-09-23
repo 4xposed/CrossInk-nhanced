@@ -376,7 +376,8 @@ bool sameText(const DeinflectionCandidate& candidate, const char* text, size_t l
 }
 
 template <typename RuleType>
-void deinflectWithRules(std::string_view surface, const RuleType* rules, size_t ruleCount, DeinflectionBuffer& out) {
+void deinflectWithRules(std::string_view surface, const RuleType* rules, size_t ruleCount, DeinflectionBuffer& out,
+                        CooperativeCancellation cancellation = {}) {
   out.count = 0;
   if (surface.empty() || surface.size() >= DictIndexRecord::HEADWORD_SIZE) return;
 
@@ -388,6 +389,10 @@ void deinflectWithRules(std::string_view surface, const RuleType* rules, size_t 
   for (uint8_t candidateIndex = 0; candidateIndex < out.count && out.count < out.kCapacity; ++candidateIndex) {
     const DeinflectionCandidate current = out.candidates[candidateIndex];
     for (size_t ruleIndex = 0; ruleIndex < ruleCount; ++ruleIndex) {
+      if (cancellation.requested()) {
+        out.count = 0;
+        return;
+      }
       const RuleType& rule = rules[ruleIndex];
       if (rule.condIn != WordCondition::DICT && rule.condIn != current.condition) continue;
       const size_t fromLength = std::strlen(rule.from);
@@ -423,8 +428,8 @@ void deinflectWithRules(std::string_view surface, const RuleType* rules, size_t 
 
 }  // namespace
 
-void Deinflector::deinflect(std::string_view surface, DeinflectionBuffer& out) {
-  deinflectWithRules(surface, kRules, kRuleCount, out);
+void Deinflector::deinflect(std::string_view surface, DeinflectionBuffer& out, CooperativeCancellation cancellation) {
+  deinflectWithRules(surface, kRules, kRuleCount, out, cancellation);
 }
 
 #ifdef CROSSINK_DICT_TESTING

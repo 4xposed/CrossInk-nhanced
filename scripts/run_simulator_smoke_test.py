@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
+import statistics
 import struct
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from dictionary_tools import _build_oft
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +63,9 @@ def prepare_fs(temp_root: Path, book: Path) -> str:
 
     target = books_dir / book.name
     shutil.copy2(book, target)
-    shutil.copy2(book, temp_root / "fs_" / OPDS_SIMULATOR_BOOK)
+    # OPDS opens this as EPUB even when the active-reader fixture is an Anki deck.
+    shutil.copy2(book if book.suffix.lower() == ".epub" else DEFAULT_BOOK,
+                 temp_root / "fs_" / OPDS_SIMULATOR_BOOK)
     category_dir = temp_root / "fs_" / "epubs" / "nested"
     category_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(book, category_dir / book.name)
@@ -75,6 +82,7 @@ def prepare_dictionary(temp_root: Path) -> None:
         "Alignment": "the arrangement of text",
         "Reader": "a person or application that reads",
         "This": "the present thing",
+        "more": "a greater amount",
         "paragraph": "a section of written text",
         "text": "written words",
         "the": "definite article",
@@ -83,7 +91,7 @@ def prepare_dictionary(temp_root: Path) -> None:
     dictionary_dir.mkdir(parents=True, exist_ok=True)
     index = bytearray()
     definitions = bytearray()
-    for word, definition in sorted(records.items()):
+    for word, definition in sorted(records.items(), key=lambda item: item[0].casefold()):
         encoded_word = word.encode("utf-8")
         encoded_definition = definition.encode("utf-8")
         index.extend(encoded_word)
@@ -93,6 +101,7 @@ def prepare_dictionary(temp_root: Path) -> None:
 
     base = dictionary_dir / "dict-data"
     (base.with_suffix(".idx")).write_bytes(index)
+    (base.with_suffix(".idx.oft")).write_bytes(_build_oft(bytes(index), 8))
     (base.with_suffix(".dict")).write_bytes(definitions)
     (base.with_suffix(".ifo")).write_text(
         "StarDict's dict ifo file\n"
@@ -108,6 +117,7 @@ def prepare_dictionary(temp_root: Path) -> None:
     fallback_dir.mkdir(parents=True, exist_ok=True)
     fallback_base = fallback_dir / "dict-data"
     (fallback_base.with_suffix(".idx")).write_bytes(index)
+    (fallback_base.with_suffix(".idx.oft")).write_bytes(_build_oft(bytes(index), 8))
     (fallback_base.with_suffix(".dict")).write_bytes(definitions)
     (fallback_base.with_suffix(".ifo")).write_text(
         "StarDict's dict ifo file\n"
@@ -157,21 +167,29 @@ def run_smoke(args: argparse.Namespace) -> int:
         env["CROSSINK_SIMULATOR_SMOKE_TEST"] = "1"
         env["CROSSINK_SIMULATOR_SMOKE_BOOK"] = simulator_book_path
         env["CROSSINK_SIMULATOR_SMOKE_PAGE_TURNS"] = str(args.page_turns)
+        if args.lookup_only:
+            env["CROSSINK_SIMULATOR_LOOKUP_REGRESSION"] = "1"
         if args.theme:
             env["CROSSINK_SIMULATOR_SMOKE_THEME"] = str(THEMES[args.theme])
         if args.headless:
             env.setdefault("SDL_VIDEODRIVER", "dummy")
 
         print(f"Running simulator smoke test with isolated fs_: {temp_root / 'fs_'}", flush=True)
-        proc = subprocess.run(
-            [str(program)],
-            cwd=temp_root,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=args.timeout,
-        )
+        try:
+            proc = subprocess.run(
+                [str(program)],
+                cwd=temp_root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=args.timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            output = error.stdout or ""
+            print(output.decode(errors="replace") if isinstance(output, bytes) else output, end="")
+            print(f"Simulator smoke test timed out after {args.timeout}s", file=sys.stderr)
+            return 1
 
     print(proc.stdout, end="")
 
@@ -188,7 +206,44 @@ def run_smoke(args: argparse.Namespace) -> int:
         print("Simulator smoke test did not print its success marker", file=sys.stderr)
         return 2
 
+    if (args.performance_report or args.performance_baseline) and not check_lookup_performance(proc.stdout, args):
+        return 2
     return 0
+
+
+def check_lookup_performance(output: str, args: argparse.Namespace) -> bool:
+    samples = [int(value) for value in re.findall(r"LOOKUP_PERF redraw_us=(\d+)", output)]
+    ready = [int(value) for value in re.findall(r"Dictionary first definition ready after (\d+) ms", output)]
+    if len(samples) != 12 or not ready:
+        print("Lookup performance coverage incomplete", file=sys.stderr)
+        return False
+    report = {"env": args.env, "redraw_samples": len(samples),
+              "redraw_median_us": statistics.median(samples), "redraw_max_us": max(samples),
+              "first_definition_max_ms": max(ready)}
+    print("Lookup performance: " + json.dumps(report, sort_keys=True))
+    if args.performance_report:
+        Path(args.performance_report).write_text(json.dumps(report, indent=2) + "\n")
+    if args.performance_baseline:
+        baseline = json.loads(Path(args.performance_baseline).read_text())
+        if baseline["env"] != args.env:
+            print("Lookup baseline device does not match", file=sys.stderr)
+            return False
+        # Allow 25% growth or a 2 ms host scheduling noise floor. Compare
+        # medians; report the maximum separately, since hosts are not real-time.
+        limit = max(baseline["redraw_median_us"] * 1.25, baseline["redraw_median_us"] + 2000)
+        if report["redraw_median_us"] > limit:
+            print(f"Lookup redraw regression: median exceeds {limit:.0f} us", file=sys.stderr)
+            return False
+        if "first_definition_max_ms" in baseline:
+            ready_limit = max(baseline["first_definition_max_ms"] * 1.25,
+                              baseline["first_definition_max_ms"] + 20)
+            if report["first_definition_max_ms"] > ready_limit:
+                print(f"Lookup readiness regression: exceeds {ready_limit:.0f} ms", file=sys.stderr)
+                return False
+    if "Dictionary first definition missed" in output or "Dictionary initial burst reached" in output:
+        print("Lookup exceeded its existing readiness deadline", file=sys.stderr)
+        return False
+    return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -201,6 +256,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--theme", choices=sorted(THEMES), help="UI theme to use during the smoke test")
     parser.add_argument("--no-build", dest="build", action="store_false", help="Run the existing simulator binary")
     parser.add_argument("--window", dest="headless", action="store_false", help="Show the SDL window instead of using dummy video")
+    parser.add_argument("--lookup-only", action="store_true", help="Isolate dictionary panel checks from touch entry/menu routing")
+    parser.add_argument("--performance-report", help="Write dictionary readiness and completed redraw timings as JSON")
+    parser.add_argument("--performance-baseline", help="Compare redraw timings against a report from this device profile")
     parser.set_defaults(build=True, headless=True)
     return parser.parse_args()
 

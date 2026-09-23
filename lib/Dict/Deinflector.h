@@ -41,7 +41,7 @@ class Deinflector {
  public:
   static constexpr size_t kRuleCount = 260;
 
-  static void deinflect(std::string_view surface, DeinflectionBuffer& out);
+  static void deinflect(std::string_view surface, DeinflectionBuffer& out, CooperativeCancellation cancellation = {});
 #ifdef CROSSINK_DICT_TESTING
   static void deinflectForTest(std::string_view surface, const DeinflectionRuleForTest* rules, size_t ruleCount,
                                DeinflectionBuffer& out);

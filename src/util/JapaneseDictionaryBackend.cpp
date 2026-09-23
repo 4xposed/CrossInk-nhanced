@@ -51,6 +51,8 @@ DictionaryStatus JapaneseDictionaryBackend::mapStatus(const JapaneseDictStatus s
       return DictionaryStatus::ReadError;
     case JapaneseDictStatus::OutOfMemory:
       return DictionaryStatus::OutOfMemory;
+    case JapaneseDictStatus::Cancelled:
+      return DictionaryStatus::Cancelled;
   }
   return DictionaryStatus::ReadError;
 }
@@ -58,6 +60,8 @@ DictionaryStatus JapaneseDictionaryBackend::mapStatus(const JapaneseDictStatus s
 DictionaryStatus JapaneseDictionaryBackend::open(const char* bookCachePath) {
   close();
   cancelled_ = false;
+  index_.setCancellation(
+      {[](void* context) { return static_cast<JapaneseDictionaryBackend*>(context)->cancelled_.load(); }, this});
   const JapaneseDictStatus status = index_.open();
   if (status != JapaneseDictStatus::Found) return mapStatus(status);
 
@@ -164,6 +168,7 @@ DictionaryStatus JapaneseDictionaryBackend::lookup(const DictionaryQuery& query,
   grammarLabel_.reset();
   activeEntry_ = std::move(lookupResult.entry);
   applyGrammar(query, complete);
+  if (cancelled_.load()) return out.status = DictionaryStatus::Cancelled;
   syntheticNameDefinition_.reset();
   out = std::move(complete);
   return DictionaryStatus::Found;

@@ -128,6 +128,8 @@ std::vector<uint8_t> makeV2Deck(const std::vector<StyledBlock>& promptFields,
 class AnkiDeckTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    HalFile::failWriteCall = 0;
+    HalFile::writeCalls = 0;
     root_ = std::filesystem::temp_directory_path() /
             ("anki-deck-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root_);
@@ -661,4 +663,157 @@ TEST_F(AnkiDeckTest, ExitBatchesLargeDeckSaveAndPreservesAllRecords) {
   ASSERT_TRUE(reopened.onExit());
   EXPECT_EQ(HalFile::readCalls, 0u);
   EXPECT_EQ(HalFile::writeCalls, 0u);
+}
+
+TEST_F(AnkiDeckTest, SavedTermsAppendDeduplicatesAndPreservesReviewProgress) {
+  EXPECT_EQ(AnkiDeck::addSavedTerm("猫", "ねこ\ncat", "Saved terms"), AnkiDeck::AddTermResult::Added);
+  AnkiDeck deck;
+  ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+  ReviewStateStore state;
+  ASSERT_TRUE(state.open(deck));
+  ReviewState graded{15, 7, ReviewKind::Review, 0};
+  ASSERT_TRUE(state.replaceAndAdvance(0, graded, 10));
+  ASSERT_TRUE(state.onExit());
+  EXPECT_EQ(AnkiDeck::addSavedTerm("犬", "いぬ\ndog", "Saved terms"), AnkiDeck::AddTermResult::Added);
+  EXPECT_EQ(AnkiDeck::addSavedTerm("猫", "another definition", "Saved terms"), AnkiDeck::AddTermResult::AlreadyAdded);
+  ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+  EXPECT_EQ(deck.cardCount(), 2u);
+  ASSERT_TRUE(state.open(deck));
+  EXPECT_EQ(state.reviewCount(), 1u);
+  ReviewState read;
+  ASSERT_TRUE(state.read(0, read));
+  EXPECT_EQ(read.dueDay, 15u);
+  EXPECT_EQ(read.intervalDays, 7u);
+  ASSERT_TRUE(state.read(1, read));
+  EXPECT_EQ(read.kind, ReviewKind::New);
+  std::array<char, 2049> front{}, back{};
+  CardFields fields{};
+  fields.prompt[0].text = front.data();
+  fields.answer[0].text = back.data();
+  ASSERT_TRUE(deck.readCardFields(1, fields));
+  EXPECT_STREQ(front.data(), "犬");
+  EXPECT_STREQ(back.data(), "いぬ\ndog");
+}
+
+TEST_F(AnkiDeckTest, SavedTermsRejectInvalidInputAndRecoverInterruptedPromotion) {
+  EXPECT_EQ(AnkiDeck::addSavedTerm("", "cat", "Saved terms"), AnkiDeck::AddTermResult::Error);
+  EXPECT_EQ(AnkiDeck::addSavedTerm("cat", std::string(2049, 'x'), "Saved terms"), AnkiDeck::AddTermResult::Error);
+  EXPECT_EQ(AnkiDeck::addSavedTerm("\xc3\x28", "cat", "Saved terms"), AnkiDeck::AddTermResult::Error);
+  ASSERT_EQ(AnkiDeck::addSavedTerm("cat", "猫", "Saved terms"), AnkiDeck::AddTermResult::Added);
+  const std::string backup = std::string(AnkiDeck::kSavedTermsPath) + ".bak";
+  ASSERT_TRUE(Storage.rename(AnkiDeck::kSavedTermsPath, backup.c_str()));
+  ASSERT_TRUE(AnkiDeck::recoverSavedTerms());
+  AnkiDeck deck;
+  ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+  EXPECT_EQ(deck.cardCount(), 1u);
+}
+
+#include <AnkiTermText.h>
+TEST(AnkiTermTextTest, TruncationKeepsJapaneseCodepointsWholeAcrossSpans) {
+  char buffer[11];
+  AnkiTermText text(buffer, 10);
+  text.append("猫犬");
+  text.append("鳥魚猫");
+  EXPECT_EQ(text.finish(), "猫犬…");
+}
+TEST(AnkiTermTextTest, ExactFitAndShortDefinitionsArePreserved) {
+  char buffer[7];
+  AnkiTermText text(buffer, 6);
+  text.append("猫");
+  text.append("犬");
+  EXPECT_EQ(text.finish(), "猫犬");
+}
+
+TEST_F(AnkiDeckTest, SavedTermWriteFailuresLeaveOldDeckReviewable) {
+  for (size_t failure = 1; failure <= 10; ++failure) {
+    std::filesystem::remove_all(root_ / "decks");
+    std::filesystem::remove_all(root_ / ".crosspoint");
+    HalFile::failWriteCall = 0;
+    ASSERT_EQ(AnkiDeck::addSavedTerm("cat", "猫", "Saved terms"), AnkiDeck::AddTermResult::Added);
+    AnkiDeck deck;
+    ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+    ReviewStateStore state;
+    ASSERT_TRUE(state.open(deck));
+    ASSERT_TRUE(state.replaceAndAdvance(0, {15, 7, ReviewKind::Review, 0}, 1));
+    ASSERT_TRUE(state.onExit());
+    HalFile::writeCalls = 0;
+    HalFile::failWriteCall = failure;
+    const auto result = AnkiDeck::addSavedTerm("dog", "犬", "Saved terms");
+    HalFile::failWriteCall = 0;
+    ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+    EXPECT_EQ(deck.cardCount(), result == AnkiDeck::AddTermResult::Added ? 2u : 1u);
+    ASSERT_TRUE(state.open(deck));
+    ReviewState preserved;
+    ASSERT_TRUE(state.read(0, preserved));
+    EXPECT_EQ(preserved.dueDay, 15u);
+    EXPECT_EQ(state.reviewCount(), 1u);
+  }
+}
+
+TEST_F(AnkiDeckTest, FailedReviewExtensionCanRetryWithoutLosingGrades) {
+  ASSERT_EQ(AnkiDeck::addSavedTerm("cat", "猫", "Saved terms"), AnkiDeck::AddTermResult::Added);
+  AnkiDeck deck;
+  ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+  ReviewStateStore state;
+  ASSERT_TRUE(state.open(deck));
+  ASSERT_TRUE(state.replaceAndAdvance(0, {15, 7, ReviewKind::Review, 0}, 1));
+  ASSERT_TRUE(state.onExit());
+  ASSERT_EQ(AnkiDeck::addSavedTerm("dog", "犬", "Saved terms"), AnkiDeck::AddTermResult::Added);
+  ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+  HalFile::writeCalls = 0;
+  HalFile::failWriteCall = 1;
+  EXPECT_FALSE(state.open(deck));
+  HalFile::failWriteCall = 0;
+  ASSERT_TRUE(state.open(deck));
+  EXPECT_EQ(state.reviewCount(), 1u);
+  ReviewState preserved;
+  ASSERT_TRUE(state.read(0, preserved));
+  EXPECT_EQ(preserved.dueDay, 15u);
+}
+
+TEST_F(AnkiDeckTest, RecreatedSavedTermsDoNotInheritDeletedDeckGrades) {
+  ASSERT_EQ(AnkiDeck::addSavedTerm("cat", "猫", "Saved terms"), AnkiDeck::AddTermResult::Added);
+  AnkiDeck deck;
+  ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+  ReviewStateStore state;
+  ASSERT_TRUE(state.open(deck));
+  ASSERT_TRUE(state.replaceAndAdvance(0, ReviewState{15, 7, ReviewKind::Review, 0}, 10));
+  ASSERT_TRUE(state.onExit());
+  ASSERT_TRUE(Storage.remove(AnkiDeck::kSavedTermsPath));
+  ASSERT_EQ(AnkiDeck::addSavedTerm("dog", "犬", "Saved terms"), AnkiDeck::AddTermResult::Added);
+  ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+  ASSERT_TRUE(state.open(deck));
+  EXPECT_EQ(state.reviewCount(), 0u);
+  ReviewState read;
+  ASSERT_TRUE(state.read(0, read));
+  EXPECT_EQ(read.kind, ReviewKind::New);
+}
+
+TEST_F(AnkiDeckTest, SavedTermsIgnoreLegacyDeckAndBackup) {
+  for (const char* legacyPath : {"/Anki/Saved terms.cdeck", "/Anki/Saved terms.cdeck.bak"}) {
+    SCOPED_TRACE(legacyPath);
+    ASSERT_EQ(AnkiDeck::addSavedTerm("猫", "cat", "Saved terms"), AnkiDeck::AddTermResult::Added);
+    ASSERT_TRUE(Storage.ensureDirectoryExists("/Anki"));
+    ASSERT_TRUE(Storage.rename(AnkiDeck::kSavedTermsPath, legacyPath));
+    ASSERT_TRUE(AnkiDeck::recoverSavedTerms());
+    EXPECT_FALSE(Storage.exists(AnkiDeck::kSavedTermsPath));
+    EXPECT_TRUE(Storage.exists(legacyPath));
+    ASSERT_EQ(AnkiDeck::addSavedTerm("犬", "dog", "Saved terms"), AnkiDeck::AddTermResult::Added);
+    AnkiDeck deck;
+    ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+    EXPECT_EQ(deck.cardCount(), 1u);
+    EXPECT_TRUE(Storage.exists(legacyPath));
+    ASSERT_TRUE(Storage.remove(AnkiDeck::kSavedTermsPath));
+  }
+}
+
+TEST_F(AnkiDeckTest, SavedTermsUseCurrentPathForReviewCache) {
+  ASSERT_EQ(AnkiDeck::addSavedTerm("猫", "cat", "Saved terms"), AnkiDeck::AddTermResult::Added);
+  AnkiDeck deck;
+  ASSERT_TRUE(deck.load(AnkiDeck::kSavedTermsPath));
+  ASSERT_TRUE(Storage.ensureDirectoryExists("/Anki"));
+  std::filesystem::copy_file(root_ / "decks/Saved terms.cdeck", root_ / "Anki/Saved terms.cdeck");
+  AnkiDeck legacy;
+  ASSERT_TRUE(legacy.load("/Anki/Saved terms.cdeck"));
+  EXPECT_NE(deck.getCachePath(), legacy.getCachePath());
 }

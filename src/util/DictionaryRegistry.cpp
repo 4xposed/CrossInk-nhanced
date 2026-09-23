@@ -458,6 +458,12 @@ void DictionaryRegistry::maybeAutoSelectDefaultDictionary() const {
 
 bool resolveTransientDictionaryLookupRoute(const std::string_view language, const char* bookCachePath,
                                            std::string& starDictPathOut) {
+  // A valid Japanese bundle already wins routing. Avoid enumerating unrelated
+  // StarDict folders (and allocating their catalog) on every word lookup.
+  if (isJapaneseBookLanguage(language) && firstJapaneseVocabularyPairValid()) {
+    starDictPathOut.clear();
+    return true;
+  }
   DictionaryRegistry registry;
   registry.discover(/*autoSelectDefault=*/false);
   const bool available = registry.resolveLookupRoute(language, bookCachePath, starDictPathOut);

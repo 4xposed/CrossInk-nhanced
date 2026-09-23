@@ -1,6 +1,6 @@
+#include <AnkiDeck.h>
+#include "components/TouchUi.h"
 #ifdef SIMULATOR
-
-#include "SimulatorSmokeTest.h"
 
 #include <AnkiDeck.h>
 #include <FsHelpers.h>
@@ -12,11 +12,13 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <chrono>
 #include <exception>
 #include <memory>
 #include <vector>
 
 #include "BookmarkStore.h"
+#include "ClippingStore.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "DeviceCapabilities.h"
@@ -25,14 +27,18 @@
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
 #include "SettingsList.h"
+#include "SimulatorSmokeTest.h"
 #include "activities/ActivityManager.h"
+#include "activities/anki/AnkiReviewActivity.h"
 #include "activities/boot_sleep/SleepCoverAssets.h"
 #include "activities/browser/OpdsBookBrowserActivity.h"
 #include "activities/home/BookActions.h"
+#include "activities/home/FileBrowserActivity.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/reader/BookReadingStats.h"
 #include "activities/reader/BookStatsActivity.h"
 #include "activities/reader/BookStatsView.h"
+#include "activities/reader/EpubReaderActivity.h"
 #include "activities/reader/EpubReaderMenuActivity.h"
 #include "activities/reader/EpubReaderWordLookupActivity.h"
 #include "activities/reader/MangaPrefetch.h"
@@ -41,8 +47,8 @@
 #include "activities/reader/QrDisplayActivity.h"
 #include "activities/reader/ReaderOptionsActivity.h"
 #include "activities/reader/ReaderUtils.h"
-#include "activities/settings/QuickActionsActivity.h"
 #include "activities/settings/LibraryFoldersActivity.h"
+#include "activities/settings/QuickActionsActivity.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/TouchRegistry.h"
 #include "components/UITheme.h"
@@ -50,6 +56,7 @@
 #include "components/UiAppHelpers.h"
 #include "simulator/SimulatorHomeKeyInput.h"
 #include "util/LookupHistory.h"
+#include "util/ScreenshotUtil.h"
 
 extern ActivityManager activityManager;
 extern GfxRenderer renderer;
@@ -122,8 +129,23 @@ class SimulatorSmokeTest {
     Release,
     HomeTap,
     HomeLongPress,
+    WaitForHomeTapDismiss,
+    WaitMilliseconds,
     ConfigureHomeButtonPowerLock,
     WaitForPowerLongPress,
+    WaitForTouchLookup,
+    TouchLookupClose,
+    VerifyLookupStableRedraw,
+    TouchLookupSaveAnki,
+    VerifyLookupSavedAnki,
+    VerifyLookupClipping,
+    VerifyLookupNavigation,
+    HoldConfirmUntilLookupCloses,
+    VerifyLookupSaveCancelled,
+    LookupStorageFailure,
+    EpubManualTouchLookup,
+    TouchReaderWordDown,
+    TouchReaderWordRelease,
     AssertHomeButtonDisabled,
     AssertHomeButtonEnabled,
     AssertTouchscreenDisabled,
@@ -159,6 +181,7 @@ class SimulatorSmokeTest {
     MangaReleaseCompletion,
     MangaAssertPosition,
     MangaLookupReady,
+    MangaTouchLookup,
     MangaAssertScanCache,
     MangaOpenMenu,
     MangaRememberFont,
@@ -214,6 +237,8 @@ class SimulatorSmokeTest {
   uint32_t mangaReaderImageHash = 0;
   ReadingStatsDate mangaStatsStartBefore;
 
+  uint32_t lookupSaveFrameHash = 0;
+  uint32_t lookupContentBeforeSave = 0;
   int touchButtonX = 0;
   int touchButtonY = 0;
   int homeDestination = 0, homeMoves = 0, libraryTabMoves = 0;
@@ -310,6 +335,33 @@ class SimulatorSmokeTest {
     mappedInputManager.setReaderMode(false);
     LOG_INF("SMOKE", "All 25 mixed page gesture combinations passed");
 #endif
+  }
+
+  static void verifyAnkiFontSettings() {
+    const auto fonts = buildReaderFontSettingsList(getSettingsList());
+    const auto setting = std::find_if(fonts.begin(), fonts.end(), [](const SettingInfo& value) {
+      return value.nameId == StrId::STR_ANKI_FRONT_SIZE;
+    });
+    if (setting == fonts.end() || setting->valuePtr != &CrossPointSettings::ankiFontScale ||
+        setting->enumValues.size() != 3) fail("Anki front size missing from font settings");
+    JsonDocument original;
+    SETTINGS.toJson(original);
+    for (uint8_t scale = 1; scale <= 3; ++scale) {
+      SETTINGS.ankiFontScale = scale;
+      JsonDocument saved;
+      SETTINGS.toJson(saved);
+      if (saved["ankiFontScale"].as<uint8_t>() != scale) fail("Anki font size was not serialized");
+      SETTINGS.ankiFontScale = 0;
+      SETTINGS.fromJson(saved.as<JsonVariantConst>());
+      if (SETTINGS.ankiFontScale != scale) fail("Anki font size did not round-trip");
+    }
+    SETTINGS.ankiFontScale = 2;
+    JsonDocument invalid;
+    invalid["ankiFontScale"] = 255;
+    SETTINGS.fromJson(invalid.as<JsonVariantConst>());
+    if (SETTINGS.ankiFontScale != 2) fail("Invalid Anki font size was accepted");
+    SETTINGS.fromJson(original.as<JsonVariantConst>());
+    LOG_INF("SMOKE", "Verified Anki font size menu and persistence");
   }
 
   static void verifyReaderControlsSettings() {
@@ -538,6 +590,47 @@ class SimulatorSmokeTest {
     if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) {
       fail("Render was rejected for %s", name);
     }
+    const bool ankiFront = std::strstr(name, "Anki review opened from Books") != nullptr;
+    if (ankiFront && std::getenv("CROSSINK_SIMULATOR_ANKI_RESUME")) {
+      auto* review = static_cast<AnkiReviewActivity*>(activityManager.currentForSimulatorTest());
+      const uint8_t originalScale = SETTINGS.ankiFontScale;
+      for (const uint8_t scale : {1, 3, 2}) {
+        {
+          RenderLock lock;
+          SETTINGS.ankiFontScale = scale;
+          review->onResume();
+          if (review->simulatorPromptScale() != scale) fail("Anki retained old size after settings return");
+        }
+        if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered)
+          fail("Anki settings return did not render");
+      }
+      {
+        RenderLock lock;
+        SETTINGS.ankiFontScale = originalScale;
+        review->onResume();
+      }
+      LOG_INF("SMOKE", "Verified Anki size changes after settings return");
+    }
+    if (std::getenv("CROSSINK_SIMULATOR_ANKI_CAPTURE") &&
+        (ankiFront || std::strstr(name, "Anki answer revealed"))) {
+      RenderLock lock;
+      bool hasInk = false;
+      const auto* pixels = renderer.getFrameBuffer();
+      const int width = renderer.getDisplayWidth();
+      const int height = renderer.getDisplayHeight();
+      // The physical buffer is landscape; portrait content Y maps to X here.
+      // Exclude the header and rating buttons so chrome cannot hide a blank card.
+      for (int y = height / 8; y < height * 7 / 8 && !hasInk; ++y)
+        for (int x = width / 4; x < width * 2 / 3; ++x)
+          if (!(pixels[y * (width / 8) + x / 8] & (0x80 >> (x % 8)))) {
+            hasInk = true;
+            break;
+          }
+      if (!hasInk) fail("Anki card content is blank");
+      if (!ScreenshotUtil::saveFramebufferAsBmp(ankiFront ? "/anki-front.bmp" : "/anki-answer.bmp", renderer.getFrameBuffer(),
+                                                renderer.getDisplayWidth(), renderer.getDisplayHeight()))
+        fail("Could not capture Anki card");
+    }
   }
 
   void queueStep(const char* name, SmokeStep nextStep, int framesToSettle = 3) {
@@ -579,6 +672,7 @@ class SimulatorSmokeTest {
         }
         verifyUpDownShortcutAvailability();
         verifyReaderControlsSettings();
+        verifyAnkiFontSettings();
         verifyMixedPageGestures();
         {
           JsonDocument original;
@@ -634,13 +728,22 @@ class SimulatorSmokeTest {
         queueStep("Home destination", SmokeStep::HomeMenuVerify, 16);
         break;
       case SmokeStep::HomeMenuVerify: {
-        static constexpr const char* names[] = {"Library", "AnkiBrowser", "OpdsServerList", "NetworkModeSelection",
-                                                "Tools",   "Settings"};
+        const char* names[] = {"Library",
+                               "AnkiBrowser",
+                               "OpdsServerList",
+                               "NetworkModeSelection",
+                               TouchUi::enabled(mappedInputManager) ? "FileBrowser" : "Tools",
+                               "Settings"};
         if (!activityManager.isCurrentActivityNamed(names[homeDestination]))
           fail("Home destination %d did not open %s", homeDestination, names[homeDestination]);
         LOG_INF("SMOKE", "Verified home destination %s", names[homeDestination]);
+        if (homeDestination == 1) {
+          const auto* browser = static_cast<FileBrowserActivity*>(activityManager.currentForSimulatorTest());
+          if (browser->directoryForSimulatorTest() != "/decks") fail("Anki did not open the deck upload directory");
+          LOG_INF("SMOKE", "Verified Anki upload directory");
+        }
         if (homeDestination == 0) {
-          libraryTabMoves = 2;
+          libraryTabMoves = 1;  // Articles is the final populated category for every fixture type.
           step = SmokeStep::LibraryArticleTab;
           break;
         }
@@ -652,11 +755,11 @@ class SimulatorSmokeTest {
         break;
       }
       case SmokeStep::LibraryArticleTab:
-        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Right);
+        mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Left);
         step = SmokeStep::LibraryArticleTabRelease;
         break;
       case SmokeStep::LibraryArticleTabRelease:
-        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Right);
+        mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Left);
         queueStep("Library category", --libraryTabMoves ? SmokeStep::LibraryArticleTab : SmokeStep::LibraryFocusBooks);
         break;
       case SmokeStep::LibraryFocusBooks:
@@ -989,6 +1092,25 @@ class SimulatorSmokeTest {
 
   void addAnkiTap(const MappedInputManager::Button button) {
 #if CROSSINK_APP_CAP_TOUCH
+    if (TouchUi::enabled(mappedInputManager) && isAnkiDeckSmokeBook()) {
+      int top, right, bottom, left;
+      renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+      const int width = renderer.getScreenWidth() - left - right;
+      const int height = renderer.getScreenHeight() - top - bottom;
+      const int gap = std::max(8, width / 45);
+      const int buttonHeight = std::max(48, std::min(width * 16 / 100, height / 10));
+      const int progressHeight = renderer.getLineHeight(UI_10_FONT_ID) + gap * 2;
+      // Show answer spans the full row; Good is the lower-left rating in the 2x2 grid.
+      int x = left + width / 4;
+      int y = renderer.getScreenHeight() - bottom - progressHeight - gap - buttonHeight / 2;
+      if (button == MappedInputManager::Button::Back) {
+        x = left + std::max(12, width / 22) + 20;
+        y = TouchUi::statusHeight(renderer) + 26;
+      }
+      inputScript.push_back(touchDown(x, y));
+      inputScript.push_back(touchRelease(x, y));
+      return;
+    }
     if (mappedInputManager.hasTouch()) {
       inputScript.push_back(touchButtonDown(button));
       inputScript.push_back(touchButtonRelease(button));
@@ -1052,7 +1174,10 @@ class SimulatorSmokeTest {
     inputScript.push_back(assertAnkiNextCandidate());
     inputScript.push_back(openBooks());
     inputScript.push_back(render("Books reopened for Anki", 4));
-    addAnkiTap(MappedInputManager::Button::Confirm);
+    if (TouchUi::enabled(mappedInputManager))
+      addTap(MappedInputManager::Button::Confirm);
+    else
+      addAnkiTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Anki review reopened on next card", 8));
     inputScript.push_back(assertActivity("AnkiReview"));
     addAnkiTap(MappedInputManager::Button::Back);
@@ -1359,9 +1484,23 @@ class SimulatorSmokeTest {
     }
   }
 
+  void addMangaFullMenu() {
+    if (TouchUi::enabled(mappedInputManager))
+      addMangaTouchMenuGesture();
+    else
+      inputScript.push_back({ScriptActionType::MangaOpenMenu, {}, nullptr, 0, 0, 0});
+    inputScript.push_back(render("Manga menu opened", 3));
+    if (TouchUi::enabled(mappedInputManager)) {
+      for (int index = 0; index < 4; ++index) addTap(MappedInputManager::Button::Down);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Manga complete menu opened through More", 3));
+    }
+  }
+
   void buildMangaInputScript() {
     inputScript.clear();
     scriptIndex = 0;
+    inputCompletionStep = SmokeStep::Done;
     if (std::getenv("CROSSINK_SIMULATOR_MANGA_ACTIVE_EVENTS")) {
       buildMangaActiveEvents();
       return;
@@ -1463,14 +1602,40 @@ class SimulatorSmokeTest {
     if (mappedInputManager.hasTouch()) {
       SETTINGS.touchReaderControls = 1;
       SETTINGS.pageTurnGesture = CrossPointSettings::TAP_AND_SWIPE;
-      inputScript.push_back(touchDown(renderer.getScreenWidth() * 5 / 6, renderer.getScreenHeight() / 2));
-      inputScript.push_back(touchRelease(renderer.getScreenWidth() * 5 / 6, renderer.getScreenHeight() / 2));
+      const int nextX =
+          TouchUi::enabled(mappedInputManager) ? renderer.getScreenWidth() / 6 : renderer.getScreenWidth() * 5 / 6;
+      inputScript.push_back(touchDown(nextX, renderer.getScreenHeight() / 2));
+      inputScript.push_back(touchRelease(nextX, renderer.getScreenHeight() / 2));
     } else
 #endif
     {
       addTap(MappedInputManager::Button::PageForward);
     }
     inputScript.push_back(render("Manga first panel from overview", 4));
+#if CROSSINK_APP_CAP_TOUCH
+    if (TouchUi::enabled(mappedInputManager)) {
+      const int w = renderer.getScreenWidth(), y = renderer.getScreenHeight() / 2;
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(touchDown(w * 5 / 6, y));
+      inputScript.push_back(touchRelease(w * 5 / 6, y));
+      inputScript.push_back(render("Manga right tap returns to overview", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, -1});
+      inputScript.push_back(touchDown(w / 3, y));
+      inputScript.push_back(touchMove(w * 2 / 3, y));
+      inputScript.push_back(touchRelease(w * 2 / 3, y));
+      inputScript.push_back(render("Manga right swipe advances to first panel", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(touchDown(w * 2 / 3, y));
+      inputScript.push_back(touchMove(w / 3, y));
+      inputScript.push_back(touchRelease(w / 3, y));
+      inputScript.push_back(render("Manga left swipe returns to overview", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, -1});
+      inputScript.push_back(touchDown(w / 6, y));
+      inputScript.push_back(touchRelease(w / 6, y));
+      inputScript.push_back(render("Manga left tap advances to first panel", 4));
+      inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+    }
+#endif
     if (std::getenv("CROSSINK_SIMULATOR_MANGA_OCR")) {
       for (const int scope : {-1, 0}) {
         inputScript.push_back({ScriptActionType::MangaBoundaryJump, {}, nullptr, 0, 0, scope});
@@ -1502,7 +1667,9 @@ class SimulatorSmokeTest {
       };
       const auto openMenuRow = [this](int index) {
 #if CROSSINK_APP_CAP_TOUCH
-        if (mappedInputManager.hasTouch()) {
+        if (TouchUi::enabled(mappedInputManager)) {
+          addMangaFullMenu();
+        } else if (mappedInputManager.hasTouch()) {
           const int w = renderer.getScreenWidth(), h = renderer.getScreenHeight();
           const int start = mappedInputManager.hasHomeKey() ? h - 8 : 8;
           const int end = mappedInputManager.hasHomeKey() ? h * 3 / 4 : h / 4;
@@ -1531,7 +1698,10 @@ class SimulatorSmokeTest {
       inputScript.push_back(
           {ScriptActionType::MangaAssertScanCache, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
 #if CROSSINK_APP_CAP_TOUCH
-      if (mappedInputManager.hasTouch()) {
+      if (TouchUi::enabled(mappedInputManager)) {
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 9, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 4, 0});
+      } else if (mappedInputManager.hasTouch()) {
         const auto safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
         const int line = renderer.getLineHeight(SETTINGS.getReaderFontId());
         const int cell = std::max(line, renderer.getTextWidth(SETTINGS.getReaderFontId(), "W"));
@@ -1590,6 +1760,49 @@ class SimulatorSmokeTest {
       inputScript.push_back(render("Manga image restored after OCR child", 4));
       inputScript.push_back(
           {ScriptActionType::MangaAssertPosition, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+#if CROSSINK_APP_CAP_TOUCH
+      if (TouchUi::enabled(mappedInputManager)) {
+        // Short tap opens the estimated term directly; arrows stay within its bubble.
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 2, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 1, 0});
+        inputScript.push_back({ScriptActionType::MangaLookupReady, {}, "text", 0, 1, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 5, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 6, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 4, 0});
+        inputScript.push_back({ScriptActionType::MangaLookupReady, {}, "Reader", 0, 0, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 3, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 4, 0});
+        inputScript.push_back({ScriptActionType::MangaLookupReady, {}, "text", 0, 1, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 7, 0});
+        inputScript.push_back({ScriptActionType::TouchLookupClose, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(render("Manga touch lookup returns to held panel", 4));
+        inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+        // Preserve a bubble tap while worker completion is deliberately held.
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 10, 0});
+        inputScript.push_back({ScriptActionType::MangaHoldConsumption, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::MangaQueueCurrentSource, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::MangaWaitCompletion, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 11, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 2, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 12, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 13, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 1, 0});
+        inputScript.push_back({ScriptActionType::MangaLookupReady, {}, "text", 0, 1, 0});
+        inputScript.push_back({ScriptActionType::TouchLookupClose, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(render("Manga deferred bubble tap returns to panel", 4));
+        inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+        // Holding remains supported and closing still restores the image.
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 1, 0});
+        inputScript.push_back({ScriptActionType::MangaTouchLookup, {}, nullptr, 0, 2, 0});
+        inputScript.push_back({ScriptActionType::MangaLookupReady, {}, "text", 0, 1, 0});
+        inputScript.push_back({ScriptActionType::TouchLookupClose, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(render("Manga direct hold lookup returns to panel", 4));
+        inputScript.push_back({ScriptActionType::MangaAssertPosition, {}, nullptr, 0, 0, 0});
+        if (std::getenv("CROSSINK_SIMULATOR_MANGA_TOUCH_LOOKUP_ONLY")) return;
+      }
+#endif
       openMenuRow(9);
       inputScript.push_back(render("Manga lookup history", 4));
       inputScript.push_back(assertActivity("LookedUpWords"));
@@ -1621,7 +1834,11 @@ class SimulatorSmokeTest {
           {ScriptActionType::MangaReleaseCompletion, MappedInputManager::Button::Confirm, nullptr, 0, 0, 0});
       selectRegion();
       inputScript.push_back(render("Manga lookup after repeated pending Confirm", 4));
-      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back, "Reader", 0, 0, 0});
+      // X4's hold/tap regression last selected text; the verified scan cache
+      // must restore that exact selection. Legacy input last selected Reader.
+      const bool restoreTouchTerm = TouchUi::enabled(mappedInputManager);
+      inputScript.push_back({ScriptActionType::MangaLookupReady, MappedInputManager::Button::Back,
+                             restoreTouchTerm ? "text" : "Reader", 0, restoreTouchTerm ? 1 : 0, 0});
       inputScript.push_back(
           {ScriptActionType::MangaForceLookupExit, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
       inputScript.push_back(render("Manga forced lookup exit", 4));
@@ -1680,7 +1897,10 @@ class SimulatorSmokeTest {
     addTap(MappedInputManager::Button::Back);
     inputScript.push_back(render("Manga overview restored from panel", 4));
     if (std::getenv("CROSSINK_SIMULATOR_MANGA_OCR")) {
-      addTap(MappedInputManager::Button::Confirm);
+      if (TouchUi::enabled(mappedInputManager))
+        addMangaFullMenu();
+      else
+        addTap(MappedInputManager::Button::Confirm);
       for (int i = 0; i < 8; ++i) addTap(MappedInputManager::Button::Down);
       addTap(MappedInputManager::Button::Confirm);
       inputScript.push_back(render("Manga overview region selection", 4));
@@ -1697,7 +1917,7 @@ class SimulatorSmokeTest {
     inputScript.push_back({ScriptActionType::MangaReadingDwell, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
     inputScript.push_back(assertActivity("MangaReader"));
 
-    addTap(MappedInputManager::Button::Confirm);
+    addMangaFullMenu();
     addTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Manga chapter list opened", 4));
     inputScript.push_back(assertActivity("MangaReaderSelection"));
@@ -1705,13 +1925,13 @@ class SimulatorSmokeTest {
     inputScript.push_back(render("Manga reader restored after chapter cancel", 4));
     inputScript.push_back(assertActivity("MangaReader"));
 
-    addTap(MappedInputManager::Button::Confirm);
+    addMangaFullMenu();
     for (int index = 0; index < 3; ++index) addTap(MappedInputManager::Button::Down);
     addTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Manga bookmark toggled", 4));
     inputScript.push_back({ScriptActionType::AssertMangaBookmark, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
     inputScript.push_back(assertActivity("MangaReader"));
-    addTap(MappedInputManager::Button::Confirm);
+    addMangaFullMenu();
     for (int index = 0; index < 2; ++index) addTap(MappedInputManager::Button::Down);
     addTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Manga bookmark list opened", 4));
@@ -1720,7 +1940,7 @@ class SimulatorSmokeTest {
     inputScript.push_back(render("Manga reader restored after bookmark cancel", 4));
     inputScript.push_back(assertActivity("MangaReader"));
 
-    addTap(MappedInputManager::Button::Confirm);
+    addMangaFullMenu();
     addTap(MappedInputManager::Button::Down);
     addTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Manga percent selector opened", 4));
@@ -1732,12 +1952,12 @@ class SimulatorSmokeTest {
     inputScript.push_back(render("Manga manual refresh after child menu", 4));
     inputScript.push_back(assertActivity("MangaReader"));
 
-    addTap(MappedInputManager::Button::Confirm);
+    addMangaFullMenu();
     for (int index = 0; index < 4; ++index) addTap(MappedInputManager::Button::Down);
     addTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Manga panels-only mode enabled", 4));
     inputScript.push_back(assertActivity("MangaReader"));
-    inputScript.push_back({ScriptActionType::MangaOpenMenu, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+    addMangaFullMenu();
     for (int index = 0; index < 5; ++index) addTap(MappedInputManager::Button::Down);
     addTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Manga panel rotation disabled", 4));
@@ -1857,13 +2077,76 @@ class SimulatorSmokeTest {
         inputScript.push_back(touchRelease(width * 5 / 6, height / 2));
         inputScript.push_back(render("Reader after touch page forward", 4));
       }
-      inputScript.push_back(setLookupPowerShortcut());
-      addTap(MappedInputManager::Button::Power);
-      inputScript.push_back(render("Word Lookup opened from configured shortcut", 8));
+      if (std::getenv("CROSSINK_SIMULATOR_LOOKUP_REGRESSION") && !TouchUi::enabled(mappedInputManager)) {
+        // Isolate panel behavior from global shortcut release/hold routing.
+        inputScript.push_back({ScriptActionType::MangaShortcutLookup, {}, nullptr, 0, 0, 0});
+      } else if (TouchUi::enabled(mappedInputManager)) {
+        inputScript.push_back({ScriptActionType::TouchReaderWordDown, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::WaitMilliseconds, {}, nullptr, 0, 600, 0});
+        inputScript.push_back({ScriptActionType::TouchReaderWordRelease, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::WaitForTouchLookup, {}, nullptr, 0, 0, 0});
+      } else {
+        inputScript.push_back(setLookupPowerShortcut());
+        addTap(MappedInputManager::Button::Power);
+      }
+      inputScript.push_back(render("Word Lookup opened from reader input", 8));
       inputScript.push_back(assertActivity("EpubReaderWordLookup"));
-      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back({ScriptActionType::VerifyLookupStableRedraw, {}, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::TouchLookupSaveAnki, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Dictionary term added to Anki", 4));
+      inputScript.push_back({ScriptActionType::VerifyLookupSavedAnki, {}, nullptr, 0, 1, 0});
+      inputScript.push_back({ScriptActionType::TouchLookupSaveAnki, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Dictionary duplicate term kept once", 4));
+      inputScript.push_back({ScriptActionType::VerifyLookupSavedAnki, {}, nullptr, 0, 2, 0});
+      inputScript.push_back({ScriptActionType::LookupStorageFailure, {}, nullptr, 0, 1, 0});
+      inputScript.push_back({ScriptActionType::TouchLookupSaveAnki, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Dictionary Anki save failure feedback", 4));
+      inputScript.push_back({ScriptActionType::VerifyLookupSavedAnki, {}, nullptr, 0, 3, 0});
+      inputScript.push_back({ScriptActionType::LookupStorageFailure, {}, nullptr, 0, 0, 0});
+      if (TouchUi::enabled(mappedInputManager))
+        inputScript.push_back({ScriptActionType::TouchLookupClose, {}, nullptr, 0, 0, 0});
+      else
+        addTap(MappedInputManager::Button::Back);
       inputScript.push_back(render("Reader restored after shortcut lookup", 4));
       inputScript.push_back(assertActivity("EpubReader"));
+      if (std::getenv("CROSSINK_SIMULATOR_LOOKUP_REGRESSION")) {
+        if (TouchUi::enabled(mappedInputManager)) {
+          inputScript.push_back({ScriptActionType::TouchReaderWordDown, {}, nullptr, 0, 0, 0});
+          inputScript.push_back({ScriptActionType::WaitMilliseconds, {}, nullptr, 0, 600, 0});
+          inputScript.push_back({ScriptActionType::TouchReaderWordRelease, {}, nullptr, 0, 0, 0});
+          inputScript.push_back({ScriptActionType::WaitForTouchLookup, {}, nullptr, 0, 0, 0});
+        } else {
+          inputScript.push_back({ScriptActionType::MangaShortcutLookup, {}, nullptr, 0, 0, 0});
+        }
+        inputScript.push_back(render("Dictionary reopened for separate clipping action", 8));
+        inputScript.push_back({ScriptActionType::TouchLookupSaveAnki, {}, nullptr, 0, 1, 0});
+        inputScript.push_back(render("Reader after dictionary clipping", 8));
+        inputScript.push_back({ScriptActionType::VerifyLookupClipping, {}, nullptr, 0, 0, 0});
+        return;
+      }
+      if (TouchUi::enabled(mappedInputManager)) {
+        // Manual Lookup must wait for the finger, then select the actual second
+        // candidate rather than restoring the previous hold's cursor.
+        inputScript.push_back(touchDown(width / 2, height / 3));
+        inputScript.push_back(touchMove(width / 2, height / 2));
+        inputScript.push_back(touchRelease(width / 2, height / 2));
+        inputScript.push_back(render("Reader Menu opened for manual touch lookup", 4));
+        inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
+        // More is the centre tab; Lookup is its first row when the fixture
+        // dictionary is available, matching the drawer geometry exercised below.
+        inputScript.push_back(touchDown(width / 2, height - 28));
+        inputScript.push_back(touchRelease(width / 2, height - 28));
+        inputScript.push_back(render("Reader More tab opened for manual touch lookup", 3));
+        inputScript.push_back(touchDown(width / 2, height / 2 + 31));
+        inputScript.push_back(touchRelease(width / 2, height / 2 + 31));
+        inputScript.push_back({ScriptActionType::EpubManualTouchLookup, {}, nullptr, 0, 0, 0});
+        inputScript.push_back({ScriptActionType::EpubManualTouchLookup, {}, nullptr, 0, 1, 0});
+        inputScript.push_back({ScriptActionType::EpubManualTouchLookup, {}, nullptr, 0, 2, 0});
+        inputScript.push_back(render("Manual EPUB lookup selected tapped word", 8));
+        inputScript.push_back({ScriptActionType::TouchLookupClose, {}, nullptr, 0, 0, 0});
+        inputScript.push_back(render("Reader restored after manual touch lookup", 4));
+        inputScript.push_back(assertActivity("EpubReader"));
+      }
       inputScript.push_back(resetPowerShortcut());
       if (mappedInputManager.hasHomeKey()) {
         // Reader long-Power actions fire at the hold threshold. Their release
@@ -1881,119 +2164,57 @@ class SimulatorSmokeTest {
         inputScript.push_back(assertHomeButtonEnabled());
         inputScript.push_back(release(MappedInputManager::Button::Power));
         inputScript.push_back(assertHomeButtonEnabled());
+        // Let the one-second Power-toggle confirmation expire while the reader
+        // is active. Overlays otherwise postpone its dismissal until the Home
+        // hold, whose one-frame input can then be consumed by toast cleanup.
+        inputScript.push_back({ScriptActionType::WaitMilliseconds, {}, nullptr, 0, 1100, 0});
 
-        // X4 Pro reserves the top-edge swipe for its frontlight overlay and
-        // moves the reader menu to the bottom edge.
-        inputScript.push_back(touchDown(width / 2, 8));
-        inputScript.push_back(touchMove(width / 2, height / 4));
-        inputScript.push_back(touchRelease(width / 2, height / 4));
-        inputScript.push_back(render("Frontlight Panel opened from touch gesture", 4));
-        inputScript.push_back(assertActivity("FrontlightPanel"));
-        const Rect header = TouchHeaderBackButton::headerRect(renderer, mappedInputManager);
-        inputScript.push_back(touchDown(header.x + header.width - 32, header.y + header.height / 2));
-        inputScript.push_back(touchRelease(header.x + header.width - 32, header.y + header.height / 2));
-        inputScript.push_back(render("Home opened by Frontlight Panel Home button", 4));
-        inputScript.push_back(assertActivity("Home"));
-        inputScript.push_back(openSmokeBook());
-        inputScript.push_back(render("Reader reopened after Frontlight Panel Home button", 8));
+        // X4 Pro distinguishes the body menu drag from the global top-edge Light drag.
+        inputScript.push_back(touchDown(width / 2, height / 2));
+        inputScript.push_back(touchRelease(width / 2, height / 2));
+        inputScript.push_back(render("Reader centre tap stays in reading", 4));
         inputScript.push_back(assertActivity("EpubReader"));
-        inputScript.push_back(touchDown(width / 2, 8));
-        inputScript.push_back(touchMove(width / 2, height / 4));
-        inputScript.push_back(touchRelease(width / 2, height / 4));
-        inputScript.push_back(render("Frontlight Panel reopened after Home button", 4));
-        inputScript.push_back(assertActivity("FrontlightPanel"));
-        inputScript.push_back(touchDown(20, height / 3));
-        inputScript.push_back(touchMove(20, 8));
-        inputScript.push_back(touchRelease(20, 8));
-        inputScript.push_back(render("Frontlight Panel remains open after in-drawer swipe up", 4));
-        inputScript.push_back(assertActivity("FrontlightPanel"));
-        // X4 Pro's portrait frontlight sheet ends just below mid-screen; this
-        // point lands in its centered 29 px handle band.
-        inputScript.push_back(touchDown(width / 2, height * 21 / 40));
-        inputScript.push_back(touchMove(width / 2, 8));
-        inputScript.push_back(touchRelease(width / 2, 8));
-        inputScript.push_back(render("Reader restored after Frontlight Panel handle drag up", 4));
-        inputScript.push_back(assertActivity("EpubReader"));
-        inputScript.push_back(touchDown(width / 2, 8));
-        inputScript.push_back(touchMove(width / 2, height / 4));
-        inputScript.push_back(touchRelease(width / 2, height / 4));
-        inputScript.push_back(render("Frontlight Panel reopened from touch gesture", 4));
-        inputScript.push_back(assertActivity("FrontlightPanel"));
-        // The fourth action-bar slot opens Global Settings through the real
-        // FrontlightPanelActivity callback path.
-        inputScript.push_back(touchDown(width * 7 / 10, height * 15 / 32));
-        inputScript.push_back(touchRelease(width * 7 / 10, height * 15 / 32));
-        inputScript.push_back(render("Global Settings opened from Frontlight Panel", 4));
-        inputScript.push_back(assertActivity("Settings"));
-        inputScript.push_back(touchDown(width / 2, height * 3 / 4));
+        inputScript.push_back(touchDown(width / 2, height / 3));
         inputScript.push_back(touchMove(width / 2, height / 2));
         inputScript.push_back(touchRelease(width / 2, height / 2));
-        inputScript.push_back(render("Global Settings remains open after interior swipe up", 4));
-        inputScript.push_back(assertActivity("Settings"));
+        inputScript.push_back(render("Reader Menu opened by body downward drag", 4));
+        inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
+        inputScript.push_back(touchDown(width / 2, 8));
+        inputScript.push_back(touchMove(width / 2, height / 4));
+        inputScript.push_back(touchRelease(width / 2, height / 4));
+        inputScript.push_back(render("Global Light opened over Reader Menu", 4));
+        inputScript.push_back(assertActivity("FrontlightPanel"));
+        addTap(MappedInputManager::Button::Back);
+        inputScript.push_back(render("Reader Menu restored after Light", 4));
+        inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
         inputScript.push_back(touchDown(width / 2, height - 8));
         inputScript.push_back(touchMove(width / 2, height * 3 / 4));
         inputScript.push_back(touchRelease(width / 2, height * 3 / 4));
-        inputScript.push_back(render("Reader restored after Settings bottom-edge swipe", 4));
+        inputScript.push_back(render("Upward drag dismisses Reader Menu", 4));
         inputScript.push_back(assertActivity("EpubReader"));
         inputScript.push_back(touchDown(width / 2, 8));
         inputScript.push_back(touchMove(width / 2, height / 4));
         inputScript.push_back(touchRelease(width / 2, height / 4));
-        inputScript.push_back(render("Frontlight Panel reopened after Global Settings", 4));
+        inputScript.push_back(render("Reader top-edge drag opens Light", 4));
         inputScript.push_back(assertActivity("FrontlightPanel"));
-        inputScript.push_back(touchDown(width * 3 / 10, height * 3 / 8));
-        inputScript.push_back(touchRelease(width * 3 / 10, height * 3 / 8));
-        inputScript.push_back(render("Sync dialog opened from Frontlight Panel", 4));
-        inputScript.push_back(assertActivity("FrontlightPanel"));
-        inputScript.push_back(touchDown(width / 2, height - 60));
-        inputScript.push_back(touchRelease(width / 2, height - 60));
-        inputScript.push_back(render("Reader restored after dismissing Frontlight sync dialog", 4));
-        inputScript.push_back(assertActivity("EpubReader"));
-        inputScript.push_back(homeLongPress());
-        inputScript.push_back(render("Reader Menu opened from simulated Home key hold", 4));
-        inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
-        inputScript.push_back(touchDown(width / 2, height / 2 + 24));
-        inputScript.push_back(touchRelease(width / 2, height / 2 + 24));
-        inputScript.push_back(render("Reader Font opened from touch reader menu", 4));
-        inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
-        inputScript.push_back(homeTap());
-        inputScript.push_back(render("Reader Menu root restored by simulated Home key tap", 8));
-        inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
-        inputScript.push_back(homeTap());
-        inputScript.push_back(render("Reader restored by simulated Home key tap at drawer root", 8));
-        inputScript.push_back(assertActivity("EpubReader"));
-        inputScript.push_back(homeLongPress());
-        inputScript.push_back(render("Reader Menu reopened from simulated Home key hold", 4));
-        inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
-        inputScript.push_back(touchDown(width / 2, height * 3 / 4));
-        inputScript.push_back(touchMove(width / 2, height - 8));
-        inputScript.push_back(touchRelease(width / 2, height - 8));
-        inputScript.push_back(render("Reader Menu remains open after in-drawer swipe down", 4));
-        inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
-        inputScript.push_back(touchDown(width / 2, height / 2 - 14));
-        inputScript.push_back(touchMove(width / 2, height - 8));
-        inputScript.push_back(touchRelease(width / 2, height - 8));
-        inputScript.push_back(render("Reader restored after Reader Menu handle drag down", 4));
+        addTap(MappedInputManager::Button::Back);
+        inputScript.push_back(render("Reader restored after Light", 4));
         inputScript.push_back(assertActivity("EpubReader"));
         inputScript.push_back(disableReaderTouch());
         inputScript.push_back(homeLongPress());
-        inputScript.push_back(render("Reader Menu opened from Home key hold with touch disabled", 4));
+        inputScript.push_back(render("Home hold opens menu with reader touch disabled", 4));
         inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
-        inputScript.push_back(touchDown(width / 2, height / 4));
-        inputScript.push_back(touchRelease(width / 2, height / 4));
-        inputScript.push_back(render("Reader restored after Home key menu with touch disabled", 4));
-        inputScript.push_back(assertActivity("EpubReader"));
         inputScript.push_back(homeTap());
-        inputScript.push_back(render("Home opened from simulated Home key tap", 8));
-        inputScript.push_back(assertActivity("Home"));
-        inputScript.push_back(enableReaderTouch());
-        inputScript.push_back(openSmokeBook());
-        inputScript.push_back(render("Reader reopened after simulated Home key tap", 8));
+        inputScript.push_back(
+            {ScriptActionType::WaitForHomeTapDismiss, MappedInputManager::Button::Back, nullptr, 0, 0, 0});
+        inputScript.push_back(render("Home tap dismisses reader menu after double-tap window", 3));
         inputScript.push_back(assertActivity("EpubReader"));
-        inputScript.push_back(touchDown(width / 2, height - 8));
-        inputScript.push_back(touchMove(width / 2, height * 3 / 4));
-        inputScript.push_back(touchRelease(width / 2, height * 3 / 4));
+        inputScript.push_back(enableReaderTouch());
+        inputScript.push_back(touchDown(width / 2, height / 3));
+        inputScript.push_back(touchMove(width / 2, height / 2));
+        inputScript.push_back(touchRelease(width / 2, height / 2));
       } else {
-        // Sticky uses the same vertical gesture split as X4 Pro: swipe down
+        // Sticky retains its vertical gesture split: swipe down
         // opens reader details/actions and swipe up opens the bottom menu.
         inputScript.push_back(touchDown(width / 2, 8));
         inputScript.push_back(touchMove(width / 2, height / 4));
@@ -2030,18 +2251,19 @@ class SimulatorSmokeTest {
       const int drawerTop = height / 2;
       constexpr int rootRowStep = 60;
       constexpr int rootRowCenterOffset = 31;
+      // The installed fixture dictionary adds Lookup and History before Chapter/Percent/Auto.
       inputScript.push_back(touchDown(moreTabX, tabY));
       inputScript.push_back(touchRelease(moreTabX, tabY));
       inputScript.push_back(render("Touch Reader Menu More tab", 3));
-      inputScript.push_back(touchDown(width / 2, drawerTop + rootRowStep + rootRowCenterOffset));
-      inputScript.push_back(touchRelease(width / 2, drawerTop + rootRowStep + rootRowCenterOffset));
+      inputScript.push_back(touchDown(width / 2, drawerTop + rootRowStep * 3 + rootRowCenterOffset));
+      inputScript.push_back(touchRelease(width / 2, drawerTop + rootRowStep * 3 + rootRowCenterOffset));
       inputScript.push_back(render("Touch Reader Go to Percent pane", 4));
       inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
       inputScript.push_back(touchDown(20, drawerTop + 26));
       inputScript.push_back(touchRelease(20, drawerTop + 26));
       inputScript.push_back(render("Touch Reader More tab restored", 3));
-      inputScript.push_back(touchDown(width / 2, drawerTop + rootRowStep * 2 + rootRowCenterOffset));
-      inputScript.push_back(touchRelease(width / 2, drawerTop + rootRowStep * 2 + rootRowCenterOffset));
+      inputScript.push_back(touchDown(width / 2, drawerTop + rootRowStep * 4 + rootRowCenterOffset));
+      inputScript.push_back(touchRelease(width / 2, drawerTop + rootRowStep * 4 + rootRowCenterOffset));
       inputScript.push_back(render("Touch Reader Auto Page Turn pane", 4));
       inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
       inputScript.push_back(touchDown(20, drawerTop + 26));
@@ -2057,10 +2279,11 @@ class SimulatorSmokeTest {
       inputScript.push_back(render("Reader restored after drawer handle tap", 4));
       inputScript.push_back(assertActivity("EpubReader"));
 
-      inputScript.push_back(touchDown(width / 2, height - 8));
-      inputScript.push_back(touchMove(width / 2, height * 3 / 4));
-      inputScript.push_back(touchRelease(width / 2, height * 3 / 4));
-      inputScript.push_back(render("Reader Menu reopened for bottom-edge Home gesture", 4));
+      const bool x4Touch = TouchUi::enabled(mappedInputManager);
+      inputScript.push_back(touchDown(width / 2, x4Touch ? height / 3 : height - 8));
+      inputScript.push_back(touchMove(width / 2, x4Touch ? height / 2 : height * 3 / 4));
+      inputScript.push_back(touchRelease(width / 2, x4Touch ? height / 2 : height * 3 / 4));
+      inputScript.push_back(render("Reader Menu reopened for bottom-edge gesture", 4));
       inputScript.push_back(assertActivity("EpubReaderTouchMenu"));
       inputScript.push_back(touchDown(width / 2, height * 3 / 4));
       inputScript.push_back(touchMove(width / 2, height / 2 + 8));
@@ -2070,8 +2293,8 @@ class SimulatorSmokeTest {
       inputScript.push_back(touchDown(width / 2, height - 8));
       inputScript.push_back(touchMove(width / 2, height * 3 / 4));
       inputScript.push_back(touchRelease(width / 2, height * 3 / 4));
-      inputScript.push_back(render("Home opened from Reader Menu bottom-edge swipe", 6));
-      inputScript.push_back(assertActivity("Home"));
+      inputScript.push_back(render("Reader Menu bottom-edge upward gesture", 6));
+      inputScript.push_back(assertActivity(x4Touch ? "EpubReader" : "Home"));
       return;
     }
 #endif
@@ -2089,10 +2312,59 @@ class SimulatorSmokeTest {
     addTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Word Lookup opened from Reader Menu", 8));
     inputScript.push_back(assertActivity("EpubReaderWordLookup"));
+    inputScript.push_back({ScriptActionType::VerifyLookupStableRedraw, {}, nullptr, 0, 0, 0});
+    inputScript.push_back({ScriptActionType::TouchLookupSaveAnki, {}, nullptr, 0, 0, 0});
+    addTap(MappedInputManager::Button::Right);
+    inputScript.push_back(render("Dictionary short Right navigation", 8));
+    inputScript.push_back({ScriptActionType::VerifyLookupNavigation, {}, nullptr, 0, 1, 0});
+    addTap(MappedInputManager::Button::Left);
+    inputScript.push_back(render("Dictionary short Left restores original selection", 8));
+    inputScript.push_back({ScriptActionType::VerifyLookupNavigation, {}, nullptr, 0, 0, 0});
+    for (int feedback : {1, 2, 3}) {
+      if (feedback == 3) inputScript.push_back({ScriptActionType::LookupStorageFailure, {}, nullptr, 0, 1, 0});
+      inputScript.push_back({ScriptActionType::TouchLookupSaveAnki, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(press(MappedInputManager::Button::Right));
+      inputScript.push_back({ScriptActionType::WaitMilliseconds, {}, nullptr, 0, 700, 0});
+      inputScript.push_back(release(MappedInputManager::Button::Right));
+      inputScript.push_back(render("Dictionary save options from physical button", 4));
+      inputScript.push_back(assertActivity("DictionarySave"));
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Dictionary Anki feedback from physical button", 4));
+      inputScript.push_back({ScriptActionType::VerifyLookupSavedAnki, {}, nullptr, 0, feedback, 0});
+      if (feedback == 3) inputScript.push_back({ScriptActionType::LookupStorageFailure, {}, nullptr, 0, 0, 0});
+    }
+    inputScript.push_back({ScriptActionType::TouchLookupSaveAnki, {}, nullptr, 0, 0, 0});
+    inputScript.push_back(press(MappedInputManager::Button::Right));
+    inputScript.push_back({ScriptActionType::WaitMilliseconds, {}, nullptr, 0, 700, 0});
+    inputScript.push_back(release(MappedInputManager::Button::Right));
+    inputScript.push_back(render("Dictionary save options before cancel", 4));
+    inputScript.push_back(assertActivity("DictionarySave"));
+    addTap(MappedInputManager::Button::Back);
+    inputScript.push_back(render("Dictionary restored after cancelling save options", 4));
+    inputScript.push_back({ScriptActionType::VerifyLookupSaveCancelled, {}, nullptr, 0, 0, 0});
 
     addTap(MappedInputManager::Button::Back);
     inputScript.push_back(render("Reader restored after menu lookup", 4));
     inputScript.push_back(assertActivity("EpubReader"));
+    if (std::getenv("CROSSINK_SIMULATOR_LOOKUP_REGRESSION")) {
+      inputScript.push_back({ScriptActionType::MangaShortcutLookup, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Dictionary reopened for clipping option", 8));
+      inputScript.push_back(press(MappedInputManager::Button::Right));
+      inputScript.push_back({ScriptActionType::WaitMilliseconds, {}, nullptr, 0, 700, 0});
+      inputScript.push_back(release(MappedInputManager::Button::Right));
+      inputScript.push_back(render("Dictionary save options for clipping", 4));
+      inputScript.push_back(assertActivity("DictionarySave"));
+      addTap(MappedInputManager::Button::Right);
+      addTap(MappedInputManager::Button::Confirm);
+      inputScript.push_back(render("Reader after clipping option", 8));
+      inputScript.push_back({ScriptActionType::VerifyLookupClipping, {}, nullptr, 0, 0, 0});
+      inputScript.push_back({ScriptActionType::MangaShortcutLookup, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Dictionary reopened for existing hold-Confirm shortcut", 8));
+      inputScript.push_back({ScriptActionType::HoldConfirmUntilLookupCloses, {}, nullptr, 0, 0, 0});
+      inputScript.push_back(render("Reader after existing hold-Confirm clipping", 8));
+      inputScript.push_back({ScriptActionType::VerifyLookupClipping, {}, nullptr, 0, 2, 0});
+      return;
+    }
 
     addTap(MappedInputManager::Button::Confirm);
     inputScript.push_back(render("Reader Menu reopened for Lookup History", 4));
@@ -2143,7 +2415,17 @@ class SimulatorSmokeTest {
     scriptIndex = 0;
     inputCompletionStep = SmokeStep::FileBrowserSettings;
 
-    if (mappedInputManager.hasHomeKey()) {
+    if (TouchUi::enabled(mappedInputManager)) {
+      const int width = renderer.getScreenWidth(), height = renderer.getScreenHeight();
+      inputScript.push_back(touchDown(width / 2, 8));
+      inputScript.push_back(touchMove(width / 2, height / 4));
+      inputScript.push_back(touchRelease(width / 2, height / 4));
+      inputScript.push_back(render("Global Light opened from File Browser", 4));
+      inputScript.push_back(assertActivity("FrontlightPanel"));
+      addTap(MappedInputManager::Button::Back);
+      inputScript.push_back(render("File Browser restored after global Light", 4));
+      inputScript.push_back(assertActivity("FileBrowser"));
+    } else if (mappedInputManager.hasHomeKey()) {
       const int width = renderer.getScreenWidth();
       const int height = renderer.getScreenHeight();
       inputScript.push_back(touchDown(width / 2, 8));
@@ -2191,6 +2473,20 @@ class SimulatorSmokeTest {
     inputScript.push_back(assertActivity("FileBrowserSettings"));
   }
 #endif
+  uint32_t lookupFrameHash(const EpubReaderWordLookupActivity& lookup, const bool footer) const {
+    RenderLock lock;
+    int x = 0, y = 0;
+    lookup.simulatorAnkiTouchPoint(x, y);
+    uint32_t hash = 2166136261U;
+    // Sample actual oriented framebuffer pixels, not the feedback state.
+    const int top = footer ? std::max(0, y - 16) : 48;
+    const int bottom = footer ? std::min(renderer.getScreenHeight(), y + 24) : y - 24;
+    for (int py = top; py < bottom; ++py)
+      for (int px = footer ? renderer.getScreenWidth() / 2 : 0; px < renderer.getScreenWidth() - 24; ++px)
+        hash = (hash ^ renderer.isPixelBlack(px, py)) * 16777619U;
+    return hash;
+  }
+
   uint32_t mangaImageHashLocked() const {
     uint32_t hash = 2166136261U;
     const uint8_t* pixels = renderer.getFrameBuffer();
@@ -2202,6 +2498,15 @@ class SimulatorSmokeTest {
     auto* reader = dynamic_cast<MangaReaderActivity*>(activityManager.currentForSimulatorTest());
     if (!reader) fail("Expected actual manga reader for deterministic input test");
     return *reader;
+  }
+
+  void captureTouchLookupFrame(const char* path) {
+    if (!std::getenv("CROSSINK_SIMULATOR_MANGA_TOUCH_CAPTURE_DIR")) return;
+    if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Lookup capture render failed");
+    RenderLock lock;
+    if (!ScreenshotUtil::saveFramebufferAsBmp(path, renderer.getFrameBuffer(), renderer.getDisplayWidth(),
+                                              renderer.getDisplayHeight()))
+      fail("Lookup capture write failed");
   }
 
   void runReaderInputScript() {
@@ -2246,8 +2551,12 @@ class SimulatorSmokeTest {
         static int endY = 0;
         if (action.x == 0) {
           touchButtonX = renderer.getScreenWidth() / 2;
-          touchButtonY = mappedInputManager.hasHomeKey() ? renderer.getScreenHeight() - 8 : 8;
-          endY = mappedInputManager.hasHomeKey() ? renderer.getScreenHeight() * 3 / 4 : renderer.getScreenHeight() / 4;
+          touchButtonY = TouchUi::enabled(mappedInputManager) ? renderer.getScreenHeight() / 3
+                         : mappedInputManager.hasHomeKey()    ? renderer.getScreenHeight() - 8
+                                                              : 8;
+          endY = TouchUi::enabled(mappedInputManager) ? renderer.getScreenHeight() / 2
+                 : mappedInputManager.hasHomeKey()    ? renderer.getScreenHeight() * 3 / 4
+                                                      : renderer.getScreenHeight() / 4;
           mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
         } else if (action.x == 1)
           mappedInputManager.simulatorInjectTouchMove(touchButtonX, endY);
@@ -2619,6 +2928,28 @@ class SimulatorSmokeTest {
       case ScriptActionType::HomeTap:
         simulatorHomeKeyInput.injectTap();
         break;
+      case ScriptActionType::WaitMilliseconds: {
+        static uint32_t started = 0;
+        if (!started) started = millis();
+        if (millis() - started < static_cast<uint32_t>(action.x))
+          --scriptIndex;
+        else
+          started = 0;
+        break;
+      }
+      case ScriptActionType::WaitForHomeTapDismiss: {
+        // Home single taps are deferred past the 300ms double-tap window.
+        // Frame counts vary with rendering speed; await the actual transition.
+        static uint32_t started = 0;
+        if (activityManager.isCurrentActivityNamed("EpubReader")) {
+          started = 0;
+        } else {
+          if (!started) started = millis();
+          if (millis() - started > 1500) fail("Home tap did not dismiss the reader menu");
+          --scriptIndex;
+        }
+        break;
+      }
       case ScriptActionType::HomeLongPress:
         simulatorHomeKeyInput.injectLongPress();
         break;
@@ -2627,6 +2958,210 @@ class SimulatorSmokeTest {
         SETTINGS.shortPwrBtn = CrossPointSettings::SHORT_PWRBTN::TOGGLE_HOME_BUTTON_IN_READER;
         SETTINGS.longPwrBtn = CrossPointSettings::SHORT_PWRBTN::TOGGLE_HOME_BUTTON_IN_READER;
         break;
+      case ScriptActionType::TouchReaderWordDown: {
+        auto* reader = dynamic_cast<EpubReaderActivity*>(activityManager.currentForSimulatorTest());
+        if (!reader || !reader->simulatorFirstWordTouchPoint(touchButtonX, touchButtonY))
+          fail("Reader fixture has no visible word to hold");
+#if CROSSINK_APP_CAP_TOUCH
+        mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+#endif
+        break;
+      }
+      case ScriptActionType::TouchReaderWordRelease:
+#if CROSSINK_APP_CAP_TOUCH
+        mappedInputManager.simulatorInjectTouchRelease(touchButtonX, touchButtonY);
+#endif
+        break;
+      case ScriptActionType::VerifyLookupStableRedraw: {
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (!lookup) fail("Expected dictionary for stable redraw check");
+        if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Initial lookup redraw failed");
+        for (unsigned sample = 0; sample < 12; ++sample) {
+          const unsigned before = lookup->simulatorBackgroundRenderCount();
+          const auto started = std::chrono::steady_clock::now();
+          if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered)
+            fail("Repeated lookup redraw failed");
+          const auto elapsed =
+              std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
+          const unsigned backgrounds = lookup->simulatorBackgroundRenderCount() - before;
+          const unsigned expected = TouchUi::enabled(mappedInputManager) ? 0 : 1;
+          if (backgrounds != expected) fail("Dictionary redraw background work changed");
+          LOG_INF("SMOKE", "LOOKUP_PERF redraw_us=%lu backgrounds=%u sample=%u", static_cast<unsigned long>(elapsed),
+                  backgrounds, sample);
+        }
+        break;
+      }
+      case ScriptActionType::TouchLookupSaveAnki: {
+        auto* beforeSave = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (!beforeSave) fail("Expected lookup before save input");
+        if (!mappedInputManager.hasTouchHardware()) {
+          lookupSaveFrameHash = lookupFrameHash(*beforeSave, true);
+          lookupContentBeforeSave = lookupFrameHash(*beforeSave, false);
+        }
+#if CROSSINK_APP_CAP_TOUCH
+        static bool pressed = false;
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (!lookup) fail("Expected dictionary before Add to Anki");
+        if (!pressed) {
+          lookupSaveFrameHash = lookupFrameHash(*lookup, true);
+          lookupContentBeforeSave = lookupFrameHash(*lookup, false);
+          lookup->simulatorAnkiTouchPoint(touchButtonX, touchButtonY);
+          if (action.x == 1) touchButtonX = renderer.getScreenWidth() / 2;
+          mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+          pressed = true;
+          --scriptIndex;
+        } else {
+          mappedInputManager.simulatorInjectTouchRelease(touchButtonX, touchButtonY);
+          pressed = false;
+        }
+#endif
+        break;
+      }
+      case ScriptActionType::LookupStorageFailure: {
+        constexpr const char* backup = "/lookup-saved-terms.backup";
+        if (action.x) {
+          if (!Storage.rename(AnkiDeck::kSavedTermsPath, backup) || !Storage.mkdir(AnkiDeck::kSavedTermsPath))
+            fail("Could not prepare isolated saved-term failure");
+        } else if (!Storage.rmdir(AnkiDeck::kSavedTermsPath) || !Storage.rename(backup, AnkiDeck::kSavedTermsPath)) {
+          fail("Could not restore saved terms after failure test");
+        }
+        break;
+      }
+      case ScriptActionType::VerifyLookupSaveCancelled: {
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        AnkiDeck deck;
+        if (!lookup || lookupFrameHash(*lookup, false) != lookupContentBeforeSave ||
+            lookupFrameHash(*lookup, true) != lookupSaveFrameHash || !deck.load(AnkiDeck::kSavedTermsPath) ||
+            deck.cardCount() != 1)
+          fail("Cancelling save options changed lookup or saved cards");
+        LOG_INF("SMOKE", "Verified cancelling save options restores unchanged dictionary");
+        break;
+      }
+      case ScriptActionType::VerifyLookupNavigation: {
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (!lookup || (lookupFrameHash(*lookup, false) != lookupContentBeforeSave) != bool(action.x))
+          fail("Short dictionary navigation did not move and restore the selected entry");
+        break;
+      }
+      case ScriptActionType::HoldConfirmUntilLookupCloses: {
+        static uint32_t started = 0;
+        if (!started) {
+          started = millis();
+          mappedInputManager.simulatorInjectPress(MappedInputManager::Button::Confirm);
+          --scriptIndex;
+        } else if (!activityManager.isCurrentActivityNamed("EpubReaderWordLookup")) {
+          mappedInputManager.simulatorInjectRelease(MappedInputManager::Button::Confirm);
+          started = 0;
+        } else {
+          if (millis() - started > 5000) fail("Existing hold-Confirm clipping shortcut did not finish lookup");
+          --scriptIndex;
+        }
+        break;
+      }
+      case ScriptActionType::VerifyLookupClipping: {
+        std::string clipped;
+        const size_t expected = action.x ? static_cast<size_t>(action.x) : 1;
+        if (!activityManager.isCurrentActivityNamed("EpubReader") || CLIPPINGS.clippingCount() != expected ||
+            !CLIPPINGS.readClippingText(expected - 1, clipped) || clipped.empty())
+          fail("Dictionary clipping action did not save a clipping and return to the reader");
+        AnkiDeck deck;
+        if (!deck.load(AnkiDeck::kSavedTermsPath) || deck.cardCount() != 1)
+          fail("Clipping action changed the saved Anki deck");
+        LOG_INF("SMOKE", "Verified separate dictionary clipping preserves Anki deck");
+        break;
+      }
+      case ScriptActionType::VerifyLookupSavedAnki: {
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (!lookup || lookup->simulatorAnkiFeedback() != action.x) fail("Add to Anki feedback missing");
+        if (lookupFrameHash(*lookup, false) != lookupContentBeforeSave)
+          fail("Saving changed the selected term, definition, or reader background");
+        if (lookupFrameHash(*lookup, true) == lookupSaveFrameHash)
+          fail("Anki save changed state but did not draw visible footer feedback");
+        if (action.x == 3) {
+          LOG_INF("SMOKE", "Verified visible dictionary Anki failure feedback");
+          break;
+        }
+        AnkiDeck deck;
+        if (!deck.load(AnkiDeck::kSavedTermsPath) || deck.cardCount() != 1) fail("Saved term missing or duplicated");
+        auto front = makeUniqueNoThrow<char[]>(kMaxCardFieldTextBytes + 1);
+        auto back = makeUniqueNoThrow<char[]>(kMaxCardFieldTextBytes + 1);
+        if (!front || !back) fail("Could not allocate saved card verification buffers");
+        CardFields fields{};
+        fields.prompt[0].text = front.get();
+        fields.answer[0].text = back.get();
+        if (!deck.readCardFields(0, fields) || fields.promptCount != 1 || fields.answerCount != 1)
+          fail("Saved dictionary card fields could not be decoded");
+        static constexpr const char* words[] = {"Alignment", "Reader", "This", "more", "paragraph", "text", "the"};
+        static constexpr const char* definitions[] = {"the arrangement of text",   "a person or application that reads",
+                                                      "the present thing",         "a greater amount",
+                                                      "a section of written text", "written words",
+                                                      "definite article"};
+        const std::string_view prompt(front.get(), fields.prompt[0].length);
+        const std::string_view answer(back.get(), fields.answer[0].length);
+        bool matched = false;
+        for (size_t i = 0; i < 7; ++i)
+          if (prompt == words[i] && answer.find(definitions[i]) != std::string_view::npos) matched = true;
+        if (!matched) fail("Saved dictionary card does not match the fixture term and definition");
+        LOG_INF("SMOKE", "Verified dictionary Add to Anki saved one card and kept popup open");
+        break;
+      }
+      case ScriptActionType::TouchLookupClose: {
+#if CROSSINK_APP_CAP_TOUCH
+        static bool pressed = false;
+        if (!pressed) {
+          auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+          if (!lookup) fail("Expected dictionary before touch close");
+          lookup->simulatorCloseTouchPoint(touchButtonX, touchButtonY);
+          mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+          pressed = true;
+          --scriptIndex;
+        } else {
+          mappedInputManager.simulatorInjectTouchRelease(touchButtonX, touchButtonY);
+          pressed = false;
+        }
+#endif
+        break;
+      }
+      case ScriptActionType::EpubManualTouchLookup: {
+#if CROSSINK_APP_CAP_TOUCH
+        static uint32_t started = 0;
+        if (!started) started = millis();
+        bool complete = false;
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (action.x == 0 && lookup) {
+          if (!lookup->simulatorWaitingForTouchSelection()) fail("Manual EPUB lookup selected a word before a tap");
+          complete = lookup->simulatorCandidateTouchPoint(1, touchButtonX, touchButtonY);
+          if (complete) mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+        } else if (action.x == 1) {
+          mappedInputManager.simulatorInjectTouchRelease(touchButtonX, touchButtonY);
+          complete = true;
+        } else if (action.x == 2 && lookup && lookup->simulatorSelectedAt(touchButtonX, touchButtonY)) {
+          lookup->simulatorLogSelection();
+          LOG_INF("SMOKE", "Verified manual EPUB lookup waits for touch and selects the tapped second candidate");
+          complete = true;
+        }
+        if (complete) {
+          started = 0;
+        } else {
+          if (millis() - started > 5000) fail("Manual EPUB touch selection did not complete (stage %d)", action.x);
+          --scriptIndex;
+        }
+#endif
+        break;
+      }
+      case ScriptActionType::WaitForTouchLookup: {
+        static uint32_t started = 0;
+        auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+        if (lookup && lookup->simulatorSelectedAt(touchButtonX, touchButtonY)) {
+          lookup->simulatorLogSelection();
+          started = 0;
+        } else {
+          if (!started) started = millis();
+          if (millis() - started > 5000) fail("Holding reader text did not open Word Lookup");
+          --scriptIndex;
+        }
+        break;
+      }
       case ScriptActionType::WaitForPowerLongPress:
         if (mappedInputManager.getHeldTime() < SETTINGS.getPowerButtonLongPressDuration()) {
           --scriptIndex;
@@ -2796,6 +3331,58 @@ class SimulatorSmokeTest {
           fail("Actual activity scan cache/cursor restoration failed");
         mangaPrefetchDwellAt = 0;
         LOG_INF("SMOKE", "Verified manga scan cache loaded=%d cursor=%d", action.x, action.y);
+        break;
+      }
+      case ScriptActionType::MangaTouchLookup: {
+#if CROSSINK_APP_CAP_TOUCH
+        if (!mangaPrefetchDwellAt) mangaPrefetchDwellAt = millis();
+        bool complete = true;
+        if (action.x == 13) {
+          manga::prefetchTestHoldConsumption(false);
+        } else if (action.x == 10) {
+          complete = mangaReaderForTest().simulatorOcrRegionCenter(0, touchButtonX, touchButtonY);
+        } else if (action.x == 11) {
+          mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+        } else if (action.x == 12) {
+          auto& reader = mangaReaderForTest();
+          complete = reader.simulatorHasDeferredBubbleTap();
+          if (reader.simulatorPosition().page != 0 || reader.simulatorPosition().panel != 0)
+            fail("Busy bubble tap turned the manga page");
+          if (complete) LOG_INF("SMOKE", "Verified bubble tap waits for prefetch instead of turning page");
+        } else if (action.x == 0) {
+          complete = mangaReaderForTest().simulatorOcrRegionCenter(0, touchButtonX, touchButtonY);
+          if (complete) mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+        } else if (action.x == 1) {
+          // Both short taps and holds must reach the dictionary directly.
+          complete = activityManager.isCurrentActivityNamed("EpubReaderWordLookup");
+        } else if (action.x == 2 || action.x == 4) {
+          mappedInputManager.simulatorInjectTouchRelease(touchButtonX, touchButtonY);
+        } else {
+          auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
+          if (!lookup) fail("Manga touch lookup child missing");
+          if (action.x == 3 || action.x == 6) {
+            lookup->simulatorTermTouchPoint(action.x == 3, touchButtonX, touchButtonY);
+            mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+          } else if (action.x == 9) {
+            complete = lookup->simulatorCandidateTouchPoint(1, touchButtonX, touchButtonY);
+            if (complete) mappedInputManager.simulatorInjectTouchDown(touchButtonX, touchButtonY);
+          } else {
+            if (lookup->simulatorWaitingForTouchSelection()) fail("Manga direct lookup displayed a selector");
+            if (action.x == 5) {
+              captureTouchLookupFrame("/touch-dictionary.bmp");
+              LOG_INF("SMOKE", "Verified manga bubble tap opens dictionary directly");
+            } else if (action.x == 7) {
+              LOG_INF("SMOKE", "Verified manga dictionary next/previous terms in tapped bubble");
+            }
+          }
+        }
+        if (!complete) {
+          if (millis() - mangaPrefetchDwellAt > 5000) fail("Manga touch lookup phase %d timed out", action.x);
+          --scriptIndex;
+        } else {
+          mangaPrefetchDwellAt = 0;
+        }
+#endif
         break;
       }
       case ScriptActionType::MangaLookupReady: {
@@ -3040,9 +3627,10 @@ class SimulatorSmokeTest {
 
         ReviewState first{};
         ReviewState second{};
-        if (!state.read(0, first) || !state.read(1, second)) fail("Could not read Anki review state");
+        if (!state.read(0, first) || (deck.cardCount() > 1 && !state.read(1, second)))
+          fail("Could not read Anki review state");
         if (state.reviewCount() != 1 || first.kind != ReviewKind::Review || first.dueDay != state.reviewCount() + 1 ||
-            second.kind != ReviewKind::New) {
+            (deck.cardCount() > 1 && second.kind != ReviewKind::New)) {
           fail("Good grade did not persist the review count and next Anki candidate");
         }
         LOG_INF("SMOKE", "Verified Anki review counter and next candidate after Good");

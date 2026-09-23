@@ -978,7 +978,7 @@ ReaderViewportLayout computeReaderViewportLayout(GfxRenderer& renderer, const bo
   (void)showFootnoteHeader;
 #endif
 
-  layout.marginBottom += ReaderUtils::getReaderFooterReservedHeight(automaticPageTurnActive);
+  layout.marginBottom += ReaderUtils::getReaderFooterReservedHeight(automaticPageTurnActive, renderer);
 
   layout.viewportWidth = renderer.getScreenWidth() - layout.marginLeft - layout.marginRight;
   layout.viewportHeight = renderer.getScreenHeight() - layout.marginTop - layout.marginBottom;
@@ -2275,6 +2275,9 @@ void EpubReaderActivity::onEnter() {
 }
 
 void EpubReaderActivity::onExit() {
+#if CROSSINK_APP_DEVICE_X4PRO
+  touchLookupHold.reset();
+#endif
   sdFontSystem.setSettingsPersistenceCallback(nullptr, nullptr);
   clearPendingManualPageTurns(/*requestRecoveryRedraw=*/false);
   mappedInput.setReaderTouchscreenOverride(false);
@@ -2429,9 +2432,8 @@ void EpubReaderActivity::openReaderMenu() {
   if (!menuActivity) {
     menuActivity = makeUniqueNoThrow<EpubReaderMenuActivity>(
         renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent, SETTINGS.orientation,
-        !previewActive && !currentPageFootnotes.empty(),
-        !previewActive && isDictionaryLookupAvailable(), !BOOKMARKS.getBookmarks().empty(),
-        CLIPPINGS.hasClippings(),
+        !previewActive && !currentPageFootnotes.empty(), !previewActive && isDictionaryLookupAvailable(),
+        !BOOKMARKS.getBookmarks().empty(), CLIPPINGS.hasClippings(),
         !previewActive && BOOKMARKS.hasBookmarkForPage(bmSpine, bmProgress, bookmarkPageCount), isBookCompleted,
         automaticPageTurnActive, getAutoPageTurnIntervalSeconds(),
         SETTINGS.statusBarTimeLeft != CrossPointSettings::STATUS_BAR_TIME_LEFT::TIME_LEFT_HIDE,
@@ -2649,10 +2651,17 @@ void EpubReaderActivity::loop() {
   }
 #endif
 
+  // Capture X4 Pro holds before page gestures and background work. A render can
+  // outlast the contact; the queued point must survive the finger's release.
+  if (TouchUi::enabled(mappedInput) && currentSpineIndex < epub->getSpineItemsCount() && handleTouchDictionaryLookup())
+    return;
+
   const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
-  if (touch.tapped &&
-      ReaderUtils::isBottomStatusBarTap(renderer, touch.y, UITheme::getInstance().getStatusBarHeight())) {
-    if (SETTINGS.tapToHideStatusBar) {
+  if (touch.tapped && ReaderUtils::isBottomStatusBarTap(
+                          renderer, touch.y,
+                          TouchUi::enabled(mappedInput) ? ReaderUtils::getReaderFooterReservedHeight(false, renderer)
+                                                        : UITheme::getInstance().getStatusBarHeight())) {
+    if (SETTINGS.tapToHideStatusBar && !TouchUi::enabled(mappedInput)) {
       statusBarVisible = !statusBarVisible;
       requestUpdate();
     }
@@ -2950,7 +2959,7 @@ void EpubReaderActivity::loop() {
     openReaderMenu();
   }
 
-  if (!endOfBookMenuOpen && handleTouchDictionaryLookup()) {
+  if (!TouchUi::enabled(mappedInput) && !endOfBookMenuOpen && handleTouchDictionaryLookup()) {
     return;
   }
 
@@ -3456,6 +3465,32 @@ bool EpubReaderActivity::handleTwoFingerRotation(const bool clockwise) {
 }
 
 bool EpubReaderActivity::handleTouchDictionaryLookup() {
+#if CROSSINK_APP_DEVICE_X4PRO
+  if (TouchUi::enabled(mappedInput)) {
+    if (!SETTINGS.touchReaderControls || !mappedInput.hasTouch() || activeFootnotePreview || !epub) {
+      touchLookupHold.reset();
+      return false;
+    }
+    int touchX = 0;
+    int touchY = 0;
+    unsigned long heldMs = 0;
+    const bool candidate = mappedInput.isScreenTouchTapCandidate(touchX, touchY, heldMs);
+    if (touchLookupHold.capture(candidate, touchX, touchY, heldMs)) {
+      mappedInput.suppressCurrentTouchContact();
+      backgroundBuildYieldForInput.store(true, std::memory_order_relaxed);
+      LOG_DBG("DICT", "Touch lookup queued at %d,%d after %lums", touchX, touchY, heldMs);
+    }
+    if (!touchLookupHold.pending()) return false;
+    if (RenderLock::peek()) return true;
+    touchX = touchLookupHold.x();
+    touchY = touchLookupHold.y();
+    touchLookupHold.consume();
+    // The lookup screen owns unavailable-dictionary feedback as well as results;
+    // a deliberate word hold must not silently disappear behind availability.
+    openWordSelect(/*framebufferContainsPage=*/true, touchX, touchY, /*autoLookupInitialWord=*/true);
+    return true;
+  }
+#endif
   if (!SETTINGS.touchReaderControls || !mappedInput.hasTouch() || RenderLock::peek() || activeFootnotePreview ||
       !epub) {
     return false;
@@ -3609,10 +3644,13 @@ void EpubReaderActivity::openWordSelect(bool framebufferContainsPage, int initia
     }
     resumeReadingPaceTimer("dictionary_lookup_return");
     MemoryBudget::logHeapShape("dict.child_destroyed");
-    // Dictionary lookup warms multiple SD-font styles and large definition glyph
-    // sets. The child activity has been destroyed before this callback runs, so
-    // release those renderer-owned caches before the reader rebuilds its page cache.
-    releaseReaderSdFontCachesForLowMemory(renderer, "DICT", "dictionary lookup exit");
+    // On X4 Pro, keep warmed glyph/advance caches only while the existing
+    // conservative internal-heap policy leaves room for page/image work.
+    // Other boards retain their unconditional dictionary-exit cleanup.
+#if CROSSINK_APP_DEVICE_X4PRO
+    if (MemoryBudget::shouldReleaseSdFontCachesForEpubInlineImage(MemoryBudget::snapshot()))
+#endif
+      releaseReaderSdFontCachesForLowMemory(renderer, "DICT", "dictionary lookup exit");
     MemoryBudget::logHeapShape("dict.after_font_release");
     pendingHeapShapeReaderRedrawStages.fetch_or(HEAP_SHAPE_REDRAW_DICT, std::memory_order_relaxed);
     requestUpdate();
@@ -3902,11 +3940,12 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           hasSyncedStats ? GlobalReadingStats::loadAggregated(globalStats) : GlobalReadingStats{};
       pauseReadingPaceTimer("book_stats");
       if (hasSyncedStats) {
-        startActivityForResult(std::make_unique<BookStatsActivity>(
-                                   renderer, mappedInput, epub->getTitle(), epub->getCachePath(), displayStats,
-                                   getCurrentBookProgressPercent(), hasEstimatedTimeLeft, estimatedTimeLeftSeconds,
-                                   globalStats, displayAllDevicesStats, false, &stats),
-                               [this, returnToReaderMenu](const ActivityResult&) { handleBookStatsReturn(returnToReaderMenu); });
+        startActivityForResult(
+            std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(), epub->getCachePath(),
+                                                displayStats, getCurrentBookProgressPercent(), hasEstimatedTimeLeft,
+                                                estimatedTimeLeftSeconds, globalStats, displayAllDevicesStats, false,
+                                                &stats),
+            [this, returnToReaderMenu](const ActivityResult&) { handleBookStatsReturn(returnToReaderMenu); });
       } else {
         startActivityForResult(
             std::make_unique<BookStatsActivity>(renderer, mappedInput, epub->getTitle(), epub->getCachePath(),
@@ -5376,6 +5415,9 @@ void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
     return;
   }
 
+#if CROSSINK_APP_DEVICE_X4PRO
+  touchLookupHold.reset();
+#endif
   clearPendingManualPageTurns();
 
   {
@@ -5529,6 +5571,9 @@ void EpubReaderActivity::cancelSilentNextChapterPrefetchForForwardTurn() {
 }
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn, const char* source) {
+#if CROSSINK_APP_DEVICE_X4PRO
+  touchLookupHold.reset();
+#endif
   pageLoadRetryCount = 0;
   if (activeFootnotePreview) {
     if (isForwardTurn) {
@@ -7400,7 +7445,7 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
 }
 
 void EpubReaderActivity::renderStatusBar() const {
-  if (!statusBarVisible) {
+  if (!statusBarVisible && !TouchUi::enabled(mappedInput)) {
     return;
   }
 
@@ -7423,6 +7468,11 @@ void EpubReaderActivity::renderStatusBar() const {
       !epub->resolveReferencePage(currentSpineIndex, sectionProgress, referencePage, referencePageCount)) {
     referencePage = 0;
     referencePageCount = 0;
+  }
+
+  if (TouchUi::enabled(mappedInput) && !activeFootnotePreview) {
+    ReaderUtils::drawCompactProgress(renderer, bookProgress, currentPage, pageCount);
+    return;
   }
 
   std::string title;
@@ -7948,3 +7998,28 @@ ScreenshotInfo EpubReaderActivity::getScreenshotInfo() const {
   }
   return info;
 }
+
+#ifdef SIMULATOR
+bool EpubReaderActivity::simulatorFirstWordTouchPoint(int& x, int& y) {
+  RenderLock lock(*this);
+  if (!section) return false;
+  auto page = section->loadPageFromSectionFile();
+  if (!page) return false;
+  const auto layout = computeReaderViewportLayout(renderer, automaticPageTurnActive);
+  bool found = false;
+  forEachPageTextLine(*page, [&](const PageTextLine& line) {
+    const auto& block = *line.block;
+    for (uint16_t i = 0; i < block.wordCount(); ++i) {
+      if (!hasVisibleWordText(block.wordText(i))) continue;
+      const auto geometry = pageWordGeometry(renderer, SETTINGS.getReaderFontId(), line, block, i);
+      if (geometry.width <= 0) continue;
+      x = layout.marginLeft + line.xPos + geometry.xOffset + geometry.width / 2;
+      y = layout.marginTop + line.yPos + std::max(1, static_cast<int>(line.lineHeight)) / 2;
+      found = true;
+      return false;
+    }
+    return true;
+  });
+  return found;
+}
+#endif

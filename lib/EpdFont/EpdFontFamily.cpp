@@ -187,6 +187,15 @@ void EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const 
 
 const EpdFontData* EpdFontFamily::getData(const Style style) const { return getFont(style)->data; }
 
+const EpdFontData* EpdFontFamily::getCoverageData(const uint32_t cp, const Style style) const {
+  const EpdFont* selected = getFont(style);
+  for (const EpdFont* face :
+       {selected, regular, fallback, japaneseFallback, sdLastResort ? sdLastResort : builtinLastResort}) {
+    if (face && face->hasCodepoint(cp)) return face->data;
+  }
+  return nullptr;
+}
+
 EpdFontFamily::GlyphData EpdFontFamily::findGlyphData(const uint32_t cp, const Style style) const {
   const EpdFont* font = getFont(style);
   if (const EpdGlyph* glyph = font->findGlyph(cp)) {

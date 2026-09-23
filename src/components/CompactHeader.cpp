@@ -7,6 +7,7 @@
 #include <string>
 
 #include "HeaderDate.h"
+#include "TouchUi.h"
 #include "UITheme.h"
 #include "fontIds.h"
 
@@ -20,6 +21,7 @@ constexpr int kHeaderBaselineLift = 2;
 int visibleHeaderHeight(const ThemeMetrics& metrics) { return std::min(metrics.headerHeight, kHeaderHeight); }
 
 int headerHeight(const ThemeMetrics& metrics) {
+  if (TouchUi::enabled()) return 100;
   return visibleHeaderHeight(metrics) + (gpio.hasTouch() ? kTouchHeaderHeightIncrease : 0);
 }
 

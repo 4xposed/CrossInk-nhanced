@@ -18,6 +18,7 @@ class AnkiReviewActivity final : public Activity {
                      int initialRefreshCountdown);
 
   void onEnter() override;
+  void onResume() override;
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
@@ -25,6 +26,9 @@ class AnkiReviewActivity final : public Activity {
   bool isReaderActivity() const override { return true; }
   bool canSnapshotForSleepOverlay() const override { return true; }
   std::string getCurrentBookPath() const override;
+#ifdef SIMULATOR
+  uint8_t simulatorPromptScale() const { return promptScale_; }
+#endif
 
  private:
   static constexpr size_t kCardFieldBufferBytes = kMaxCardFieldTextBytes + 1;
@@ -49,7 +53,10 @@ class AnkiReviewActivity final : public Activity {
   CardTextLayout cardLayout_{};
   int primaryFontId_ = 0;
   uint8_t primarySdFontSize_ = 0;
+  uint8_t promptScale_ = 1;
   uint32_t currentCardIndex_ = 0;
+  uint32_t sessionReviews_ = 0;
+  uint32_t dueCards_ = 0;
   int refreshCountdown_ = 0;
   ReviewState currentState_{};
   Screen screen_ = Screen::Empty;
@@ -68,7 +75,9 @@ class AnkiReviewActivity final : public Activity {
   void getCardContentBounds(int& left, int& top, int& right, int& bottom) const;
   bool prepareCardText(const FlattenedCardText& text, int activeFontId);
   bool prepareCardTextLayout(const FlattenedCardText& text, int activeFontId);
+  bool prepareCardTextLayoutAtScale(const FlattenedCardText& text, int activeFontId);
   bool preparePrimaryLayout(const FlattenedCardText& text, int primaryFontId, int normalLineHeight);
   bool tryPreparePrimaryLayout(const FlattenedCardText& text, int activeFontId);
+  void renderQuestionContext(int fontId);
   void renderCardText(char* text, int activeFontId, FontRole role) const;
 };

@@ -344,6 +344,8 @@ void CrossPointSettings::validateReaderFrontButtonMapping(CrossPointSettings& se
 
 uint8_t CrossPointSettings::defaultUiScale() { return UI_SCALE_SMALL; }
 
+uint8_t CrossPointSettings::defaultAnkiFontScale() { return CROSSINK_APP_CAP_TOUCH ? 2 : 1; }
+
 uint8_t CrossPointSettings::sleepTimeoutEnumToMinutes(const uint8_t legacyValue) {
   switch (legacyValue) {
     case SLEEP_1_MIN:
