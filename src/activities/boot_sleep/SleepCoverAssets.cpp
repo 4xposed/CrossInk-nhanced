@@ -90,9 +90,11 @@ bool mangaFullDimensions(manga::MangaBook& book, const std::string& path, const 
     file.close();
   } else {
     const std::string sourcePath(imagePath.get());
-    ImageToFramebufferDecoder* decoder = ImageDecoderFactory::getDecoder(sourcePath);
+    const ImageToFramebufferDecoder* decoder = ImageDecoderFactory::getDecoder(sourcePath);
     if (!decoder || !decoder->getDimensions(sourcePath, source)) return false;
   }
+  // The callback may observe cancellation or a time budget that changed during image decoding.
+  // cppcheck-suppress knownConditionTrueFalse
   if (cancellation.requested()) return false;
   return manga::fitThumbnailDimensions(source.width, source.height, renderer.getScreenWidth(),
                                        renderer.getScreenHeight(), width, height);

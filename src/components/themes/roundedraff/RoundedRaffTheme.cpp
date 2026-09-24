@@ -515,15 +515,14 @@ void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, 
   const int upWidth = renderer.getTextWidth(kGuideFontId, upText.c_str(), EpdFontFamily::REGULAR);
   const int downWidth = renderer.getTextWidth(kGuideFontId, downText.c_str(), EpdFontFamily::REGULAR);
   const int backX = compactPrimary ? leftGroupX + (compactBackWidth - backWidth) / 2 : leftGroupX + innerEdgePadding;
-  const int selectX = compactPrimary
-                          ? compactConfirmX + (compactConfirmWidth - selectWidth) / 2
-                          : (leftOuterLabel == nullptr ? leftGroupX + outerButtonWidth + (innerButtonWidth - selectWidth) / 2
-                                                       : leftGroupX + groupWidth - innerEdgePadding - selectWidth);
-  const int upX = rightOuterLabel == nullptr ? rightGroupX + (outerButtonWidth - upWidth) / 2
-                                             : rightGroupX + innerEdgePadding;
-  const int downX = rightInnerLabel == nullptr
-                        ? rightGroupX + outerButtonWidth + (innerButtonWidth - downWidth) / 2
-                        : rightGroupX + groupWidth - innerEdgePadding - downWidth;
+  const int selectX =
+      compactPrimary ? compactConfirmX + (compactConfirmWidth - selectWidth) / 2
+                     : (leftOuterLabel == nullptr ? leftGroupX + outerButtonWidth + (innerButtonWidth - selectWidth) / 2
+                                                  : leftGroupX + groupWidth - innerEdgePadding - selectWidth);
+  const int upX =
+      rightOuterLabel == nullptr ? rightGroupX + (outerButtonWidth - upWidth) / 2 : rightGroupX + innerEdgePadding;
+  const int downX = rightInnerLabel == nullptr ? rightGroupX + outerButtonWidth + (innerButtonWidth - downWidth) / 2
+                                               : rightGroupX + groupWidth - innerEdgePadding - downWidth;
 
   renderer.setOrientation(invertText ? GfxRenderer::Orientation::PortraitInverted : GfxRenderer::Orientation::Portrait);
   const int textY = (invertText ? bottomMargin : outlineY) + (hintHeight - renderer.getLineHeight(kGuideFontId)) / 2;

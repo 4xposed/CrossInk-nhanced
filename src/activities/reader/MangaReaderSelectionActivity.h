@@ -2,13 +2,13 @@
 
 #include <FreeInkApp.h>
 #include <FreeInkUIGfxRenderer.h>
+#include <MangaBook.h>
 
 #include <array>
 #include <atomic>
 #include <cstdint>
 
 #include "BookmarkStore.h"
-#include <MangaBook.h>
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
 

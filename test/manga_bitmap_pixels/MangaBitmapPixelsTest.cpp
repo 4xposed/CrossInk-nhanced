@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "test/UniqueTempDirectory.h"
 #include "HalStorage.h"
 #include "MangaBitmapPixels.h"
+#include "test/UniqueTempDirectory.h"
 
 namespace {
 void put16(std::vector<uint8_t>& bytes, size_t at, uint16_t value) {

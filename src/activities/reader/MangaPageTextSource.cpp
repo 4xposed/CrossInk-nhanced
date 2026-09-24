@@ -73,6 +73,8 @@ struct ApproximateBlockGeometry {
       line = column = 0;
       bool japanese = false;
       auto text = item.block;
+      // remove_prefix() shrinks this view on every iteration; cppcheck misses that mutation.
+      // cppcheck-suppress knownConditionTrueFalse
       while (!text.empty()) {
         const auto d = decode(text);
         if (hard(d)) ++lines;
@@ -102,7 +104,7 @@ struct ApproximateBlockGeometry {
 // One ordinal/boundary policy for building and reconstruction; no temporary text
 // allocations, no strlen on borrowed format bytes. Return false for malformed views.
 template <class Sink>
-bool walk(manga::format::PageView page, int scope, Sink sink) {
+bool walk(const manga::format::PageView& page, int scope, Sink sink) {
   if (scope < -1 || (scope >= 0 && scope >= page.panels.remaining)) return false;
   uint16_t paragraph = 0, nextWord = 0;
   int region = 0;
@@ -179,12 +181,11 @@ bool mapMangaLookupBlock(manga::format::Rect box, const MangaLookupGeometry& g, 
       g.views.screenHeight != (delta % 2 ? g.layout.screenWidth : g.layout.screenHeight))
     return false;
   const bool cropped = g.sourceCrop.w != 0 || g.sourceCrop.h != 0;
+  if (cropped && (g.sourceCrop.w == 0 || g.sourceCrop.h == 0)) return false;
   const int cropX = cropped ? g.sourceCrop.x : 0, cropY = cropped ? g.sourceCrop.y : 0;
   const int sourceWidth = cropped ? g.sourceCrop.w : g.sourceWidth;
   const int sourceHeight = cropped ? g.sourceCrop.h : g.sourceHeight;
-  if (sourceWidth <= 0 || sourceHeight <= 0 || cropX + sourceWidth > g.sourceWidth ||
-      cropY + sourceHeight > g.sourceHeight)
-    return false;
+  if (cropX + sourceWidth > g.sourceWidth || cropY + sourceHeight > g.sourceHeight) return false;
   int64_t l = std::max<int64_t>(box.x, cropX), t = std::max<int64_t>(box.y, cropY);
   int64_t r = std::min<int64_t>(int64_t(box.x) + box.w, cropX + sourceWidth);
   int64_t b = std::min<int64_t>(int64_t(box.y) + box.h, cropY + sourceHeight);
@@ -213,7 +214,7 @@ bool mapMangaLookupBlock(manga::format::Rect box, const MangaLookupGeometry& g, 
 
 namespace {
 template <class Sink>
-bool visitRegions(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, Sink sink) {
+bool visitRegions(const manga::format::PageView& page, int panel, const MangaLookupGeometry& geometry, Sink sink) {
   int previous = -1;
   return walk(page, panel, [&](const Item& item) {
     if (item.region == previous || item.glyph.pageWord == PageTextGlyph::kSyntheticPageWord) return;
@@ -224,8 +225,8 @@ bool visitRegions(manga::format::PageView page, int panel, const MangaLookupGeom
 }
 }  // namespace
 
-bool mangaLookupRegionBounds(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int region,
-                             PageTextBounds& out) {
+bool mangaLookupRegionBounds(const manga::format::PageView& page, int panel, const MangaLookupGeometry& geometry,
+                             int region, PageTextBounds& out) {
   out = {};
   const bool valid = visitRegions(page, panel, geometry, [&](int index, const PageTextBounds& bounds) {
     if (index == region) out = bounds;
@@ -234,8 +235,8 @@ bool mangaLookupRegionBounds(manga::format::PageView page, int panel, const Mang
   return out.width > 0 && out.height > 0;
 }
 
-int nextMangaLookupRegion(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int current,
-                          bool forward) {
+int nextMangaLookupRegion(const manga::format::PageView& page, int panel, const MangaLookupGeometry& geometry,
+                          int current, bool forward) {
   int first = -1, last = -1, before = -1, after = -1;
   if (!visitRegions(page, panel, geometry, [&](int index, const PageTextBounds&) {
         if (first < 0) first = index;
@@ -247,7 +248,7 @@ int nextMangaLookupRegion(manga::format::PageView page, int panel, const MangaLo
   return forward ? (after >= 0 ? after : first) : (before >= 0 ? before : last);
 }
 
-int mangaLookupRegionAtPoint(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int x,
+int mangaLookupRegionAtPoint(const manga::format::PageView& page, int panel, const MangaLookupGeometry& geometry, int x,
                              int y) {
   int selected = -1;
   int32_t area = INT32_MAX;
@@ -262,7 +263,7 @@ int mangaLookupRegionAtPoint(manga::format::PageView page, int panel, const Mang
   return selected;
 }
 
-bool mangaLookupRegionHasSingleToken(manga::format::PageView page, const int panel, const int region) {
+bool mangaLookupRegionHasSingleToken(const manga::format::PageView& page, const int panel, const int region) {
   uint16_t word = PageTextGlyph::kSyntheticPageWord;
   size_t glyphCount = 0;
   bool multipleWords = false, japanese = false;
@@ -278,7 +279,7 @@ bool mangaLookupRegionHasSingleToken(manga::format::PageView page, const int pan
   return valid && glyphCount != 0 && !multipleWords && (!japanese || glyphCount == 1);
 }
 
-DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int panel,
+DictionaryStatus buildMangaLookupTextSource(const manga::format::PageView& page, int panel,
                                             const MangaLookupGeometry& geometry, OwnedLookupTextSource& out,
                                             const int region, const MangaTextMeasure measure) {
   out.clear();
@@ -426,7 +427,7 @@ DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int pa
   return DictionaryStatus::Found;
 }
 
-bool copyMangaLookupClipping(manga::format::PageView page, int panel, MangaLookupClippingRange range, char* out,
+bool copyMangaLookupClipping(const manga::format::PageView& page, int panel, MangaLookupClippingRange range, char* out,
                              size_t capacity, size_t& written) {
   written = 0;
   if (out && capacity) out[0] = 0;

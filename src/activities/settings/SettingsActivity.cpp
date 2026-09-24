@@ -1792,8 +1792,8 @@ void SettingsActivity::render(RenderLock&&) {
     renderer.drawLine(sunX + 9, cy + 9, sunX + 12, cy + 12, 2, true);
     renderer.drawLine(sunX + 9, cy - 9, sunX + 12, cy - 12, 2, true);
     renderer.drawLine(sunX - 12, cy + 12, sunX - 9, cy + 9, 2, true);
-    renderer.drawLine(header.x, header.y + header.height - 1, header.x + header.width,
-                      header.y + header.height - 1, 1, true);
+    renderer.drawLine(header.x, header.y + header.height - 1, header.x + header.width, header.y + header.height - 1, 1,
+                      true);
     uiReady = false;
     app.render();
     uiReady = true;

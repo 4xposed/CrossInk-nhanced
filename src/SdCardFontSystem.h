@@ -3,9 +3,9 @@
 #include <SdCardFontManager.h>
 #include <SdCardFontRegistry.h>
 
+#include <atomic>
 #include <cstddef>
 
-#include <atomic>
 #include "ReaderFontSizeStep.h"
 class GfxRenderer;
 

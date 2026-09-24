@@ -92,9 +92,8 @@ void ReaderOptionsActivity::rebuildSettingsList() {
   if (needsFonts) sdFontSystem.refreshIfDirty();
   const std::string_view liveBookLanguage = bookLanguage ? std::string_view(*bookLanguage) : std::string_view{};
   const char* liveBookCachePath = bookCachePath ? bookCachePath->c_str() : nullptr;
-  const auto allSettings =
-      getSettingsList(needsFonts ? &sdFontSystem.registry() : nullptr, &dictionarySettingsRegistry, liveBookLanguage,
-                      liveBookCachePath, /*showAppliedDictionary=*/true);
+  const auto allSettings = getSettingsList(needsFonts ? &sdFontSystem.registry() : nullptr, &dictionarySettingsRegistry,
+                                           liveBookLanguage, liveBookCachePath, /*showAppliedDictionary=*/true);
   settings = buildBookReaderSettingsParentList(allSettings);
   const auto indexingMethod = std::find_if(settings.begin(), settings.end(), [](const SettingInfo& setting) {
     return setting.nameId == StrId::STR_INDEXING_METHOD;

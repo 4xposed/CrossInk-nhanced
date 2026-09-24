@@ -87,14 +87,13 @@ TEST(AnkiCardText, PrewarmsFlattenedJapaneseAndLatinBeforeTheRealDraw) {
   RecordingFontCache fontCache;
   std::vector<std::string> renderedText;
   std::vector<int> renderedFontIds;
-  ASSERT_TRUE(renderCardTextWithPrewarm(fontCache, flattened.text, /*fontId=*/42,
-                                        [&fontCache, &renderedText, &renderedFontIds](char* const text,
-                                                                                       const int fontId) {
-                                          fontCache.events.push_back(fontCache.scanning ? RenderEvent::ScanDraw
-                                                                                         : RenderEvent::RealDraw);
-                                          renderedText.emplace_back(text);
-                                          renderedFontIds.push_back(fontId);
-                                        }));
+  ASSERT_TRUE(renderCardTextWithPrewarm(
+      fontCache, flattened.text, /*fontId=*/42,
+      [&fontCache, &renderedText, &renderedFontIds](char* const text, const int fontId) {
+        fontCache.events.push_back(fontCache.scanning ? RenderEvent::ScanDraw : RenderEvent::RealDraw);
+        renderedText.emplace_back(text);
+        renderedFontIds.push_back(fontId);
+      }));
 
   ASSERT_EQ(fontCache.events.size(), 3U);
   EXPECT_EQ(fontCache.events[0], RenderEvent::ScanDraw);
@@ -123,9 +122,8 @@ TEST(AnkiCardText, KeepsJapaneseAndLatinOnTheBaselineNormalFontWhenPrimaryLayout
   CardTextLayout primaryLayout;
   EXPECT_FALSE(layoutCardTextWithPrimaryFields(
       flattened, /*left=*/0, /*top=*/0, /*right=*/200, /*bottom=*/30, /*primaryLineHeight=*/20,
-      /*normalLineHeight=*/10, primaryLayout, [](const FontRole, const char* value) {
-        return static_cast<int>(std::strlen(value));
-      }));
+      /*normalLineHeight=*/10, primaryLayout,
+      [](const FontRole, const char* value) { return static_cast<int>(std::strlen(value)); }));
 
   RecordingFontCache fontCache;
   std::vector<int> renderedFontIds;
@@ -133,16 +131,15 @@ TEST(AnkiCardText, KeepsJapaneseAndLatinOnTheBaselineNormalFontWhenPrimaryLayout
       fontCache, /*usePrimary=*/false, /*primaryFontId=*/43, /*normalFontId=*/42,
       [&fontCache, &renderedFontIds](const FontRole role, const int fontId) {
         fontCache.lastRole = role;
-        fontCache.events.push_back(fontCache.scanning
-                                       ? (role == FontRole::Primary ? RenderEvent::PrimaryScanDraw
-                                                                    : RenderEvent::NormalScanDraw)
-                                       : (role == FontRole::Primary ? RenderEvent::PrimaryRealDraw
-                                                                    : RenderEvent::NormalRealDraw));
+        fontCache.events.push_back(
+            fontCache.scanning
+                ? (role == FontRole::Primary ? RenderEvent::PrimaryScanDraw : RenderEvent::NormalScanDraw)
+                : (role == FontRole::Primary ? RenderEvent::PrimaryRealDraw : RenderEvent::NormalRealDraw));
         renderedFontIds.push_back(fontId);
       }));
 
   const std::vector<RenderEvent> expectedEvents{RenderEvent::NormalScanDraw, RenderEvent::NormalEndScanAndPrewarm,
-                                                 RenderEvent::NormalRealDraw};
+                                                RenderEvent::NormalRealDraw};
   EXPECT_EQ(fontCache.events, expectedEvents);
   EXPECT_EQ(renderedFontIds, (std::vector<int>{42, 42}));
 }
@@ -173,17 +170,16 @@ TEST(AnkiCardText, UsesPrimaryThenNormalPrewarmPassesOnlyForAFittingPrimaryAndSe
       fontCache, /*usePrimary=*/true, /*primaryFontId=*/43, /*normalFontId=*/42,
       [&fontCache, &renderedFontIds](const FontRole role, const int fontId) {
         fontCache.lastRole = role;
-        fontCache.events.push_back(fontCache.scanning
-                                       ? (role == FontRole::Primary ? RenderEvent::PrimaryScanDraw
-                                                                    : RenderEvent::NormalScanDraw)
-                                       : (role == FontRole::Primary ? RenderEvent::PrimaryRealDraw
-                                                                    : RenderEvent::NormalRealDraw));
+        fontCache.events.push_back(
+            fontCache.scanning
+                ? (role == FontRole::Primary ? RenderEvent::PrimaryScanDraw : RenderEvent::NormalScanDraw)
+                : (role == FontRole::Primary ? RenderEvent::PrimaryRealDraw : RenderEvent::NormalRealDraw));
         renderedFontIds.push_back(fontId);
       }));
 
   const std::vector<RenderEvent> expectedEvents{
       RenderEvent::PrimaryScanDraw, RenderEvent::PrimaryEndScanAndPrewarm, RenderEvent::PrimaryRealDraw,
-      RenderEvent::NormalScanDraw, RenderEvent::NormalEndScanAndPrewarm, RenderEvent::NormalRealDraw};
+      RenderEvent::NormalScanDraw,  RenderEvent::NormalEndScanAndPrewarm,  RenderEvent::NormalRealDraw};
   EXPECT_EQ(fontCache.events, expectedEvents);
   EXPECT_EQ(renderedFontIds, (std::vector<int>{43, 43, 42, 42}));
 }
@@ -220,18 +216,17 @@ TEST(AnkiCardText, RendersMixedJapaneseAndLatinPrimaryAtLargerFontBeforeNormalSe
       fontCache, /*usePrimary=*/true, /*primaryFontId=*/43, /*normalFontId=*/42,
       [&fontCache, &renderedRoles, &renderedFontIds](const FontRole role, const int fontId) {
         fontCache.lastRole = role;
-        fontCache.events.push_back(fontCache.scanning
-                                       ? (role == FontRole::Primary ? RenderEvent::PrimaryScanDraw
-                                                                    : RenderEvent::NormalScanDraw)
-                                       : (role == FontRole::Primary ? RenderEvent::PrimaryRealDraw
-                                                                    : RenderEvent::NormalRealDraw));
+        fontCache.events.push_back(
+            fontCache.scanning
+                ? (role == FontRole::Primary ? RenderEvent::PrimaryScanDraw : RenderEvent::NormalScanDraw)
+                : (role == FontRole::Primary ? RenderEvent::PrimaryRealDraw : RenderEvent::NormalRealDraw));
         renderedRoles.push_back(role);
         renderedFontIds.push_back(fontId);
       }));
 
   const std::vector<RenderEvent> expectedEvents{
       RenderEvent::PrimaryScanDraw, RenderEvent::PrimaryEndScanAndPrewarm, RenderEvent::PrimaryRealDraw,
-      RenderEvent::NormalScanDraw, RenderEvent::NormalEndScanAndPrewarm, RenderEvent::NormalRealDraw};
+      RenderEvent::NormalScanDraw,  RenderEvent::NormalEndScanAndPrewarm,  RenderEvent::NormalRealDraw};
   EXPECT_EQ(fontCache.events, expectedEvents);
   EXPECT_EQ(renderedRoles,
             (std::vector<FontRole>{FontRole::Primary, FontRole::Primary, FontRole::Normal, FontRole::Normal}));

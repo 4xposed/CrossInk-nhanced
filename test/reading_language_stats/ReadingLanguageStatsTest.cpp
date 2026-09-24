@@ -4,9 +4,9 @@
 #include <filesystem>
 #include <fstream>
 
-#include "test/UniqueTempDirectory.h"
 #include "BookReadingStats.h"
 #include "GlobalReadingStats.h"
+#include "test/UniqueTempDirectory.h"
 class LanguageStatsTest : public ::testing::Test {
  protected:
   void SetUp() override {

@@ -1,5 +1,7 @@
 #include "OpdsDownloadPath.h"
 
+#include <numeric>
+
 #include "util/StringUtils.h"
 
 namespace {
@@ -30,10 +32,9 @@ std::string buildDestinationPath(const std::string_view configuredRoot,
                                  const std::span<const std::string> catalogHierarchy, const std::string_view filename) {
   // This path must live through the user-triggered downloader call; construct it once, never from the render loop.
   std::string destination = normalizeConfiguredRoot(configuredRoot);
-  size_t capacity = destination.size() + filename.size() + 1;
-  for (const auto& title : catalogHierarchy) {
-    capacity += title.size() + 1;
-  }
+  const size_t capacity =
+      std::accumulate(catalogHierarchy.begin(), catalogHierarchy.end(), destination.size() + filename.size() + 1,
+                      [](const size_t total, const std::string& title) { return total + title.size() + 1; });
   destination.reserve(capacity);
 
   for (const auto& title : catalogHierarchy) {

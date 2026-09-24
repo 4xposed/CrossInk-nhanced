@@ -105,6 +105,7 @@ function Test-Excluded($fullPath) {
         if ($fullPath -like "*\$ex\*") { return $true }
     }
     if ($fullPath -like '*.generated.h') { return $true }
+    if ($fullPath -like '*\src\images\BongoBootLogo.h') { return $true }
     return $false
 }
 

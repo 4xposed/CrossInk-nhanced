@@ -20,12 +20,12 @@ class JapaneseDictionaryBackend {
     return index_.beginScanIdentity(state);
   }
   DictionaryScanIdentityStatus stepScanIdentity(DictionaryScanIdentityState& state, size_t budget) {
-    if (cancelled_) {
+    if (cancelled_.load()) {
       state.cancel();
       return state.status();
     }
     auto status = index_.stepScanIdentity(state, budget);
-    if (cancelled_) {
+    if (cancelled_.load()) {
       state.cancel();
       return state.status();
     }

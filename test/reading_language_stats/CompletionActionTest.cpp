@@ -6,9 +6,9 @@
 #include <atomic>
 #include <filesystem>
 
-#include "test/UniqueTempDirectory.h"
 #include "ReadingStatsSave.h"
 #include "activities/home/BookCompletionEdit.h"
+#include "test/UniqueTempDirectory.h"
 
 // Metadata and UI are doubles; extracted production completion code below
 // publishes through the real per-book/global stores and fault-injected HAL.

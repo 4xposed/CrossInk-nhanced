@@ -271,12 +271,9 @@ bool normalizeReadingLanguage(std::string_view input, char (&out)[4]) {
   static constexpr Alias aliases[] = {{"eng", "en"}, {"spa", "es"}, {"fra", "fr"}, {"fre", "fr"}, {"deu", "de"},
                                       {"ger", "de"}, {"jpn", "ja"}, {"zho", "zh"}, {"chi", "zh"}, {"ita", "it"},
                                       {"por", "pt"}, {"rus", "ru"}, {"kor", "ko"}};
-  for (const auto& alias : aliases)
-    if (same(primary, alias.from)) {
-      memcpy(out, alias.to, 4);
-      return true;
-    }
-  memcpy(out, primary, 4);
+  const auto alias = std::find_if(std::begin(aliases), std::end(aliases),
+                                  [&](const Alias& candidate) { return same(primary, candidate.from); });
+  memcpy(out, alias != std::end(aliases) ? alias->to : primary, 4);
   return true;
 }
 bool validateReadingLanguageTotals(const ReadingLanguageTotals& totals) {

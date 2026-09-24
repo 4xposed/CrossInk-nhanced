@@ -6,8 +6,8 @@
 #include <filesystem>
 #include <vector>
 
-#include "test/UniqueTempDirectory.h"
 #include "activities/network/NearbyStatsProtocol.h"
+#include "test/UniqueTempDirectory.h"
 using namespace nearby_stats;
 namespace {
 struct Packet {

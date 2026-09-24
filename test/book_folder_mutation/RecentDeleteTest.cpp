@@ -7,11 +7,11 @@
 #include <fstream>
 #include <functional>
 
-#include "test/UniqueTempDirectory.h"
 #include "BookDeletionSnapshot.h"
 #include "BookFolderMutation.h"
 #include "BookMutationJournal.h"
 #include "BookMutationStorage.h"
+#include "test/UniqueTempDirectory.h"
 
 // Platform/UI doubles. The selected action callbacks below are extracted
 // verbatim and linked to the real transaction, journal and metadata code.

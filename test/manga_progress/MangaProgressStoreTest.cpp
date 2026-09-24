@@ -4,9 +4,9 @@
 #include <filesystem>
 #include <fstream>
 
-#include "test/UniqueTempDirectory.h"
 #include "HalStorage.h"
 #include "MangaProgressStore.h"
+#include "test/UniqueTempDirectory.h"
 
 namespace {
 class MangaProgressStoreTest : public testing::Test {

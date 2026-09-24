@@ -73,6 +73,4 @@ TEST(AnkiReviewSchedule, HardRoundsFractionalIntervalUp) {
   EXPECT_EQ(hard.dueDay, kPostGradeReviewCount + 4);
 }
 
-
-
 }  // namespace

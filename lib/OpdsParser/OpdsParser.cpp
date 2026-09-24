@@ -189,8 +189,7 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
                                            (self->currentEntry.href.find(".epub") != std::string::npos ||
                                             self->currentEntry.href.find("/epub/") != std::string::npos);
           if (self->currentEntry.type != OpdsEntryType::BOOK ||
-              self->currentEntry.format == OpdsAcquisitionFormat::XTC ||
-              (isPlainEpub && !alreadyHasPlainEpub)) {
+              self->currentEntry.format == OpdsAcquisitionFormat::XTC || (isPlainEpub && !alreadyHasPlainEpub)) {
             self->currentEntry.type = OpdsEntryType::BOOK;
             self->currentEntry.format = OpdsAcquisitionFormat::EPUB;
             assignBounded(self->currentEntry.href, href, MAX_HREF_CHARS);

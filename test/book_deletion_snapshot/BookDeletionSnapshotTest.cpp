@@ -3,9 +3,9 @@
 #include <filesystem>
 #include <fstream>
 
-#include "test/UniqueTempDirectory.h"
 #include "BookDeletionSnapshot.h"
 #include "HalStorage.h"
+#include "test/UniqueTempDirectory.h"
 
 namespace {
 class BookDeletionSnapshotTest : public testing::Test {

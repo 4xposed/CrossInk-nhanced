@@ -224,8 +224,8 @@ void JapaneseDictionaryBackend::applyGrammar(const DictionaryQuery& query, const
     for (int length = std::min(10, static_cast<int>(count) - start); length >= 2; --length) {
       if (cancelled_) return;
       const auto word = context.substr(ends[start], ends[start + length] - ends[start]);
-      DictProbe probe;
-      const auto status = index_.probeExact(word, probe, DictIndex::DICT_GRAMMAR);
+      DictProbe grammarProbe;
+      const auto status = index_.probeExact(word, grammarProbe, DictIndex::DICT_GRAMMAR);
       if (status == JapaneseDictStatus::Found) {
         if (word != displayedHeadword && length > bestLength) {
           best = word;
@@ -263,9 +263,10 @@ DictionaryStatus JapaneseDictionaryBackend::streamDefinition(DictionaryDefinitio
   if (grammarEntry_.definition) {
     const std::string_view parts[] = {"\n\n— ", grammarLabel_.view(),          ": ", grammarEntry_.headwordView(),
                                       " —\n",   grammarEntry_.definitionView()};
-    for (const auto part : parts) {
-      if (cancelled_ || !sink.onSpan(sink.context, DictionaryDefinitionSpan{part})) return DictionaryStatus::Cancelled;
-    }
+    if (std::any_of(std::begin(parts), std::end(parts), [&](const auto part) {
+          return cancelled_.load() || !sink.onSpan(sink.context, DictionaryDefinitionSpan{part});
+        }))
+      return DictionaryStatus::Cancelled;
   }
   return DictionaryStatus::Found;
 }

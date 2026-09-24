@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -19,8 +20,8 @@ inline bool normalizeFolder(std::string_view input, char* output, size_t capacit
     if (end == std::string_view::npos) end = input.size();
     const auto part = input.substr(begin, end - begin);
     if (part == "." || part == "..") return false;
-    for (const unsigned char ch : part)
-      if (ch < 32 || ch == 127) return false;
+    if (std::any_of(part.begin(), part.end(), [](const unsigned char ch) { return ch < 32 || ch == 127; }))
+      return false;
     required += part.size() + (required > 1 ? 1 : 0);
     begin = end;
   }

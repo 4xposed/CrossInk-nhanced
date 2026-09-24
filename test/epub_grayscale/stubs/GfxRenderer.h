@@ -20,7 +20,8 @@ class GfxRenderer {
   bool supported = true, inverted = false, active = false;
   int origin = 0, rows = 0, placeholders = 0;
   uint8_t* target = nullptr;
-  std::vector<uint8_t> bw, lsb, msb;
+  mutable std::vector<uint8_t> bw;
+  std::vector<uint8_t> lsb, msb;
   std::vector<std::string> events;
   FontCacheManager fonts;
   GfxRenderer(int w = 792, int h = 481)
@@ -37,7 +38,7 @@ class GfxRenderer {
   bool isStripTargetActive() const { return active; }
   int getWriteOriginY() const { return active ? origin : 0; }
   int getWriteRows() const { return active ? rows : height; }
-  uint8_t* getWriteTarget() { return active ? target : bw.data(); }
+  uint8_t* getWriteTarget() const { return active ? target : bw.data(); }
   void beginStripTarget(uint8_t* p, int y, int count) {
     assert(!active && p && y >= 0 && count > 0 && y + count <= height);
     active = true;

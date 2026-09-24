@@ -1,6 +1,6 @@
-#include <AnkiDeck.h>
 #include "ActivityManager.h"
 
+#include <AnkiDeck.h>
 #include <CrossInkHalFrontlight.h>
 #include <Epub.h>
 #include <FontCacheManager.h>
@@ -263,7 +263,6 @@ void ActivityManager::renderTaskLoop() {
       // Apply Night Mode to each activity's normal-polarity frame. SleepActivity
       // preserves it only for Quick Resume and clears it for other sleep screens.
       display.setInverted(SETTINGS.screenInverted != 0);
-      const uint32_t started = millis();
       currentActivity->render(std::move(lock));
       restoredActivityNeedsRender = false;
     }
@@ -570,8 +569,9 @@ void ActivityManager::notifyUserInput() {
 
 bool ActivityManager::prepareForFolderMutation() {
   if (pendingAction != PendingAction::None || !currentActivity || currentActivity->isReaderActivity()) return false;
-  for (const auto& activity : stackActivities)
-    if (activity->isReaderActivity()) return false;
+  if (std::any_of(stackActivities.begin(), stackActivities.end(),
+                  [](const auto& activity) { return activity->isReaderActivity(); }))
+    return false;
   // Cancellation happens before RenderLock; existing readiness hooks drain covers,
   // prefetch and dictionary owners. A denied reader save is never overridden.
   return prepareToSuspend();
@@ -724,7 +724,8 @@ void ActivityManager::goToAnki() {
     LOG_ERR("ACT", "Cannot create Anki upload directory; opening SD root");
     directory = "/";
   }
-  auto screen = makeUniqueNoThrow<FileBrowserActivity>(renderer, mappedInput, directory, FileBrowserActivity::Mode::Anki);
+  auto screen =
+      makeUniqueNoThrow<FileBrowserActivity>(renderer, mappedInput, directory, FileBrowserActivity::Mode::Anki);
   if (screen)
     replaceActivity(std::move(screen));
   else

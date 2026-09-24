@@ -6,7 +6,7 @@
 class MangaRegionSelectionActivity final : public Activity {
  public:
   using Background = void (*)(void*);
-  MangaRegionSelectionActivity(GfxRenderer& renderer, MappedInputManager& input, manga::format::PageView page,
+  MangaRegionSelectionActivity(GfxRenderer& renderer, MappedInputManager& input, const manga::format::PageView& page,
                                int scope, const MangaLookupGeometry& geometry, int initial, Background background,
                                void* context)
       : Activity("MangaRegionSelection", renderer, input),

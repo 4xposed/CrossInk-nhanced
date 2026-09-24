@@ -806,7 +806,8 @@ void SleepActivity::renderCoverSleepScreen() const {
     coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, &renderer, {}, absolute);
   }
   if (isManga) logMangaCoverAttempt(!coverBmpPath.empty());
-  if (!isManga && coverBmpPath.empty() && SleepCoverAssets::prepareFullCoverForPath(path, cropped, &renderer, {}, nullptr, nullptr, absolute)) {
+  if (!isManga && coverBmpPath.empty() &&
+      SleepCoverAssets::prepareFullCoverForPath(path, cropped, &renderer, {}, nullptr, nullptr, absolute)) {
     coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, &renderer, {}, absolute);
   }
   if (coverBmpPath.empty()) {

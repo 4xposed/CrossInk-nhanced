@@ -85,7 +85,7 @@ namespace manga {
  }
 }
 struct ImageDimensions { int width=0,height=0; };
-struct ImageToFramebufferDecoder { bool getDimensions(const std::string&,ImageDimensions& out) {
+struct ImageToFramebufferDecoder { bool getDimensions(const std::string&,ImageDimensions& out) const {
  ++dimensionCalls; out={480,800}; return true; } };
 struct ImageDecoderFactory { static ImageToFramebufferDecoder* getDecoder(const std::string&) {
  static ImageToFramebufferDecoder decoder; return &decoder; } };

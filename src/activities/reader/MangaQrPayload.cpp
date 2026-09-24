@@ -72,7 +72,8 @@ QrPayloadResult buildQrPayload(format::PageView page, const int scope, QrUtils::
         }
         if (!truncated) {
           if (width <= QrUtils::kMaxPayloadBytes - length) {
-            std::memcpy(bytes.get() + length, block.text.data() + offset, width);
+            char* const payload = bytes.get();
+            std::memcpy(payload + length, block.text.data() + offset, width);
             length += width;
           } else
             truncated = true;

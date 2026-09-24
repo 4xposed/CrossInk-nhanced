@@ -46,11 +46,13 @@ void LibraryFoldersActivity::activate(int index) {
     }
     RenderLock lock(*this);
     char* current = folder(index);
-    std::memcpy(scratch.get() + library::PATH_CAPACITY, current, library::PATH_CAPACITY);
+    char* const scratchData = scratch.get();
+    char* const previous = scratchData + library::PATH_CAPACITY;
+    std::memcpy(previous, current, library::PATH_CAPACITY);
     std::strcpy(current, scratch.get());
     saveFailed = !SETTINGS.saveToFile();
     if (saveFailed) {
-      std::memcpy(current, scratch.get() + library::PATH_CAPACITY, library::PATH_CAPACITY);
+      std::memcpy(current, previous, library::PATH_CAPACITY);
       LOG_ERR("LibraryFolders", "Cannot save folder");
     }
     requestUpdate();

@@ -323,9 +323,11 @@ void AnkiReviewActivity::loop() {
 }
 
 void AnkiReviewActivity::bindCardFieldBuffers() {
+  char* const prompt = promptBuffer_.get();
+  char* const answer = answerBuffer_.get();
   for (size_t index = 0; index < kMaxCardFields; ++index) {
-    cardFields_.prompt[index].text = promptBuffer_.get() + index * kCardFieldBufferBytes;
-    cardFields_.answer[index].text = answerBuffer_.get() + index * kCardFieldBufferBytes;
+    cardFields_.prompt[index].text = prompt + index * kCardFieldBufferBytes;
+    cardFields_.answer[index].text = answer + index * kCardFieldBufferBytes;
   }
 }
 
@@ -683,8 +685,9 @@ void AnkiReviewActivity::render(RenderLock&&) {
       LOG_ERR(kLogTag, "Could not prewarm primary card text");
     }
     if (screen_ == Screen::Prompt && promptScale_ > 1) {
-      const Rect content = touchUi ? touchLayout.content
-                                   : Rect{contentLeft, contentTop, contentRight - contentLeft, contentBottom - contentTop};
+      const Rect content = touchUi
+                               ? touchLayout.content
+                               : Rect{contentLeft, contentTop, contentRight - contentLeft, contentBottom - contentTop};
       // Expand in reverse logical order so unread source pixels survive.
       // Reuses the framebuffer: no extra buffer or font tables, including CJK.
       const int width = content.width / promptScale_ * promptScale_;

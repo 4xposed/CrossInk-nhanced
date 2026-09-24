@@ -37,7 +37,7 @@ void LibraryActivity::rebuild() {
   loadedPage = UINT32_MAX;
   pageSize = 0;
   prepared.fill(false);
-  for (auto& book : books) book = {};
+  books.fill({});
   if (!catalog) catalog = makeUniqueNoThrow<library::LibraryCatalog>();
   if (!entry) entry = makeUniqueNoThrow<library::CatalogEntry>();
   if (!catalog || !entry)

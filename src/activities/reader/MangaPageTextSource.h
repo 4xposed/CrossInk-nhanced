@@ -23,21 +23,21 @@ struct MangaTextMeasure {
   void* context = nullptr;
   int (*advance)(void*, uint32_t) = nullptr;
 };
-DictionaryStatus buildMangaLookupTextSource(manga::format::PageView page, int panel,
+DictionaryStatus buildMangaLookupTextSource(const manga::format::PageView& page, int panel,
                                             const MangaLookupGeometry& geometry, OwnedLookupTextSource& out,
                                             int region = -1, MangaTextMeasure measure = {});
-bool mangaLookupRegionBounds(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int region,
-                             PageTextBounds& out);
-int nextMangaLookupRegion(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int current,
-                          bool forward);
-int mangaLookupRegionAtPoint(manga::format::PageView page, int panel, const MangaLookupGeometry& geometry, int x,
+bool mangaLookupRegionBounds(const manga::format::PageView& page, int panel, const MangaLookupGeometry& geometry,
+                             int region, PageTextBounds& out);
+int nextMangaLookupRegion(const manga::format::PageView& page, int panel, const MangaLookupGeometry& geometry,
+                          int current, bool forward);
+int mangaLookupRegionAtPoint(const manga::format::PageView& page, int panel, const MangaLookupGeometry& geometry, int x,
                              int y);
 struct MangaLookupClippingRange {
   uint16_t firstPageWordOrdinal = 0, lastPageWordOrdinal = 0;
   uint16_t firstWordByteOffset = 0, lastWordByteEndOffset = 0;
 };
 
-bool copyMangaLookupClipping(manga::format::PageView page, int panel, MangaLookupClippingRange range, char* out,
+bool copyMangaLookupClipping(const manga::format::PageView& page, int panel, MangaLookupClippingRange range, char* out,
                              size_t capacity, size_t& written);
-bool mangaLookupRegionHasSingleToken(manga::format::PageView page, int panel, int region);
+bool mangaLookupRegionHasSingleToken(const manga::format::PageView& page, int panel, int region);
 bool mangaLookupCacheFileName(uint32_t physicalPage, int panel, char* out, size_t capacity);

@@ -3,11 +3,11 @@
 #include <filesystem>
 #include <fstream>
 
-#include "test/UniqueTempDirectory.h"
 #include "BookFolderMutation.h"
 #include "BookMutationJournal.h"
 #include "BookMutationStorage.h"
 #include "BookmarkStore.h"
+#include "test/UniqueTempDirectory.h"
 using namespace BookFolderMutation;
 namespace {
 class MutationTest : public testing::Test {

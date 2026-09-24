@@ -1,11 +1,11 @@
 #include "HomeActivity.h"
 
 #include <Epub.h>
+#include <FontCacheManager.h>
 #include <FreeInkUIIcon.h>
 #include <FsHelpers.h>
 #include <HalDisplay.h>
 #include <HalStorage.h>
-#include <FontCacheManager.h>
 #include <I18n.h>
 #include <Memory.h>
 
@@ -26,8 +26,8 @@
 #include "components/TouchUi.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
-#include "components/icons/listIcons.h"
 #include "components/icons/brightnessMenuIcon.h"
+#include "components/icons/listIcons.h"
 void HomeActivity::onEnter() {
   NavigationListActivity::onEnter();
   RECENT_BOOKS.ensureLoaded();

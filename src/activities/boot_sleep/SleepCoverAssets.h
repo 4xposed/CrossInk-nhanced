@@ -15,7 +15,8 @@ bool prepareXtc(const Xtc& xtc);
 bool prepareTxt(const Txt& txt);
 bool prepareFullCoverForPath(const std::string& bookPath, bool cropped, const GfxRenderer* renderer = nullptr,
                              CooperativeCancellation cancellation = {},
-                             manga::ThumbnailDiagnostics* diagnostics = nullptr, std::string* preparedPath = nullptr, bool imageLevels = false);
+                             manga::ThumbnailDiagnostics* diagnostics = nullptr, std::string* preparedPath = nullptr,
+                             bool imageLevels = false);
 bool prepareMinimalCoverForPath(const std::string& bookPath, const GfxRenderer* renderer = nullptr,
                                 CooperativeCancellation cancellation = {},
                                 manga::ThumbnailDiagnostics* diagnostics = nullptr);

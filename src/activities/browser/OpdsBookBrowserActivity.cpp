@@ -600,9 +600,13 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
     for (size_t i = entryCount; i > 0; --i) {
       entries[i] = std::move(entries[i - 1]);
     }
-    entries[0] = OpdsEntry{OpdsEntryType::NAVIGATION, OpdsAcquisitionFormat::EPUB,
+    entries[0] = OpdsEntry{OpdsEntryType::NAVIGATION,
+                           OpdsAcquisitionFormat::EPUB,
                            std::string(mappedInput.resolveLabel(mappedInput.withPreviousPageArrow(tr(STR_PREV_PAGE)))),
-                           "", prevUrl, "", true};
+                           "",
+                           prevUrl,
+                           "",
+                           true};
     entryCount++;
   }
   if (!nextUrl.empty() &&

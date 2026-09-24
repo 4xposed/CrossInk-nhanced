@@ -79,8 +79,8 @@ class DictHtmlRenderer {
   bool renderFromFileStreaming(const char* dictPath, uint32_t offset, uint32_t size, const SpanSink& sink);
 
   // Error-aware streaming overload for constrained worker tasks.
-	// `chunk` is a caller-owned reusable scratch.
-	// cancellation and sink rejection terminate parsing immediately and remain distinct from file/parse failures.
+  // `chunk` is a caller-owned reusable scratch.
+  // cancellation and sink rejection terminate parsing immediately and remain distinct from file/parse failures.
   DictHtmlStreamStatus renderFromFileStreamingBuffered(const char* dictPath, uint32_t offset, uint32_t size,
                                                        const ControlledSpanSink& sink, char* chunk, size_t chunkSize);
 
@@ -90,7 +90,8 @@ class DictHtmlRenderer {
   bool renderPlainTextFromFileStreaming(const char* dictPath, uint32_t offset, uint32_t size, const SpanSink& sink);
 
   // Equivalent recovery path using caller-owned read scratch.
-	// This lets the dictionary worker reuse activity-owned heap instead of placing dedicated read buffer on its small task stack.
+  // This lets the dictionary worker reuse activity-owned heap instead of placing dedicated read buffer on its small
+  // task stack.
   bool renderPlainTextFromFileStreamingBuffered(const char* dictPath, uint32_t offset, uint32_t size,
                                                 const SpanSink& sink, char* chunk, size_t chunkSize);
   DictHtmlStreamStatus renderPlainTextFromFileStreamingBuffered(const char* dictPath, uint32_t offset, uint32_t size,
@@ -231,7 +232,7 @@ class DictHtmlRenderer {
   ControlledSpanSink controlledSpanSink_;
   DictHtmlStreamStatus streamStatus_ = DictHtmlStreamStatus::Success;
   // Legacy streaming entry points remain source-compatible while keeping their 512-byte read scratch
-	// off constrained worker stacks.
+  // off constrained worker stacks.
   static constexpr size_t kStreamBufferBytes = 512;
   std::unique_ptr<char[]> legacyStreamBuffer_;
 

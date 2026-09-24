@@ -11,7 +11,8 @@ class JpegToBmpConverter {
   static bool jpegFileToBmpStreamInternal(FsFile& jpegFile, Print& bmpOut, int targetWidth, int targetHeight,
                                           bool oneBit, bool crop = true, bool adaptiveContain = false,
                                           CooperativeCancellation cancellation = {},
-                                          BmpConversionDimensions* sourceDimensions = nullptr, bool imageLevels = false);
+                                          BmpConversionDimensions* sourceDimensions = nullptr,
+                                          bool imageLevels = false);
 
  public:
   static bool jpegFileToBmpStream(FsFile& jpegFile, Print& bmpOut, bool crop = true, bool imageLevels = false);

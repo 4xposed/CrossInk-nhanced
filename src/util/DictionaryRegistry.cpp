@@ -117,10 +117,8 @@ ScanStatus scanFolder(const std::string& path, FolderScan& result, char* name, c
 
 template <size_t Count>
 bool firstJapanesePairExists(const JapanesePathPair (&paths)[Count]) {
-  for (const auto& path : paths) {
-    if (Storage.exists(path.index) && Storage.exists(path.data)) return true;
-  }
-  return false;
+  return std::any_of(std::begin(paths), std::end(paths),
+                     [](const auto& path) { return Storage.exists(path.index) && Storage.exists(path.data); });
 }
 
 bool firstJapaneseVocabularyPairValid() {

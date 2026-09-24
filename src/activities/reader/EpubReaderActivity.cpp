@@ -2411,9 +2411,8 @@ void EpubReaderActivity::openReaderMenu() {
   if (mappedInput.hasTouchHardware()) {
     menuActivity = makeUniqueNoThrow<EpubReaderTouchMenuActivity>(
         renderer, mappedInput, epub, touchReaderPreviewModel.get(), bookProgress,
-        !previewActive && !currentPageFootnotes.empty(),
-        !previewActive && isDictionaryLookupAvailable(), !BOOKMARKS.getBookmarks().empty(),
-        CLIPPINGS.hasClippings(),
+        !previewActive && !currentPageFootnotes.empty(), !previewActive && isDictionaryLookupAvailable(),
+        !BOOKMARKS.getBookmarks().empty(), CLIPPINGS.hasClippings(),
         !previewActive && BOOKMARKS.hasBookmarkForPage(bmSpine, bmProgress, bookmarkPageCount), isBookCompleted,
         SETTINGS.statusBarTimeLeft != CrossPointSettings::STATUS_BAR_TIME_LEFT::TIME_LEFT_HIDE, stableCurrentPage,
         stablePageCount, getAutoPageTurnIntervalSeconds(), automaticPageTurnActive, saveReaderOptionsForBook, this,

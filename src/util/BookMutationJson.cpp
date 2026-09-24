@@ -81,12 +81,12 @@ class Rewrite {
     };
     while (true) {
       int c = get();
-      if (c < 0 || c < 32) return false;
+      if (c < 32) return false;
       if (c == '"') break;
       if (c == '\\') {
         c = get();
         if (c == 'u') {
-          uint32_t value = 0;
+          uint32_t codepoint = 0;
           for (unsigned i = 0; i < 4; ++i) {
             int h = get();
             int d = h >= '0' && h <= '9'   ? h - '0'
@@ -94,10 +94,10 @@ class Rewrite {
                     : h >= 'A' && h <= 'F' ? h - 'A' + 10
                                            : -1;
             if (d < 0) return false;
-            value = value * 16 + d;
+            codepoint = codepoint * 16 + d;
           }
-          if (value >= 0xd800 && value <= 0xdfff) {
-            if (value > 0xdbff || get() != '\\' || get() != 'u') return false;
+          if (codepoint >= 0xd800 && codepoint <= 0xdfff) {
+            if (codepoint > 0xdbff || get() != '\\' || get() != 'u') return false;
             uint32_t low = 0;
             for (unsigned i = 0; i < 4; ++i) {
               int h = get();
@@ -109,23 +109,23 @@ class Rewrite {
               low = low * 16 + d;
             }
             if (low < 0xdc00 || low > 0xdfff) return false;
-            value = 0x10000 + ((value - 0xd800) << 10) + (low - 0xdc00);
+            codepoint = 0x10000 + ((codepoint - 0xd800) << 10) + (low - 0xdc00);
           }
-          if (capture && value == 0) return false;
-          if (value < 0x80)
-            add(value);
-          else if (value < 0x800) {
-            add(0xc0 | (value >> 6));
-            add(0x80 | (value & 63));
-          } else if (value < 0x10000) {
-            add(0xe0 | (value >> 12));
-            add(0x80 | ((value >> 6) & 63));
-            add(0x80 | (value & 63));
+          if (capture && codepoint == 0) return false;
+          if (codepoint < 0x80)
+            add(codepoint);
+          else if (codepoint < 0x800) {
+            add(0xc0 | (codepoint >> 6));
+            add(0x80 | (codepoint & 63));
+          } else if (codepoint < 0x10000) {
+            add(0xe0 | (codepoint >> 12));
+            add(0x80 | ((codepoint >> 6) & 63));
+            add(0x80 | (codepoint & 63));
           } else {
-            add(0xf0 | (value >> 18));
-            add(0x80 | ((value >> 12) & 63));
-            add(0x80 | ((value >> 6) & 63));
-            add(0x80 | (value & 63));
+            add(0xf0 | (codepoint >> 18));
+            add(0x80 | ((codepoint >> 12) & 63));
+            add(0x80 | ((codepoint >> 6) & 63));
+            add(0x80 | (codepoint & 63));
           }
           continue;
         }

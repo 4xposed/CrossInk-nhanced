@@ -26,8 +26,7 @@ bool flattenCardFieldsInPlace(const std::array<CardField, kMaxCardFields>& field
   size_t flattenedLength = 0;
   for (uint8_t index = 0; index < fieldCount; ++index) {
     const CardField& field = fields[index];
-    if (!isFieldInsideBuffer(field, buffer, bufferCapacity) ||
-        flattenedLength > kMaxCardSideTextBytes - field.length) {
+    if (!isFieldInsideBuffer(field, buffer, bufferCapacity) || flattenedLength > kMaxCardSideTextBytes - field.length) {
       return false;
     }
     flattenedLength += field.length;

@@ -498,9 +498,7 @@ void testFamilyCoverageMatchesBoldToRegularGlyphFallback() {
 
 void testUncachedSdGlyphLoadsThroughFamily() {
   EpdFontData data{};
-  data.glyphMissHandler = [](void*, uint32_t cp) -> const EpdGlyph* {
-    return cp == 0x65E5 ? &kGlyphs[1] : nullptr;
-  };
+  data.glyphMissHandler = [](void*, uint32_t cp) -> const EpdGlyph* { return cp == 0x65E5 ? &kGlyphs[1] : nullptr; };
   EpdFont font(&data);
   EpdFontFamily family(&font);
   ASSERT_TRUE(family.findGlyphData(0x65E5, EpdFontFamily::REGULAR).glyph == &kGlyphs[1]);

@@ -25,6 +25,7 @@ constexpr char Directory[] = "/.crosspoint/manga-mutation";
 constexpr char StagingMarker[] = "/.crosspoint/manga-mutation/staging.bin";
 constexpr char FinalizePath[] = "/.crosspoint/manga-mutation.finalize";
 constexpr char JournalPath[] = "/.crosspoint/manga-mutation/journal.bin";
+constexpr bool BookmarkVariants[] = {false, true};
 constexpr const char* SharedPaths[] = {"/.crosspoint/recent.json", "/.crosspoint/state.json"};
 std::atomic<bool> frozen{false}, pending{false};
 struct FileRecord {
@@ -272,12 +273,12 @@ class Transaction {
           return false;
         }
       }
-      for (bool legacy : {false, true}) {
-        if (!bookmarkPath(work->value, legacy, work->book, sizeof(work->book)) ||
-            presence(work->book) != Presence::Missing) {
-          collision = true;
-          return false;
-        }
+      if (std::any_of(std::begin(BookmarkVariants), std::end(BookmarkVariants), [&](bool legacy) {
+            return !bookmarkPath(work->value, legacy, work->book, sizeof(work->book)) ||
+                   presence(work->book) != Presence::Missing;
+          })) {
+        collision = true;
+        return false;
       }
     }
     return true;
@@ -295,13 +296,13 @@ class Transaction {
                  suffix);
         if (!stageOne(i, 1, work->book, work->value)) return false;
       }
-      for (bool legacy : {false, true}) {
-        if (!derived(i, work->replacement, sizeof(work->replacement)) ||
-            !bookmarkPath(snapshot->path(i), legacy, work->book, sizeof(work->book)) ||
-            !bookmarkPath(work->replacement, legacy, work->value, sizeof(work->value)) ||
-            !stageOne(i, legacy ? 3 : 2, work->book, work->value))
-          return false;
-      }
+      if (!std::all_of(std::begin(BookmarkVariants), std::end(BookmarkVariants), [&](bool legacy) {
+            return derived(i, work->replacement, sizeof(work->replacement)) &&
+                   bookmarkPath(snapshot->path(i), legacy, work->book, sizeof(work->book)) &&
+                   bookmarkPath(work->replacement, legacy, work->value, sizeof(work->value)) &&
+                   stageOne(i, legacy ? 3 : 2, work->book, work->value);
+          }))
+        return false;
       if (!mangaCachePath(snapshot->path(i), work->book, sizeof(work->book))) return false;
       auto p = presence(work->book);
       if (p == Presence::Missing) continue;
@@ -358,7 +359,7 @@ class Transaction {
       }
       if (!strcmp(value, path)) {
         if (header.operation == Operation::Delete)
-          return selected & (uint64_t(1) << i) ? PathEdit::Remove : PathEdit::Keep;
+          return (selected & (uint64_t(1) << i)) ? PathEdit::Remove : PathEdit::Keep;
         return derived(i, out, capacity) ? PathEdit::Replace : PathEdit::Error;
       }
     }
@@ -616,18 +617,18 @@ bool Transaction::verifyFinalOutputs() {
   if (replay.aborted) return true;
   if (!replay.done || !journal.seek64(filesAt)) return false;
   for (unsigned i = 0; i < header.files; ++i) {
-    FileRecord record;
+    FileRecord entry;
     Fingerprint actual;
-    if (!readFile(i, record) || !fingerprint(work->value, actual, work->input) || !(actual == record.output))
+    if (!readFile(i, entry) || !fingerprint(work->value, actual, work->input) || !(actual == entry.output))
       return false;
     serviceMutation();
   }
   if (!journal.seek64(sharedAt)) return false;
   for (unsigned i = 0; i < 2; ++i) {
-    SharedRecord record;
+    SharedRecord entry;
     Fingerprint actual;
-    if (!readShared(i, record)) return false;
-    const auto expected = header.operation == Operation::Move ? record.output
+    if (!readShared(i, entry)) return false;
+    const auto expected = header.operation == Operation::Move ? entry.output
                           : i ? Fingerprint{replay.outcome.stateBytes, replay.outcome.stateCrc}
                               : Fingerprint{replay.outcome.recentBytes, replay.outcome.recentCrc};
     if (!fingerprint(SharedPaths[i], actual, work->input) || !(actual == expected)) return false;
@@ -637,14 +638,14 @@ bool Transaction::verifyFinalOutputs() {
 bool Transaction::verifyOriginals() {
   if (!journal.seek64(sharedAt)) return false;
   for (unsigned i = 0; i < 2; ++i) {
-    SharedRecord record;
-    if (!readShared(i, record)) return false;
+    SharedRecord entry;
+    if (!readShared(i, entry)) return false;
     char path[96];
     sharedPath(i, true, path, sizeof(path));
     Fingerprint actual;
     if (!fingerprint(path, actual, work->input)) return false;
-    if (record.present) {
-      if (!(record.source == actual)) return false;
+    if (entry.present) {
+      if (!(entry.source == actual)) return false;
     } else {
       const char* value = i ? "{}" : "{\"books\":[]}";
       if (actual.bytes != strlen(value) || actual.crc != crc32(value, strlen(value))) return false;
@@ -707,10 +708,10 @@ bool Transaction::publishFiles() {
 bool Transaction::publishReferences() {
   if (!journal.seek64(sharedAt)) return false;
   for (unsigned i = 0; i < 2; ++i) {
-    SharedRecord record;
-    if (!readShared(i, record)) return false;
+    SharedRecord entry;
+    if (!readShared(i, entry)) return false;
     uint64_t next = journal.position();
-    Fingerprint expected = record.output;
+    Fingerprint expected = entry.output;
     if (header.operation == Operation::Delete)
       expected = i ? Fingerprint{replay.outcome.stateBytes, replay.outcome.stateCrc}
                    : Fingerprint{replay.outcome.recentBytes, replay.outcome.recentCrc};
@@ -721,7 +722,7 @@ bool Transaction::publishReferences() {
     bool final = p == Presence::File && fingerprint(SharedPaths[i], actual, work->input) && actual == expected;
     if (!final) {
       if (p == Presence::File) {
-        if (!record.present || !(actual == record.source) || !Storage.remove(SharedPaths[i])) return false;
+        if (!entry.present || !(actual == entry.source) || !Storage.remove(SharedPaths[i])) return false;
       } else if (p != Presence::Missing)
         return false;
       if (!fingerprint(stage, actual, work->input) || !(actual == expected) ||
@@ -861,10 +862,11 @@ bool removeMangaMetadata(Transaction& tx, const char* book) {
              suffix);
     if (!ownedRemove(tx.work->book, tx.work->replacement, tx.work->input)) return false;
   }
-  for (bool legacy : {false, true})
-    if (!bookmarkPath(book, legacy, tx.work->book, sizeof(tx.work->book)) ||
-        !ownedRemove(tx.work->book, tx.work->replacement, tx.work->input))
-      return false;
+  if (!std::all_of(std::begin(BookmarkVariants), std::end(BookmarkVariants), [&](bool legacy) {
+        return bookmarkPath(book, legacy, tx.work->book, sizeof(tx.work->book)) &&
+               ownedRemove(tx.work->book, tx.work->replacement, tx.work->input);
+      }))
+    return false;
   mangaCachePath(book, tx.work->book, sizeof(tx.work->book));
   auto p = tx.presence(tx.work->book);
   if (p == Presence::Missing) return true;

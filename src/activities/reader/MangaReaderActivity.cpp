@@ -920,8 +920,8 @@ void MangaReaderActivity::openLookup(const int region, const bool deferToTouchSe
   request.bookCachePath = statsCachePath;
   request.spineIndex = static_cast<uint16_t>(scope.page);
   request.pageIndex = static_cast<uint16_t>(scope.panel + 1);
-  char leaf[64];
   if (!statsCachePath.empty()) {
+    char leaf[64];
     if (selectedRegion >= 0) {
       snprintf(leaf, sizeof(leaf), "ocr_%lu_%d_region%d.scan", static_cast<unsigned long>(scope.page), scope.panel,
                selectedRegion);
@@ -991,11 +991,12 @@ void MangaReaderActivity::openLookupHistory() {
 void MangaReaderActivity::onInputLockChanged(const bool locked) {
   RenderLock lock(*this);
   inputLocked = locked;
-  if (locked) autoTurn.cancel();
-  if (locked)
+  if (locked) {
+    autoTurn.cancel();
     pauseReadingStatsTimer();
-  else
+  } else {
     resumeReadingStatsTimer();
+  }
 }
 
 bool MangaReaderActivity::handleTwoFingerRotation(bool clockwise) {
@@ -1150,7 +1151,7 @@ void MangaReaderActivity::loop() {
       if (panelLookup) {
         pendingInput.takeMenu();
         pendingLookupTouchX = pendingLookupTouchY = -1;
-      deferredBubbleTapX = deferredBubbleTapY = -1;
+        deferredBubbleTapX = deferredBubbleTapY = -1;
         pendingLookup = true;  // Repeated Confirm edges coalesce while prefetch drains.
         foregroundReadyLocked();
       }

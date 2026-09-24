@@ -164,7 +164,8 @@ bool makePaths(const std::string_view bookCachePath, GlossaryPaths& paths, bool&
     return false;
   }
   const size_t allocationBytes = finalBytes + siblingBytes * 2;
-  // This single fallible allocation is bounded to 1,578 bytes or we would exceed the firmware's small task-frame budget.
+  // This single fallible allocation is bounded to 1,578 bytes or we would exceed the firmware's small task-frame
+  // budget.
   paths.storage = makeUniqueNoThrow<char[]>(allocationBytes);
   if (!paths.storage) {
     LOG_ERR(TAG, "OOM allocating %u-byte glossary path scratch", static_cast<unsigned>(allocationBytes));
@@ -273,8 +274,8 @@ LoadStatus loadValidated(const char* path, LoadedGlossary& loaded) {
     return closeFile(file, path) ? LoadStatus::Corrupt : LoadStatus::IoError;
   }
   // Whole-file validation needs random bounded duplicate scans.
-	// Runtime file size is unsuitable for the small task stack.
-	// this exact fallible buffer is capped at 16 KiB and released before temp-file validation/promotion.
+  // Runtime file size is unsuitable for the small task stack.
+  // this exact fallible buffer is capped at 16 KiB and released before temp-file validation/promotion.
   auto bytes = makeUniqueNoThrow<uint8_t[]>(size);
   if (!bytes) {
     LOG_ERR(TAG, "OOM allocating %u-byte glossary read buffer", static_cast<unsigned>(size));
@@ -390,7 +391,7 @@ void collectRun(std::vector<Pair>& pairs, std::string& elementBase, std::string&
                 const std::string_view base, const std::string_view ruby) {
   collectView(pairs, base, ruby);
   // A kana-only or identical individual run is not useful by itself, but it is still part of a
-	// surrounding kanji-bearing compound (for example 食べ).
+  // surrounding kanji-bearing compound (for example 食べ).
   if (runCount < 0 || base.empty() || ruby.empty() || !validUtf8(base) || !validUtf8(ruby) ||
       !appendElementText(elementBase, base) || !appendElementText(elementRuby, ruby)) {
     elementBase.clear();
@@ -536,7 +537,7 @@ LookupStatus lookupOwned(const std::string_view bookCachePath, const std::string
   if (readingCount == 0) return LookupStatus::NotFound;
 
   // The joined output can approach the complete 16 KiB file cap, so it cannot live on the task stack.
-	// Allocate it exactly once and transfer ownership to the backend only after every byte has been filled.
+  // Allocate it exactly once and transfer ownership to the backend only after every byte has been filled.
   auto output = makeUniqueNoThrow<char[]>(outputBytes + 1);
   if (!output) {
     LOG_ERR(TAG, "OOM allocating %u-byte glossary result", static_cast<unsigned>(outputBytes + 1));

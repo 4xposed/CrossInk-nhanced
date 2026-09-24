@@ -2,10 +2,10 @@
 
 #include <AnkiDeckTypes.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <algorithm>
 
 constexpr size_t kMaxCardTextLayoutLines = 256;
 
@@ -20,7 +20,6 @@ struct CardTextLine {
   int16_t x = 0;
   int16_t y = 0;
   FontRole role = FontRole::Normal;
-
 };
 
 // Layout is bounded by what the screen can display. Excess wrapped lines use
@@ -34,7 +33,7 @@ struct CardTextLayout {
 namespace anki_card_text_detail {
 inline bool isUtf8Continuation(const unsigned char byte) { return (byte & 0xC0U) == 0x80U; }
 
-inline char* nextUtf8CodePoint(char* const cursor, char* const end) {
+inline char* nextUtf8CodePoint(char* const cursor, const char* const end) {
   char* next = cursor + 1;
   while (next < end && isUtf8Continuation(static_cast<unsigned char>(*next))) ++next;
   return next;
@@ -53,7 +52,7 @@ bool layoutCardText(char* const text, const uint16_t textLength, const int left,
 
   const int contentHeight = bottom - top;
   const int contentWidth = right - left;
-  char* const textEnd = text + textLength;
+  const char* const textEnd = text + textLength;
   const auto measureRange = [&measure](char* const start, char* const end) {
     const char saved = *end;
     *end = '\0';
@@ -146,8 +145,8 @@ struct FlattenedCardText {
 // Flattens ordered v2 field blocks into the allocation tail. The output is
 // bounded by the format's 4,096-byte side limit and stays valid until the
 // next field decode overwrites its backing buffer.
-bool flattenCardFieldsInPlace(const std::array<CardField, kMaxCardFields>& fields, uint8_t fieldCount,
-                              char* buffer, size_t bufferCapacity, FlattenedCardText& out);
+bool flattenCardFieldsInPlace(const std::array<CardField, kMaxCardFields>& fields, uint8_t fieldCount, char* buffer,
+                              size_t bufferCapacity, FlattenedCardText& out);
 
 // Lays out primary blocks at the supplied larger font metrics and secondary
 // blocks at normal metrics. Unlike the baseline layout, inability to fit is a
@@ -180,7 +179,7 @@ bool layoutCardTextWithPrimaryFields(const FlattenedCardText& text, const int le
     return true;
   };
   const auto appendParagraph = [&contentWidth, &measureRange, &appendLine](const FontRole role, char* lineStart,
-                                                                            char* const paragraphEnd) {
+                                                                           char* const paragraphEnd) {
     if (lineStart == paragraphEnd) return appendLine(role, lineStart, paragraphEnd);
     while (lineStart < paragraphEnd) {
       char* cursor = lineStart;

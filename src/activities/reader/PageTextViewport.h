@@ -13,7 +13,8 @@ inline bool pageTextRangeContains(PageTextSourceView source, uint16_t first, uin
   for (uint16_t i = 0; i < count; ++i) {
     const auto& glyph = source.glyphs[first + i];
     if (glyph.pageWord != PageTextGlyph::kSyntheticPageWord &&
-        pageTextViewportContains({glyph.x, glyph.y, glyph.width, glyph.height}, x, y)) return true;
+        pageTextViewportContains({glyph.x, glyph.y, glyph.width, glyph.height}, x, y))
+      return true;
   }
   return false;
 }

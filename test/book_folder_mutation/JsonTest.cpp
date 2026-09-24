@@ -3,8 +3,8 @@
 #include <filesystem>
 #include <fstream>
 
-#include "test/UniqueTempDirectory.h"
 #include "BookMutationJson.h"
+#include "test/UniqueTempDirectory.h"
 using namespace bookmutation;
 namespace {
 PathEdit change(void*, PathField field, const char*, const char* value, char* out, size_t n) {

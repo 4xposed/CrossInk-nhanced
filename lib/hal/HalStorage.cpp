@@ -1,12 +1,12 @@
 #include "CheckedDirectoryEof.h"
 #define HAL_STORAGE_IMPL
-#include "HalStorage.h"
-
 #include <Arduino.h>
 #include <FS.h>  // need to be included before SdFat.h for compatibility with FS.h's File class
 #include <HalClock.h>
 #include <Logging.h>
 #include <SDCardManager.h>
+
+#include "HalStorage.h"
 #if FREEINK_CAP_USB_MSC
 #include <UsbMassStorage.h>
 #endif

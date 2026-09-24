@@ -1,8 +1,8 @@
 #include "EpubReaderWordLookupActivity.h"
 
-#include <Arduino.h>
 #include <AnkiDeck.h>
 #include <AnkiTermText.h>
+#include <Arduino.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
@@ -988,7 +988,8 @@ void EpubReaderWordLookupActivity::finishLookup(const bool cancelled) {
 
 void EpubReaderWordLookupActivity::addCurrentTermToAnki() {
   if (flow_.state() != DictionaryLookupFlowState::Ready || flow_.workerOwned() ||
-      DictionaryLookupWorker::instance().isBusy() || activeResult_.status != DictionaryStatus::Found) return;
+      DictionaryLookupWorker::instance().isBusy() || activeResult_.status != DictionaryStatus::Found)
+    return;
   // Card-sized text exceeds the render/main task stack budget. Allocate only
   // for this explicit save action and release it before returning to lookup.
   auto answer = makeUniqueNoThrow<char[]>(kMaxCardFieldTextBytes + 1);
@@ -1008,18 +1009,17 @@ void EpubReaderWordLookupActivity::addCurrentTermToAnki() {
       for (uint16_t i = first; i < end; ++i) {
         char encoded[4];
         size_t count = 0;
-        if (appendCodepoint(source.glyphs[i].codepoint, encoded, sizeof(encoded), count))
-          text.append({encoded, count});
+        if (appendCodepoint(source.glyphs[i].codepoint, encoded, sizeof(encoded), count)) text.append({encoded, count});
       }
       text.append("]\n\n");
     }
     const auto status = engine_.streamDefinition(activeResult_.definition, DictionaryDefinitionMode::Styled,
-        {&text, [](void* context, const DictionaryDefinitionSpan& span) {
-          auto& output = *static_cast<AnkiTermText*>(context);
-          if (span.lineBreak || span.listItem) output.append("\n");
-          output.append(span.text);
-          return true;
-        }});
+                                                 {&text, [](void* context, const DictionaryDefinitionSpan& span) {
+                                                    auto& output = *static_cast<AnkiTermText*>(context);
+                                                    if (span.lineBreak || span.listItem) output.append("\n");
+                                                    output.append(span.text);
+                                                    return true;
+                                                  }});
     if (status == DictionaryStatus::Found) {
       const auto term = activeResult_.headword.empty() ? activeResult_.surface.view() : activeResult_.headword.view();
       saved = AnkiDeck::addSavedTerm(term.empty() ? lookupText_.view() : term, text.finish(), tr(STR_ANKI_SAVED_TERMS));
@@ -1030,7 +1030,9 @@ void EpubReaderWordLookupActivity::addCurrentTermToAnki() {
     LOG_ERR("WLA", "OOM allocating saved Anki term text");
   }
   ankiFeedbackGeneration_ = flow_.generation();
-  ankiSaveFeedback_ = saved == AnkiDeck::AddTermResult::Added ? 1 : saved == AnkiDeck::AddTermResult::AlreadyAdded ? 2 : 3;
+  ankiSaveFeedback_ = saved == AnkiDeck::AddTermResult::Added          ? 1
+                      : saved == AnkiDeck::AddTermResult::AlreadyAdded ? 2
+                                                                       : 3;
   publishRenderSnapshot();
 }
 

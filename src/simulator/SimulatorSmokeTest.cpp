@@ -1,4 +1,5 @@
 #include <AnkiDeck.h>
+
 #include "components/TouchUi.h"
 #ifdef SIMULATOR
 
@@ -11,8 +12,8 @@
 #include <ReviewStateStore.h>
 
 #include <algorithm>
-#include <cstdlib>
 #include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <vector>
@@ -343,7 +344,8 @@ class SimulatorSmokeTest {
       return value.nameId == StrId::STR_ANKI_FRONT_SIZE;
     });
     if (setting == fonts.end() || setting->valuePtr != &CrossPointSettings::ankiFontScale ||
-        setting->enumValues.size() != 3) fail("Anki front size missing from font settings");
+        setting->enumValues.size() != 3)
+      fail("Anki front size missing from font settings");
     JsonDocument original;
     SETTINGS.toJson(original);
     for (uint8_t scale = 1; scale <= 3; ++scale) {
@@ -611,8 +613,7 @@ class SimulatorSmokeTest {
       }
       LOG_INF("SMOKE", "Verified Anki size changes after settings return");
     }
-    if (std::getenv("CROSSINK_SIMULATOR_ANKI_CAPTURE") &&
-        (ankiFront || std::strstr(name, "Anki answer revealed"))) {
+    if (std::getenv("CROSSINK_SIMULATOR_ANKI_CAPTURE") && (ankiFront || std::strstr(name, "Anki answer revealed"))) {
       RenderLock lock;
       bool hasInk = false;
       const auto* pixels = renderer.getFrameBuffer();
@@ -627,8 +628,9 @@ class SimulatorSmokeTest {
             break;
           }
       if (!hasInk) fail("Anki card content is blank");
-      if (!ScreenshotUtil::saveFramebufferAsBmp(ankiFront ? "/anki-front.bmp" : "/anki-answer.bmp", renderer.getFrameBuffer(),
-                                                renderer.getDisplayWidth(), renderer.getDisplayHeight()))
+      if (!ScreenshotUtil::saveFramebufferAsBmp(ankiFront ? "/anki-front.bmp" : "/anki-answer.bmp",
+                                                renderer.getFrameBuffer(), renderer.getDisplayWidth(),
+                                                renderer.getDisplayHeight()))
         fail("Could not capture Anki card");
     }
   }
@@ -2975,7 +2977,8 @@ class SimulatorSmokeTest {
       case ScriptActionType::VerifyLookupStableRedraw: {
         auto* lookup = dynamic_cast<EpubReaderWordLookupActivity*>(activityManager.currentForSimulatorTest());
         if (!lookup) fail("Expected dictionary for stable redraw check");
-        if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered) fail("Initial lookup redraw failed");
+        if (activityManager.requestUpdateAndWait() != RequestUpdateResult::Rendered)
+          fail("Initial lookup redraw failed");
         for (unsigned sample = 0; sample < 12; ++sample) {
           const unsigned before = lookup->simulatorBackgroundRenderCount();
           const auto started = std::chrono::steady_clock::now();

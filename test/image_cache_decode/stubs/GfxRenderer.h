@@ -6,45 +6,45 @@ class GfxRenderer {
   enum RenderMode { BW, GRAYSCALE_MSB, GRAYSCALE_LSB };
   enum Orientation { Portrait, LandscapeClockwise, PortraitInverted, LandscapeCounterClockwise };
   static inline int accesses = 0;
-  std::array<uint8_t, 512 * 512 / 8> pixels{};
+  mutable std::array<uint8_t, 512 * 512 / 8> pixels{};
   Orientation orientation = LandscapeCounterClockwise;
-  int getScreenWidth() {
+  int getScreenWidth() const {
     ++accesses;
     return 512;
   }
-  int getScreenHeight() {
+  int getScreenHeight() const {
     ++accesses;
     return 512;
   }
-  uint8_t* getWriteTarget() {
+  uint8_t* getWriteTarget() const {
     ++accesses;
     return pixels.data();
   }
-  int getWriteOriginY() {
+  int getWriteOriginY() const {
     ++accesses;
     return 0;
   }
-  int getWriteRows() {
+  int getWriteRows() const {
     ++accesses;
     return 512;
   }
-  RenderMode getRenderMode() {
+  RenderMode getRenderMode() const {
     ++accesses;
     return BW;
   }
-  int getDisplayWidthBytes() {
+  int getDisplayWidthBytes() const {
     ++accesses;
     return 64;
   }
-  int getDisplayWidth() {
+  int getDisplayWidth() const {
     ++accesses;
     return 512;
   }
-  int getDisplayHeight() {
+  int getDisplayHeight() const {
     ++accesses;
     return 512;
   }
-  Orientation getOrientation() {
+  Orientation getOrientation() const {
     ++accesses;
     return orientation;
   }

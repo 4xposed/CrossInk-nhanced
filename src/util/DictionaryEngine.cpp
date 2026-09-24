@@ -387,7 +387,7 @@ DictionaryScanIdentityStatus DictionaryEngine::stepScanIdentity(DictionaryScanId
   }
   auto status = backendKind_ == DictionaryBackendKind::Japanese ? japaneseBackend_.stepScanIdentity(state, budget)
                                                                 : starDictBackend_.stepScanIdentity(state, budget);
-  if (cancelled_) {
+  if (cancelled_.load()) {
     state.cancel();
     return state.status();
   }

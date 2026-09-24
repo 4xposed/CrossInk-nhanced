@@ -16,16 +16,14 @@ enum class AnkiReviewGrade : uint8_t {
 namespace AnkiReviewSchedule {
 
 inline uint16_t clampInterval(const uint32_t interval) {
-  return static_cast<uint16_t>(interval > std::numeric_limits<uint16_t>::max()
-                                   ? std::numeric_limits<uint16_t>::max()
-                                   : interval);
+  return static_cast<uint16_t>(interval > std::numeric_limits<uint16_t>::max() ? std::numeric_limits<uint16_t>::max()
+                                                                               : interval);
 }
 
 inline uint32_t addReviews(const uint32_t postGradeReviewCount, const uint16_t interval) {
   const uint64_t dueReviewCount = static_cast<uint64_t>(postGradeReviewCount) + interval;
-  return dueReviewCount > std::numeric_limits<uint32_t>::max()
-             ? std::numeric_limits<uint32_t>::max()
-             : static_cast<uint32_t>(dueReviewCount);
+  return dueReviewCount > std::numeric_limits<uint32_t>::max() ? std::numeric_limits<uint32_t>::max()
+                                                               : static_cast<uint32_t>(dueReviewCount);
 }
 
 inline ReviewState applyGrade(const ReviewState& current, const AnkiReviewGrade grade,

@@ -75,17 +75,18 @@ bool BookDeletionSnapshot::collect(const char* root, SnapshotMode mode, uint8_t 
 
 bool BookDeletionSnapshot::append(const char* root, SnapshotMode mode, uint8_t maxDepth) {
   if (!root || !*root || !restoreRoot(root)) return false;
-  const uint8_t rootIndex = static_cast<uint8_t>(rootCount_ - 1);
+  const uint8_t snapshotRootIndex = static_cast<uint8_t>(rootCount_ - 1);
   FsFile probe = Storage.open(root);
   if (!probe) return false;
-  const bool isDirectory = probe.isDirectory();
+  const bool rootIsDirectory = probe.isDirectory();
   if (!probe.close()) return false;
-  if (!isDirectory) {
-    return mode == SnapshotMode::MangaMove || !hasFileMetadata(root) || restoreEntry(root, Kind::File, rootIndex);
+  if (!rootIsDirectory) {
+    return mode == SnapshotMode::MangaMove || !hasFileMetadata(root) ||
+           restoreEntry(root, Kind::File, snapshotRootIndex);
   }
   if (directoryCount_ >= MAX_DIRECTORIES) return false;
   const size_t first = directoryCount_;
-  directories_[directoryCount_] = roots_[rootIndex];
+  directories_[directoryCount_] = roots_[snapshotRootIndex];
   depths_[directoryCount_++] = 0;
   char name[256];
   for (size_t index = first; index < directoryCount_; ++index) {
@@ -129,7 +130,7 @@ bool BookDeletionSnapshot::append(const char* root, SnapshotMode mode, uint8_t m
         directories_[directoryCount_] = childOffset;
         depths_[directoryCount_++] = depths_[index] + 1;
       } else
-        entries_[entryCount_++] = {childOffset, Kind::File, rootIndex};
+        entries_[entryCount_++] = {childOffset, Kind::File, snapshotRootIndex};
     }
     if (directory.enumerationFailed() || directory.allocationFailed()) {
       directory.close();
@@ -145,7 +146,7 @@ bool BookDeletionSnapshot::append(const char* root, SnapshotMode mode, uint8_t m
         entryCount_ = 0;
         return false;
       }
-      entries_[entryCount_++] = {directoryOffset, Kind::Manga, rootIndex};
+      entries_[entryCount_++] = {directoryOffset, Kind::Manga, snapshotRootIndex};
     }
   }
   return true;

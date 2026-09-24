@@ -200,15 +200,16 @@ bool clearMangaDisposableCache(const std::string& cache) {
     LOG_ERR("BookCache", "OOM clearing manga cache");
     return false;
   }
+  char* const scratchData = scratch.get();
   const auto presence =
-      bookmutation::probe(cache.c_str(), scratch.get(), reinterpret_cast<uint8_t*>(scratch.get() + 1024));
+      bookmutation::probe(cache.c_str(), scratch.get(), reinterpret_cast<uint8_t*>(scratchData + 1024));
   if (presence == bookmutation::Presence::Missing) return true;
   if (presence != bookmutation::Presence::Directory) return false;
   FsFile directory = Storage.open(cache.c_str());
   if (!directory) return false;
   bool ok = true;
   for (FsFile child = directory.openNextFileChecked(); child; child = directory.openNextFileChecked()) {
-    char* name = scratch.get() + 1024;
+    char* name = scratchData + 1024;
     const size_t n = child.getName(name, 256);
     const bool folder = child.isDirectory();
     if (!child.close() || !n || n >= 255) {

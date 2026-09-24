@@ -79,7 +79,7 @@ bool recoverBackup(const std::string& statePath) {
 }
 }  // namespace
 
-MangaProgressStore::MangaProgressStore(const std::string& bookPath) { statePath_ = statePath(bookPath); }
+MangaProgressStore::MangaProgressStore(const std::string& bookPath) : statePath_(statePath(bookPath)) {}
 
 std::string MangaProgressStore::statePath(const std::string& bookPath) {
   const uint32_t crc = uzlib_crc32(bookPath.data(), static_cast<unsigned int>(bookPath.size()), 0);

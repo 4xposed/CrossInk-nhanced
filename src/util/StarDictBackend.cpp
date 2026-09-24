@@ -390,7 +390,8 @@ const char* StarDictBackend::scanFilePath(unsigned ordinal) {
   if (ordinal >= 4 || !plainBuffer_ || resolvedPath_.empty()) return nullptr;
   const size_t length = resolvedPath_.view().size();
   std::memcpy(plainBuffer_.get(), resolvedPath_.c_str(), length);
-  std::strcpy(plainBuffer_.get() + length, suffixes[ordinal]);
+  char* const buffer = plainBuffer_.get();
+  std::strcpy(buffer + length, suffixes[ordinal]);
   return plainBuffer_.get();
 }
 

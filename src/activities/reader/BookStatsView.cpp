@@ -758,10 +758,8 @@ void renderEditBookDatesPage(GfxRenderer& renderer, const MappedInputManager* ma
 }
 
 int readingLanguageRowCount(const ReadingLanguageTotals& totals) {
-  int count = 0;
-  for (const auto& entry : totals.entries)
-    if (entry.seconds) ++count;
-  return count;
+  return static_cast<int>(std::count_if(std::begin(totals.entries), std::end(totals.entries),
+                                        [](const auto& entry) { return entry.seconds != 0; }));
 }
 int readingLanguageRowsPerPage(const GfxRenderer& renderer) {
   const auto& metrics = UITheme::getInstance().getMetrics();

@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <MangaBook.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 namespace library {
@@ -48,7 +49,7 @@ ScanState LibraryCatalog::fail(const char* operation) {
   counts.fill(0);
   Storage.remove(QUEUE);
   Storage.remove(RECORDS);
-  for (auto p : OFFSETS) Storage.remove(p);
+  for (const auto* p : OFFSETS) Storage.remove(p);
   status = ScanState::Failed;
   return status;
 }
@@ -57,7 +58,7 @@ void LibraryCatalog::cancel() {
   counts.fill(0);
   Storage.remove(QUEUE);
   Storage.remove(RECORDS);
-  for (auto p : OFFSETS) Storage.remove(p);
+  for (const auto* p : OFFSETS) Storage.remove(p);
   status = ScanState::Cancelled;
 }
 bool LibraryCatalog::enqueue(const char* value) {
@@ -105,11 +106,10 @@ bool LibraryCatalog::begin(const char* mangaFolder, const char* booksFolder, con
     fail("open");
     return false;
   }
-  for (auto& file : offsets)
-    if (!file) {
-      fail("offset open");
-      return false;
-    }
+  if (std::any_of(offsets.begin(), offsets.end(), [](const auto& file) { return !file; })) {
+    fail("offset open");
+    return false;
+  }
   if (records.write("CLIB\1", 5) != 5 || !enqueue("/")) {
     fail("initial write");
     return false;

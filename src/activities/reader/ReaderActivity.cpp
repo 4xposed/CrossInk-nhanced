@@ -1,19 +1,17 @@
 #include "ReaderActivity.h"
 
 #include <AnkiDeck.h>
-
 #include <FsHelpers.h>
 #include <HalStorage.h>
 #include <I18n.h>
-#include <Memory.h>
 #include <MangaBook.h>
-
-#include "MangaReaderActivity.h"
+#include <Memory.h>
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "Epub.h"
 #include "EpubReaderActivity.h"
+#include "MangaReaderActivity.h"
 #include "Txt.h"
 #include "TxtReaderActivity.h"
 #include "Xtc.h"
@@ -186,7 +184,8 @@ void ReaderActivity::onGoToEpubReader(std::unique_ptr<Epub> epub,
 
 void ReaderActivity::onGoToAnkiReview(std::unique_ptr<AnkiDeck> deck) {
   currentBookPath = deck->getPath();
-  auto activity = makeUniqueNoThrow<AnkiReviewActivity>(renderer, mappedInput, std::move(deck), initialRefreshCountdown());
+  auto activity =
+      makeUniqueNoThrow<AnkiReviewActivity>(renderer, mappedInput, std::move(deck), initialRefreshCountdown());
   if (!activity) {
     LOG_ERR("READER", "OOM: Anki review activity");
     snprintf(APP_STATE.pendingAlertTitle, sizeof(APP_STATE.pendingAlertTitle), "%s", tr(STR_MEMORY_ERROR));
