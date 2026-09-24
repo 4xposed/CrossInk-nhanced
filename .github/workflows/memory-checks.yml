@@ -1,0 +1,129 @@
+name: Memory checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  firmware-budgets:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [default, x4-pro]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned PlatformIO
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake jq
+          uv pip install --system https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+      - name: Test stack gate
+        run: cmake -DMODE=stack -P test/memory_checks/checks.cmake
+      - name: Build with stack diagnostics
+        env:
+          CROSSINK_MEMORY_CHECKS: '1'
+        run: pio run -j1 -e ${{ matrix.environment }}
+      - name: Check stack budgets
+        run: bash scripts/memory_checks/check.sh stack .pio/build/${{ matrix.environment }} scripts/memory_checks/stack-${{ matrix.environment }}.json
+      - name: Check static RAM budgets
+        run: cmake -DMODE=ram -DELF=${{ github.workspace }}/.pio/build/${{ matrix.environment }}/firmware.elf -DENVIRONMENT=${{ matrix.environment }} -P test/memory_checks/checks.cmake
+      - name: Preserve pinned decoder sources for native tests
+        if: matrix.environment == 'default'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-image-dependencies
+          include-hidden-files: true
+          path: |
+            .pio/libdeps/default/JPEGDEC
+            .pio/libdeps/default/PNGdec
+          if-no-files-found: error
+      - name: Preserve stack reports and link map
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-${{ matrix.environment }}
+          include-hidden-files: true
+          path: |
+            .pio/build/${{ matrix.environment }}/**/*.su
+            .pio/build/${{ matrix.environment }}/*.map
+            .pio/build/${{ matrix.environment }}/memory-stack-manifest.json
+          if-no-files-found: error
+
+  native-sanitizers:
+    needs: firmware-budgets
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang-18 cmake jq libexpat1-dev zlib1g-dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-image-dependencies
+          path: .pio/libdeps/default
+      - name: Require real decoder tests
+        run: test -f .pio/libdeps/default/JPEGDEC/src/JPEGDEC.cpp && test -f .pio/libdeps/default/PNGdec/src/PNGdec.cpp
+      - name: Configure sanitized native tests
+        run: cmake -S test -B build/memory-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCROSSINK_SANITIZERS=ON
+      - name: Build native tests
+        run: cmake --build build/memory-asan -j 2
+      - name: Run native tests and sanitizer negative probes
+        run: ctest --test-dir build/memory-asan --output-on-failure -j 2
+      - name: Preserve test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-sanitizers
+          path: build/memory-asan/Testing/Temporary/
+
+  native-analysis:
+    needs: firmware-budgets
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install pinned analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake jq libexpat1-dev zlib1g-dev
+          python -m pip install clang-tidy==21.1.6
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-image-dependencies
+          path: .pio/libdeps/default
+      - name: Configure native compile database
+        run: cmake -S test -B build/memory-analysis -DCROSSINK_MEMORY_ANALYSIS=ON
+      - name: Check focused memory diagnostics and negative probes
+        run: |
+          ctest --test-dir build/memory-analysis -R MemoryClangTidyProbe --output-on-failure
+          cmake --build build/memory-analysis --target memory-lint

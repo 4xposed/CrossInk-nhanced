@@ -5,6 +5,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(CROSSINK_MEMORY_ANALYSIS "Add the focused clang-tidy target" OFF)
+if(CROSSINK_MEMORY_ANALYSIS)
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
+option(CROSSINK_SANITIZERS "Instrument native tests with AddressSanitizer and UBSan" OFF)
+if(CROSSINK_SANITIZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "CROSSINK_SANITIZERS requires Clang")
+  endif()
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
+  add_compile_options(-fsanitize-ignorelist=${CMAKE_CURRENT_SOURCE_DIR}/../scripts/memory_checks/sanitizer-ignorelist.txt)
+  add_link_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -121,6 +136,28 @@ add_test(NAME LookupPerformanceGateTest
   COMMAND ${Python3_EXECUTABLE} -B ${REPO_ROOT}/scripts/test_lookup_performance.py)
 add_test(NAME MangaSourceBoundaryTest
   COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s ${REPO_ROOT}/test/source_contracts -v)
+add_test(NAME MemoryStackGateTest
+  COMMAND ${CMAKE_COMMAND} -DMODE=stack -DWORK=${CMAKE_CURRENT_BINARY_DIR}/memory-probes/stack
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/memory_checks/checks.cmake)
+if(CROSSINK_SANITIZERS)
+  add_executable(MemorySanitizerProbe memory_checks/sanitizer_probe.cpp)
+  add_test(NAME SanitizerInstrumentationTest
+    COMMAND ${CMAKE_COMMAND} -DMODE=sanitizers -DPROBE=$<TARGET_FILE:MemorySanitizerProbe>
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/memory_checks/checks.cmake)
+endif()
+if(CROSSINK_MEMORY_ANALYSIS)
+  find_program(CROSSINK_CLANG_TIDY NAMES clang-tidy)
+  if(NOT CROSSINK_CLANG_TIDY)
+    message(FATAL_ERROR "CROSSINK_MEMORY_ANALYSIS requires clang-tidy 21.1.6")
+  endif()
+  add_custom_target(memory-lint
+    COMMAND bash ${REPO_ROOT}/scripts/memory_checks/check.sh tidy ${CMAKE_CURRENT_BINARY_DIR} ${CROSSINK_CLANG_TIDY}
+    USES_TERMINAL VERBATIM)
+  add_test(NAME MemoryClangTidyProbe
+    COMMAND ${CMAKE_COMMAND} -DMODE=tidy -DTOOL=${CROSSINK_CLANG_TIDY}
+      -DWORK=${CMAKE_CURRENT_BINARY_DIR}/memory-probes/tidy
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/memory_checks/checks.cmake)
+endif()
 
 add_subdirectory(anki_deck)
 add_subdirectory(anki_review)

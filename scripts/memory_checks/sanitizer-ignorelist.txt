@@ -1,0 +1,11 @@
+# Existing third-party debt only. Do not add application code here.
+# Host fast paths explicitly select unaligned loads/stores.
+[alignment]
+src:*/JPEGDEC/src/jpeg.inl
+src:*/PNGdec/src/inffast.c
+src:*/PNGdec/src/inflate.c
+# Existing JPEGDEC Huffman construction shifts by (iBitNum - 5/-4) when
+# iBitNum is smaller. Real-codec fixtures reproduce this UB. Keep ASan,
+# alignment outside the above paths, and other UBSan categories enabled.
+[shift]
+fun:*JPEGMakeHuffTables*

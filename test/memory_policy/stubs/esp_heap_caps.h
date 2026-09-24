@@ -18,6 +18,12 @@ struct Heap {
   int fail = 0;
   size_t attempts = 0;
   size_t failOnAttempt = 0;
+  size_t requestLimit = SIZE_MAX;
+  size_t liveLimit = SIZE_MAX;
+  size_t maxRequest = 0;
+  size_t liveBytes = 0;
+  size_t peakBytes = 0;
+  size_t budgetFailures = 0;
 };
 inline Heap internal{1024 * 1024, 1024 * 1024, 1024 * 1024};
 inline Heap external{8 * 1024 * 1024, 8 * 1024 * 1024, 8 * 1024 * 1024};
@@ -44,6 +50,11 @@ inline void* heap_caps_malloc(size_t bytes, uint32_t caps) {
   if (caps == MALLOC_CAP_DEFAULT && fakeheap::defaultExternal) caps = MALLOC_CAP_SPIRAM;
   auto& h = fakeheap::heap(caps);
   ++h.attempts;
+  h.maxRequest = std::max(h.maxRequest, bytes);
+  if (bytes > h.requestLimit || h.liveBytes > h.liveLimit || bytes > h.liveLimit - h.liveBytes) {
+    ++h.budgetFailures;
+    return nullptr;
+  }
   if (h.failOnAttempt == h.attempts) return nullptr;
   if (h.fail) {
     --h.fail;
@@ -57,6 +68,8 @@ inline void* heap_caps_malloc(size_t bytes, uint32_t caps) {
   void* p = std::malloc(bytes);
   if (p) {
     h.free -= bytes;
+    h.liveBytes += bytes;
+    h.peakBytes = std::max(h.peakBytes, h.liveBytes);
     fakeheap::live.emplace(p, fakeheap::Allocation{bytes, bool(caps & MALLOC_CAP_SPIRAM)});
   }
   return p;
@@ -65,7 +78,9 @@ inline void heap_caps_free(void* p) {
   if (!p) return;
   const auto i = fakeheap::live.find(p);
   assert(i != fakeheap::live.end());
-  (i->second.external ? fakeheap::external : fakeheap::internal).free += i->second.bytes;
+  auto& h = i->second.external ? fakeheap::external : fakeheap::internal;
+  h.free += i->second.bytes;
+  h.liveBytes -= i->second.bytes;
   fakeheap::live.erase(i);
   std::free(p);
 }

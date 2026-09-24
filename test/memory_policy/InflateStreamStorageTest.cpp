@@ -142,3 +142,68 @@ TEST_F(InflateStreamStorageTest, CorruptAndTruncatedStreamsFail) {
     EXPECT_EQ(status, InflateStream::Status::Error);
   }
 }
+
+// Fixed budgets intentionally do not derive from requiredStorageSize(): growing
+// the production allocation must require a reviewed budget change.
+TEST_F(InflateStreamStorageTest, StreamingStaysWithinPoolBudgetsAcrossRepeatedBooks) {
+  for (const bool psram : {false, true}) {
+    fakeheap::reset(psram);
+    fakeheap::internal.requestLimit = psram ? 12000 : 32768;
+    fakeheap::internal.liveLimit = psram ? 12000 : 45000;
+    fakeheap::external.requestLimit = 32768;
+    fakeheap::external.liveLimit = 32768;
+    for (int book = 0; book < 3; ++book) {
+      InflateStream stream;
+      ASSERT_TRUE(stream.init(true));
+      decode(stream, true);
+      stream.deinit();
+      EXPECT_EQ(fakeheap::internal.liveBytes, 0u);
+      EXPECT_EQ(fakeheap::external.liveBytes, 0u);
+      EXPECT_TRUE(fakeheap::live.empty());
+    }
+    EXPECT_LE(fakeheap::internal.maxRequest, psram ? 12000u : 32768u);
+    EXPECT_LE(fakeheap::internal.peakBytes, psram ? 12000u : 45000u);
+    EXPECT_EQ(fakeheap::external.peakBytes, psram ? 32768u : 0u);
+    EXPECT_EQ(fakeheap::internal.budgetFailures, 0u);
+    EXPECT_EQ(fakeheap::external.budgetFailures, 0u);
+  }
+}
+
+TEST_F(InflateStreamStorageTest, BudgetDenialAndEveryC3AllocationFailureReleasePartialState) {
+  for (size_t failure = 1; failure <= 2; ++failure) {
+    fakeheap::reset(false);
+    fakeheap::internal.failOnAttempt = failure;
+    InflateStream stream;
+    EXPECT_FALSE(stream.init(true));
+    EXPECT_TRUE(fakeheap::live.empty());
+    EXPECT_EQ(fakeheap::internal.liveBytes, 0u);
+  }
+  fakeheap::reset(false);
+  fakeheap::internal.requestLimit = 32767;
+  InflateStream stream;
+  EXPECT_FALSE(stream.init(true));
+  EXPECT_EQ(fakeheap::internal.budgetFailures, 1u);
+  EXPECT_EQ(fakeheap::internal.liveBytes, 0u);
+  EXPECT_TRUE(fakeheap::live.empty());
+}
+
+TEST_F(InflateStreamStorageTest, FragmentedPoolsCannotSpendAggregateFreeMemory) {
+  fakeheap::internal.largest = 20000;
+  fakeheap::external.largest = 20000;
+  InflateStream stream;
+  EXPECT_FALSE(stream.init(true));
+  EXPECT_TRUE(fakeheap::live.empty());
+  EXPECT_EQ(fakeheap::internal.liveBytes, 0u);
+  EXPECT_EQ(fakeheap::external.liveBytes, 0u);
+}
+
+TEST_F(InflateStreamStorageTest, PeakBudgetRejectsIndividuallyAffordableBuffers) {
+  fakeheap::reset(false);
+  fakeheap::internal.requestLimit = 32768;
+  fakeheap::internal.liveLimit = 32768;
+  InflateStream stream;
+  EXPECT_FALSE(stream.init(true));
+  EXPECT_EQ(fakeheap::internal.budgetFailures, 1u);
+  EXPECT_EQ(fakeheap::internal.liveBytes, 0u);
+  EXPECT_TRUE(fakeheap::live.empty());
+}

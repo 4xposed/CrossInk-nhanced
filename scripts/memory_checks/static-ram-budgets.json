@@ -1,0 +1,12 @@
+{
+  "default": {
+    "machine": "EM_RISCV",
+    "measured": {"dram": 65816, "iram": 64512, "rtc": 5800},
+    "limits": {"dram": 67864, "iram": 66560, "rtc": 6056}
+  },
+  "x4-pro": {
+    "machine": "EM_XTENSA",
+    "measured": {"dram": 102132, "iram": 80896, "rtc": 5872},
+    "limits": {"dram": 104180, "iram": 82944, "rtc": 6128}
+  }
+}
