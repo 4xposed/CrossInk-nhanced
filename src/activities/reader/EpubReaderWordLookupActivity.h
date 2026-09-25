@@ -171,6 +171,10 @@ class EpubReaderWordLookupActivity final : public Activity {
   void logReadyTime();
   void observeOpenDeadline(uint32_t nowMs);
   bool resolvePendingInitialTouch();
+  bool concludeInitialTouchMiss(uint16_t touchedGlyph);
+  void startTouchResolver();
+  void runTouchResolverSlice();
+  static DictionaryStatus probeEngine(void* context, const DictionaryQuery& query, DictionaryProbeResult& out);
   uint16_t candidateAtPoint(int x, int y, bool exactOnly) const;
 
   void clearDefinitionSelection();
@@ -252,6 +256,10 @@ class EpubReaderWordLookupActivity final : public Activity {
   bool identityStarted_ = false;
   HorizontalPageTextSource pageSource_;
   PageWordScanner scanner_;
+  JapaneseTouchResolver touchResolver_;
+  // The touched word proven by touchResolver_ before the progressive scan
+  // reaches it; valid while flow_.provisional().
+  PageWordCandidate provisionalCandidate_{};
   PageWordScanCache scanCache_;
   DictionaryDefinitionModel definitionModel_;
   DictionaryLookupFlow flow_;

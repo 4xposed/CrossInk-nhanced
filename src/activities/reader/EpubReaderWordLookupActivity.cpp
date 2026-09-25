@@ -279,6 +279,11 @@ DictionaryStatus EpubReaderWordLookupActivity::reopenCancelledEngine() {
   return status;
 }
 
+DictionaryStatus EpubReaderWordLookupActivity::probeEngine(void* context, const DictionaryQuery& query,
+                                                           DictionaryProbeResult& out) {
+  return static_cast<EpubReaderWordLookupActivity*>(context)->engine_.probe(query, out);
+}
+
 DictionaryStatus EpubReaderWordLookupActivity::initializePageMode(const bool deferInitialSelection) {
   if (!externalMode_ && !page_ && readerPageReload_) {
     RenderLock lock(*this);
@@ -319,9 +324,8 @@ DictionaryStatus EpubReaderWordLookupActivity::initializePageMode(const bool def
   const PageTextSourceView source = sourceView();
   cacheLoaded_ = false;
 
-  const DictionaryProbeFn probe{this, [](void* context, const DictionaryQuery& query, DictionaryProbeResult& out) {
-                                  return static_cast<EpubReaderWordLookupActivity*>(context)->engine_.probe(query, out);
-                                }};
+  touchResolver_.clear();
+  const DictionaryProbeFn probe{this, &EpubReaderWordLookupActivity::probeEngine};
   const PageWordScannerMemoryRecoveryFn memoryRecovery{
       this, [](void* context) {
         auto& self = *static_cast<EpubReaderWordLookupActivity*>(context);
@@ -429,6 +433,7 @@ void EpubReaderWordLookupActivity::onEnter() {
       finishLookup(true);
       return;
     }
+    startTouchResolver();
   }
 
   publishRenderSnapshot(false);
@@ -688,7 +693,7 @@ DictionaryStatus EpubReaderWordLookupActivity::prepareLookupText(const uint16_t 
       return directWord_.empty() ? DictionaryStatus::NotFound : DictionaryStatus::OutOfMemory;
     }
   } else {
-    const PageWordCandidate* candidate = candidateAt(candidateIndex);
+    const PageWordCandidate* candidate = flow_.provisional() ? &provisionalCandidate_ : candidateAt(candidateIndex);
     if (!candidate) {
       LOG_ERR("WLA", "Lookup flow selected a missing page candidate");
       return DictionaryStatus::ReadError;
@@ -870,11 +875,12 @@ void EpubReaderWordLookupActivity::processWorkerCompletion() {
 
 void EpubReaderWordLookupActivity::runScanSlice() {
   if (cacheLoaded_ || flow_.scanComplete() || flow_.scanFailed() || flow_.workerOwned() ||
-      DictionaryLookupWorker::instance().isBusy() || scanner_.done())
+      DictionaryLookupWorker::instance().isBusy() || scanner_.done() || touchResolver_.pending())
     return;
   identityPolicy_.progressiveStarted();
   const uint16_t beforeCount = scanner_.candidateCount();
   const bool beforeDone = scanner_.done();
+  const DictionaryLookupFlowState beforeState = flow_.state();
   flow_.beginScanSlice(millis());
   DictionaryStatus terminal = DictionaryStatus::Found;
   while (flow_.canStepScan(millis())) {
@@ -896,9 +902,10 @@ void EpubReaderWordLookupActivity::runScanSlice() {
       (flow_.scanFailed() || (scanner_.done() && scanner_.candidateCount() == 0))) {
     deferToTouchSelection_ = false;
   }
-  if (beforeCount != scanner_.candidateCount() || beforeDone != scanner_.done()) {
-    publishRenderSnapshot(scanner_.done() || beforeCount == 0 || flow_.waitingForNextCandidate());
-  }
+  const DictionaryLookupScanSlicePublish publish =
+      dictionaryLookupScanSlicePublish(beforeCount, scanner_.candidateCount(), beforeDone, scanner_.done(), beforeState,
+                                       flow_.state(), flow_.waitingForNextCandidate());
+  if (publish.publish) publishRenderSnapshot(publish.requestRender);
 }
 
 const PageWordCandidate* EpubReaderWordLookupActivity::candidateAt(const uint16_t index) const {
@@ -906,7 +913,9 @@ const PageWordCandidate* EpubReaderWordLookupActivity::candidateAt(const uint16_
 }
 
 const PageWordCandidate* EpubReaderWordLookupActivity::selectedCandidate() const {
-  return pageMode_ && flow_.hasSelection() ? candidateAt(flow_.cursor()) : nullptr;
+  if (!pageMode_) return nullptr;
+  if (flow_.provisional()) return &provisionalCandidate_;
+  return flow_.hasSelection() ? candidateAt(flow_.cursor()) : nullptr;
 }
 
 void EpubReaderWordLookupActivity::updateHighlightSnapshot(RenderSnapshot& snapshot) const {
@@ -975,7 +984,7 @@ void EpubReaderWordLookupActivity::observeOpenDeadline(const uint32_t nowMs) {
 
 bool EpubReaderWordLookupActivity::skipLoopDelay() {
   return !exiting_ && (DictionaryLookupWorker::instance().owns(this) || flow_.workerOwned() ||
-                       flow_.initialBurstActive(millis()) || identityStepEligible());
+                       flow_.initialBurstActive(millis()) || touchResolver_.pending() || identityStepEligible());
 }
 
 void EpubReaderWordLookupActivity::finishLookup(const bool cancelled) {
@@ -1354,11 +1363,9 @@ uint16_t EpubReaderWordLookupActivity::candidateAtPoint(const int x, const int y
     if (!candidate || !unionPageTextGlyphBounds(sourceView(), candidate->firstGlyph, candidate->glyphCount, bounds)) {
       continue;
     }
-    if (externalMode_ && externalTextViewport_.height > 0) {
-      if (pageTextRangeContains(sourceView(), candidate->firstGlyph, candidate->glyphCount, x, y)) return index;
-    } else if (x >= bounds.x && x < bounds.x + bounds.width && y >= bounds.y && y < bounds.y + bounds.height) {
-      return index;
-    }
+    // Hit individual glyph boxes: a word wrapped across lines has a union box
+    // spanning both full lines and would capture touches on unrelated words.
+    if (pageTextRangeContains(sourceView(), candidate->firstGlyph, candidate->glyphCount, x, y)) return index;
     if (exactOnly) continue;
     const int64_t centerX = bounds.x + bounds.width / 2;
     const int64_t centerY = bounds.y + bounds.height / 2;
@@ -1380,6 +1387,23 @@ uint16_t EpubReaderWordLookupActivity::nearestCandidateAt(const int x, const int
 bool EpubReaderWordLookupActivity::resolvePendingInitialTouch() {
   if (!pendingInitialTouchSelection_) return true;
   const uint16_t exact = candidateAtPoint(initialTouchX_, initialTouchY_, true);
+  if (flow_.provisional() && exact != UINT16_MAX) {
+    // The progressive scan reached the word the touch resolver proved. Attach
+    // its ordinal to the displayed lookup so navigation continues from it.
+    const PageWordCandidate* found = candidateAt(exact);
+    const bool same = found && found->firstGlyph == provisionalCandidate_.firstGlyph &&
+                      found->glyphCount == provisionalCandidate_.glyphCount &&
+                      found->matchedBytes == provisionalCandidate_.matchedBytes &&
+                      found->firstPageWord == provisionalCandidate_.firstPageWord &&
+                      found->lastPageWord == provisionalCandidate_.lastPageWord;
+    if (!same) LOG_ERR("WLA", "Touch resolver disagreed with page scan at candidate %u", static_cast<unsigned>(exact));
+    const bool attached = same ? flow_.adoptProvisional(exact) : flow_.replaceProvisional(exact);
+    pendingInitialTouchSelection_ = false;
+    initialTouchMiss_ = false;
+    LOG_INF("WLA", "Initial touch candidate %u %s after %lums", static_cast<unsigned>(exact),
+            same ? "adopted" : "replaced", millis() - openedAtMs_);
+    return attached;
+  }
   const bool replaceFromSelector = touchSourceSelectionVisible_ && flow_.hasSelection();
   const bool selected = exact != UINT16_MAX &&
                         (replaceFromSelector ? (exact == flow_.cursor() ? flow_.replaceCurrentLookup()
@@ -1394,6 +1418,8 @@ bool EpubReaderWordLookupActivity::resolvePendingInitialTouch() {
     }
     pendingInitialTouchSelection_ = false;
     initialTouchMiss_ = false;
+    LOG_INF("WLA", "Initial touch selected candidate %u after %lums", static_cast<unsigned>(exact),
+            millis() - openedAtMs_);
     return true;
   }
 
@@ -1413,7 +1439,19 @@ bool EpubReaderWordLookupActivity::resolvePendingInitialTouch() {
   const bool conclusive = dictionaryLookupInitialTouchMissIsConclusive(
       dismissOnInitialTouchMiss_, touchedGlyph != UINT16_MAX, touchedGlyphProcessed, scanComplete);
   if (!conclusive) return false;
+  if (flow_.provisional()) {
+    LOG_ERR("WLA", "Touch resolver found a word the page scan did not");
+    pendingInitialTouchSelection_ = false;
+    initialTouchMiss_ = true;
+    touchSourceSelectionVisible_ = false;
+    deferToTouchSelection_ = false;
+    flow_.abandonProvisional(DictionaryStatus::NotFound);
+    return false;
+  }
+  return concludeInitialTouchMiss(touchedGlyph);
+}
 
+bool EpubReaderWordLookupActivity::concludeInitialTouchMiss(const uint16_t touchedGlyph) {
   pendingInitialTouchSelection_ = false;
   initialTouchMiss_ = true;
   if (nearestOnInitialTouchMiss_) {
@@ -1425,12 +1463,80 @@ bool EpubReaderWordLookupActivity::resolvePendingInitialTouch() {
     // Only holds on page whitespace dismiss without a result.
     dismissOnInitialTouchMiss_ = false;
   }
+  if (initialTouchMiss_) {
+    LOG_INF("WLA", "Initial touch (%d,%d) missed page words: glyph=%d candidates=%u after %lums -> %s", initialTouchX_,
+            initialTouchY_, touchedGlyph == UINT16_MAX ? -1 : static_cast<int>(touchedGlyph),
+            static_cast<unsigned>(cacheLoaded_ ? scanCache_.candidateCount() : scanner_.candidateCount()),
+            millis() - openedAtMs_, dismissOnInitialTouchMiss_ ? "dismiss" : "not found");
+  }
   if (initialTouchMiss_ && !dismissOnInitialTouchMiss_) {
     touchSourceSelectionVisible_ = false;
     deferToTouchSelection_ = false;
     flow_.onInitializationFailed(DictionaryStatus::NotFound);
   }
   return !initialTouchMiss_;
+}
+
+void EpubReaderWordLookupActivity::startTouchResolver() {
+  touchResolver_.clear();
+  // Only the exact-touch contract is replayable: nearest-word fallback needs
+  // the complete candidate list anyway.
+  if (!pageMode_ || !pendingInitialTouchSelection_ || nearestOnInitialTouchMiss_ || cacheLoaded_ ||
+      engine_.backendKind() != DictionaryBackendKind::Japanese || scanner_.truncated() ||
+      scanner_.candidateCount() != 0) {
+    return;
+  }
+  if (touchResolver_.begin(sourceView(), {this, &EpubReaderWordLookupActivity::probeEngine}, initialTouchX_,
+                           initialTouchY_)) {
+    LOG_INF("WLA", "Touch resolver started at glyph %u", static_cast<unsigned>(touchResolver_.touchedGlyph()));
+  }
+}
+
+void EpubReaderWordLookupActivity::runTouchResolverSlice() {
+  if (!touchResolver_.pending()) return;
+  if (!pendingInitialTouchSelection_ || cacheLoaded_ || flow_.hasSelection() || flow_.workerOwned()) {
+    touchResolver_.clear();
+    return;
+  }
+  const uint32_t started = millis();
+  while (touchResolver_.pending() && millis() - started < DictionaryLookupFlow::kScanSliceMs) {
+    touchResolver_.stepOne();
+  }
+  if (touchResolver_.pending()) return;
+
+  const uint32_t elapsed = millis() - openedAtMs_;
+  const unsigned positions = touchResolver_.evaluatedPositions();
+  switch (touchResolver_.outcome()) {
+    case JapaneseTouchResolver::Outcome::Candidate:
+      provisionalCandidate_ = touchResolver_.candidate();
+      if (flow_.beginProvisionalLookup()) {
+        LOG_INF("WLA", "Touch resolver chose glyphs %u+%u after %lums (%u positions)",
+                static_cast<unsigned>(provisionalCandidate_.firstGlyph),
+                static_cast<unsigned>(provisionalCandidate_.glyphCount), static_cast<unsigned long>(elapsed),
+                positions);
+        executeFlowCommands();
+        publishRenderSnapshot();
+      }
+      break;
+    case JapaneseTouchResolver::Outcome::NoCandidate:
+      LOG_INF("WLA", "Touch resolver found no word after %lums (%u positions)", static_cast<unsigned long>(elapsed),
+              positions);
+      concludeInitialTouchMiss(touchResolver_.touchedGlyph());
+      if (initialTouchMiss_ && dismissOnInitialTouchMiss_) {
+        touchResolver_.clear();
+        finishLookup(true);
+        return;
+      }
+      publishRenderSnapshot();
+      break;
+    case JapaneseTouchResolver::Outcome::Undecided:
+      LOG_INF("WLA", "Touch resolver undecided after %lums; continuing page scan", static_cast<unsigned long>(elapsed));
+      break;
+    case JapaneseTouchResolver::Outcome::Idle:
+    case JapaneseTouchResolver::Outcome::Pending:
+      break;
+  }
+  touchResolver_.clear();
 }
 
 int EpubReaderWordLookupActivity::definitionFontId(const bool isIpa) const {
@@ -1898,10 +2004,10 @@ void EpubReaderWordLookupActivity::loop() {
     int dragY = 0;
     if (mappedInput.isScreenTouchHeld(dragX, dragY)) {
       DefinitionToken token;
-      uint16_t count = 0;
       bool changed = false;
       {
         RenderLock lock(*this);
+        uint16_t count = 0;
         if (findDefinitionToken(0, dragX, dragY, true, token, count) && token.index != definitionTokenIndex_) {
           definitionTokenIndex_ = token.index;
           definitionTokenCount_ = count;
@@ -2055,6 +2161,8 @@ void EpubReaderWordLookupActivity::loop() {
   // Input is always polled before bounded identity/probe work. The existing
   // skipLoopDelay path yields to FreeRTOS between subsequent identity chunks.
   runInitialIdentitySlice();
+  runTouchResolverSlice();
+  if (exiting_) return;
   const uint32_t scanStarted = millis();
   runScanSlice();
   processWorkerCompletion();
@@ -2176,7 +2284,11 @@ void EpubReaderWordLookupActivity::drawPanelFrame(const PanelLayout& layout) con
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int frame = std::max(1, metrics.popupFrameThickness);
   const bool foregroundBlack = ReaderUtils::readerForegroundBlack();
+  // Night Mode inverts at the display, so this compatibility helper is constant
+  // today; keep the polarity-aware colors for readers that render inverted.
+  // cppcheck-suppress knownConditionTrueFalse
   const Color foreground = foregroundBlack ? Color::Black : Color::White;
+  // cppcheck-suppress knownConditionTrueFalse
   const Color background = foregroundBlack ? Color::White : Color::Black;
   if (TouchUi::enabled(mappedInput)) {
     // The reference uses a crisp paper panel with a small offset shadow.
@@ -2433,6 +2545,8 @@ void EpubReaderWordLookupActivity::render(RenderLock&&) {
 #endif
   // Unchanged page/highlight/panel geometry permits repainting just the opaque
   // overlay. Rebuilding the page would swap reader/dictionary SD fonts again.
+  // Builds without the X4 Pro partial repaint always redraw the background.
+  // cppcheck-suppress knownConditionTrueFalse
   if (!reuseReaderBackground) renderReaderBackground();
   if (snapshot.sourceSelectionVisible) {
     TouchUi::drawStatus(renderer, !ReaderUtils::readerForegroundBlack());
@@ -2445,6 +2559,7 @@ void EpubReaderWordLookupActivity::render(RenderLock&&) {
     displayPanelRefresh(framebufferContainedPage);
     return;
   }
+  // cppcheck-suppress knownConditionTrueFalse
   if (!reuseReaderBackground && snapshot.highlightValid) {
     auto highlight = snapshot.highlight;
     if (externalMode_ && externalTextViewport_.height > 0) {
@@ -2564,7 +2679,7 @@ void EpubReaderWordLookupActivity::runInitialIdentitySlice() {
 
 void EpubReaderWordLookupActivity::tryLoadVerifiedScanCache() {
   if (!identityPolicy_.canLoad() || !cacheIdentityValid_ || sourceTruncated() || scanCachePath_[0] == '\0' ||
-      flow_.hasSelection() || scanner_.candidateCount() != 0)
+      flow_.hasSelection() || flow_.provisional() || flow_.workerOwned() || scanner_.candidateCount() != 0)
     return;
   const PageTextSourceView source = sourceView();
   const PageWordScanCacheIdentity identity{

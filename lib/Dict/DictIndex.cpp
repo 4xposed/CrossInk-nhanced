@@ -124,8 +124,14 @@ struct RankedSibling {
 };
 static_assert(sizeof(RankedSibling) == 8);
 
+// Cancellable reads default to 512-byte chunks so long definition reads stop
+// promptly. Bounded index buffers (record block, sparse slice) pass their whole
+// length instead: each chunk is a separate locked SD transaction, and splitting
+// those hot per-probe reads quadrupled the SD calls of a Japanese page scan.
+constexpr size_t CANCELLABLE_READ_CHUNK_BYTES = 512;
+
 bool readExact(HalFile& file, size_t offset, void* destination, size_t length,
-               CooperativeCancellation cancellation = {}) {
+               CooperativeCancellation cancellation = {}, size_t chunkBytes = CANCELLABLE_READ_CHUNK_BYTES) {
   if (cancellation.requested()) return false;
   if (!file.seek(offset)) {
     LOG_ERR("DICT", "Dictionary seek failed at %u", static_cast<unsigned>(offset));
@@ -137,7 +143,7 @@ bool readExact(HalFile& file, size_t offset, void* destination, size_t length,
     if (cancellation.requested()) return false;
     // Check cancellation between bounded SD reads, including long senses.
     // Keep the existing single-read contract for callers without cancellation.
-    const size_t chunk = cancellation.callback ? std::min<size_t>(512, length - completed) : length - completed;
+    const size_t chunk = cancellation.callback ? std::min(chunkBytes, length - completed) : length - completed;
     const int read = file.read(output + completed, chunk);
     if (cancellation.requested()) return false;
     if (read != static_cast<int>(chunk)) {
@@ -220,7 +226,7 @@ JapaneseDictStatus readRecord(SourceState& source, size_t recordIndex, DictIndex
       const size_t count = std::min(BLOCK_RECORDS, source.recordCount - start);
       const size_t bytes = count * sizeof(DictIndexRecord);
       if (!readExact(source.idxFile, start * sizeof(DictIndexRecord), source.blockCache.get(), bytes,
-                     source.cancellation)) {
+                     source.cancellation, bytes)) {
         source.blockStart = SIZE_MAX;
         source.blockCount = 0;
         return readFailureStatus(source);
@@ -383,7 +389,7 @@ bool narrowWithSparseIndex(SourceState& source, const char* key, size_t& lo, siz
   if (count == 0 || count * SPX_KEY_SIZE > source.fineCacheBytes) return false;
   if (source.fineCacheFirst != fineFirst || source.fineCacheCount != count) {
     if (!readExact(source.spxFile, SPX_HEADER_SIZE + static_cast<size_t>(fineFirst) * SPX_KEY_SIZE,
-                   source.fineCache.get(), count * SPX_KEY_SIZE, source.cancellation)) {
+                   source.fineCache.get(), count * SPX_KEY_SIZE, source.cancellation, count * SPX_KEY_SIZE)) {
       source.fineCacheFirst = UINT32_MAX;
       source.fineCacheCount = 0;
       return false;

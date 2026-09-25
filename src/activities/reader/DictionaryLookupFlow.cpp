@@ -119,6 +119,8 @@ void DictionaryLookupFlow::reset(const uint32_t openedAtMs) {
   workerOwned_ = false;
   replacementPending_ = false;
   initialSelectionDeferred_ = false;
+  provisional_ = false;
+  provisionalFailure_ = DictionaryStatus::Found;
   exiting_ = false;
 }
 
@@ -247,7 +249,9 @@ void DictionaryLookupFlow::onScanProgress(const uint16_t discoveredCount, const 
     return;
   }
 
-  if (scanComplete_ && discoveredCount_ == 0 && !workerOwned_) state_ = DictionaryLookupFlowState::NotFound;
+  if (scanComplete_ && discoveredCount_ == 0 && !workerOwned_ && !provisional_) {
+    state_ = DictionaryLookupFlowState::NotFound;
+  }
 }
 
 void DictionaryLookupFlow::onInitializationFailed(const DictionaryStatus status) {
@@ -268,13 +272,57 @@ bool DictionaryLookupFlow::selectInitialCandidate(const uint16_t candidateIndex)
     return false;
   }
   initialSelectionDeferred_ = false;
+  provisional_ = false;
   hasSelection_ = true;
   startLookup(candidateIndex);
   return true;
 }
 
+bool DictionaryLookupFlow::beginProvisionalLookup() {
+  if (exiting_ || directMode_ || !initialSelectionDeferred_ || hasSelection_ || workerOwned_ || provisional_) {
+    return false;
+  }
+  provisional_ = true;
+  startLookup(0);
+  return true;
+}
+
+bool DictionaryLookupFlow::adoptProvisional(const uint16_t candidateIndex) {
+  if (exiting_ || !provisional_ || candidateIndex >= discoveredCount_) return false;
+  // The in-flight or displayed lookup already belongs to this candidate; keep
+  // its generation so no work is repeated.
+  provisional_ = false;
+  initialSelectionDeferred_ = false;
+  hasSelection_ = true;
+  cursor_ = candidateIndex;
+  return true;
+}
+
+bool DictionaryLookupFlow::replaceProvisional(const uint16_t candidateIndex) {
+  if (exiting_ || !provisional_ || candidateIndex >= discoveredCount_) return false;
+  provisional_ = false;
+  initialSelectionDeferred_ = false;
+  hasSelection_ = true;
+  replaceLookup(candidateIndex);
+  return true;
+}
+
+void DictionaryLookupFlow::abandonProvisional(const DictionaryStatus status) {
+  if (exiting_ || !provisional_) return;
+  provisional_ = false;
+  if (workerOwned_) {
+    // Join the worker first; onWorkerReleased() publishes the failure.
+    provisionalFailure_ = status;
+    replacementPending_ = false;
+    state_ = DictionaryLookupFlowState::Loading;
+    queue(DictionaryLookupFlowAction::CancelAndJoin, cursor_);
+    return;
+  }
+  onInitializationFailed(status);
+}
+
 bool DictionaryLookupFlow::moveCursor(const int delta) {
-  if (directMode_ || exiting_ || delta == 0 || discoveredCount_ == 0) return false;
+  if (directMode_ || exiting_ || provisional_ || delta == 0 || discoveredCount_ == 0) return false;
   const int count = discoveredCount_;
   const int current = cursor_;
   int target = current + delta;
@@ -296,7 +344,9 @@ bool DictionaryLookupFlow::moveCursor(const int delta) {
 }
 
 bool DictionaryLookupFlow::replaceCurrentLookup() {
-  if (exiting_ || !hasSelection_) return false;
+  // Nested definition lookups may replace a provisional result; the scan still
+  // adopts the touched candidate later without another lookup.
+  if (exiting_ || (!hasSelection_ && !provisional_)) return false;
   replaceLookup(cursor_);
   return true;
 }
@@ -385,6 +435,12 @@ void DictionaryLookupFlow::onWorkerReleased() {
   workerOwned_ = false;
   if (exiting_) {
     queue(DictionaryLookupFlowAction::ReleaseResources, cursor_);
+    return;
+  }
+  if (provisionalFailure_ != DictionaryStatus::Found) {
+    const DictionaryStatus failure = provisionalFailure_;
+    provisionalFailure_ = DictionaryStatus::Found;
+    onInitializationFailed(failure);
     return;
   }
   if (!replacementPending_) return;

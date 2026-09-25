@@ -1,5 +1,6 @@
 #include "CrossPointSettings.h"
 
+#include <AppCapabilities.h>
 #include <BoardConfig.h>
 #include <CrossInkHalFrontlight.h>
 #include <HalClock.h>
@@ -345,6 +346,17 @@ void CrossPointSettings::validateReaderFrontButtonMapping(CrossPointSettings& se
 uint8_t CrossPointSettings::defaultUiScale() { return UI_SCALE_SMALL; }
 
 uint8_t CrossPointSettings::defaultAnkiFontScale() { return CROSSINK_APP_CAP_TOUCH ? 2 : 1; }
+
+// Matches the previous fixed holds: X4 Pro touch reading used 0.5 s, the
+// generic touch reader path 1 s.
+uint8_t CrossPointSettings::defaultBookLookupHoldTenths() { return CROSSINK_APP_DEVICE_X4PRO ? 5 : 10; }
+
+uint32_t CrossPointSettings::lookupHoldMs(const uint8_t tenths) {
+  for (const uint8_t allowed : LOOKUP_HOLD_TENTHS) {
+    if (allowed == tenths) return static_cast<uint32_t>(tenths) * 100U;
+  }
+  return 500U;
+}
 
 uint8_t CrossPointSettings::sleepTimeoutEnumToMinutes(const uint8_t legacyValue) {
   switch (legacyValue) {

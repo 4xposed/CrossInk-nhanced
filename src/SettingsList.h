@@ -582,7 +582,7 @@ inline SettingInfo buildHomeButtonActionSetting(const StrId nameId, uint8_t Cros
 // #1636) so the per-entry SettingInfo cost is paid once. Read-only consumers
 // can use it directly; mutable device UI lists use getSettingsList(), which
 // returns an owned copy and can add SD-card font and dictionary options.
-inline constexpr size_t BASE_SETTINGS_CAPACITY = 106;  // 104 regular entries plus two optional tilt entries.
+inline constexpr size_t BASE_SETTINGS_CAPACITY = 108;  // 106 regular entries plus two optional tilt entries.
 
 inline const std::vector<SettingInfo>& getBaseSettingsList() {
   static const std::vector<SettingInfo> baseList = [] {
@@ -702,6 +702,16 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
                           "imageRendering", StrId::STR_CAT_READER));
     add(SettingInfo::Toggle(StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
                             "touchReaderControls", StrId::STR_CAT_READER));
+    const std::vector<StrId> lookupHoldLabels{StrId::STR_HOLD_0_2S, StrId::STR_HOLD_0_3S, StrId::STR_HOLD_0_5S,
+                                              StrId::STR_HOLD_0_8S, StrId::STR_HOLD_1S,   StrId::STR_HOLD_1_5S};
+    const std::vector<uint8_t> lookupHoldValues(std::begin(CrossPointSettings::LOOKUP_HOLD_TENTHS),
+                                                std::end(CrossPointSettings::LOOKUP_HOLD_TENTHS));
+    add(SettingInfo::Enum(StrId::STR_BOOK_LOOKUP_HOLD, &CrossPointSettings::bookLookupHoldTenths, lookupHoldLabels,
+                          "bookLookupHoldTenths", StrId::STR_CAT_CONTROLS)
+            .withEnumRawValues(lookupHoldValues));
+    add(SettingInfo::Enum(StrId::STR_MANGA_LOOKUP_HOLD, &CrossPointSettings::mangaLookupHoldTenths, lookupHoldLabels,
+                          "mangaLookupHoldTenths", StrId::STR_CAT_CONTROLS)
+            .withEnumRawValues(lookupHoldValues));
     add(SettingInfo::Toggle(StrId::STR_DISABLE_TOUCHSCREEN, &CrossPointSettings::disableReaderTouchscreen,
                             "disableReaderTouchscreen", StrId::STR_CAT_READER));
     add(SettingInfo::Toggle(StrId::STR_EXTRA_SPACING, &CrossPointSettings::extraParagraphSpacing,
@@ -1013,18 +1023,17 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
   std::vector<SettingInfo> v = getBaseSettingsList();
   const bool hasTouch = gpio.hasTouch();
   if (!hasTouch) {
-    v.erase(std::remove_if(v.begin(), v.end(),
-                           [](const SettingInfo& s) {
-                             return s.nameId == StrId::STR_TOUCH_READER_CONTROLS ||
-                                    s.nameId == StrId::STR_DISABLE_TOUCHSCREEN || s.nameId == StrId::STR_NEXT_PAGE ||
-                                    s.nameId == StrId::STR_PREV_PAGE || s.nameId == StrId::STR_TAP_HIDE_STATUS_BAR ||
-                                    s.nameId == StrId::STR_PINCH_FONT_RESIZE ||
-                                    s.nameId == StrId::STR_TWO_FINGER_ROTATION ||
-                                    s.nameId == StrId::STR_TWO_FINGER_SWIPE_UP ||
-                                    s.nameId == StrId::STR_TWO_FINGER_SWIPE_DOWN ||
-                                    s.nameId == StrId::STR_TWO_FINGER_SWIPE_LEFT ||
-                                    s.nameId == StrId::STR_TWO_FINGER_SWIPE_RIGHT;
-                           }),
+    v.erase(std::remove_if(
+                v.begin(), v.end(),
+                [](const SettingInfo& s) {
+                  return s.nameId == StrId::STR_TOUCH_READER_CONTROLS || s.nameId == StrId::STR_DISABLE_TOUCHSCREEN ||
+                         s.nameId == StrId::STR_NEXT_PAGE || s.nameId == StrId::STR_PREV_PAGE ||
+                         s.nameId == StrId::STR_TAP_HIDE_STATUS_BAR || s.nameId == StrId::STR_BOOK_LOOKUP_HOLD ||
+                         s.nameId == StrId::STR_MANGA_LOOKUP_HOLD || s.nameId == StrId::STR_PINCH_FONT_RESIZE ||
+                         s.nameId == StrId::STR_TWO_FINGER_ROTATION || s.nameId == StrId::STR_TWO_FINGER_SWIPE_UP ||
+                         s.nameId == StrId::STR_TWO_FINGER_SWIPE_DOWN || s.nameId == StrId::STR_TWO_FINGER_SWIPE_LEFT ||
+                         s.nameId == StrId::STR_TWO_FINGER_SWIPE_RIGHT;
+                }),
             v.end());
   }
   if (!gpio.supportsMultiTouch()) {
@@ -1308,12 +1317,14 @@ inline std::vector<SettingInfo> buildControlsTapsGesturesSettingsList(const std:
   const bool hasPinch = hasSettingByName(allSettings, StrId::STR_PINCH_FONT_RESIZE);
   const bool hasRotation = hasSettingByName(allSettings, StrId::STR_TWO_FINGER_ROTATION);
   const bool hasTwoFingerSwipe = hasSettingByName(allSettings, StrId::STR_TWO_FINGER_SWIPE_UP);
-  settings.reserve(3 + (hasPinch ? 1u : 0u) + (hasRotation ? 1u : 0u) + (hasTwoFingerSwipe ? 1u : 0u));
+  settings.reserve(5 + (hasPinch ? 1u : 0u) + (hasRotation ? 1u : 0u) + (hasTwoFingerSwipe ? 1u : 0u));
   addSettingByName(settings, allSettings, StrId::STR_NEXT_PAGE);
   addSettingByName(settings, allSettings, StrId::STR_PREV_PAGE);
   if (hasPinch) addSettingByName(settings, allSettings, StrId::STR_PINCH_FONT_RESIZE);
   if (hasRotation) addSettingByName(settings, allSettings, StrId::STR_TWO_FINGER_ROTATION);
   addSettingByName(settings, allSettings, StrId::STR_TAP_HIDE_STATUS_BAR);
+  addSettingByName(settings, allSettings, StrId::STR_BOOK_LOOKUP_HOLD);
+  addSettingByName(settings, allSettings, StrId::STR_MANGA_LOOKUP_HOLD);
   if (hasTwoFingerSwipe) {
     settings.push_back(SettingInfo::Submenu(StrId::STR_TWO_FINGER_SWIPE, SettingAction::ControlsTwoFingerSwipe));
   }
@@ -1531,12 +1542,13 @@ inline std::vector<SettingInfo> buildSystemGlobalStatsSettingsList(const std::ve
 inline std::vector<SettingInfo> buildMangaReaderSettingsList(const std::vector<SettingInfo>& catalog,
                                                              const bool touch) {
   std::vector<SettingInfo> settings;
-  settings.reserve(8);
+  settings.reserve(9);
   if (touch) {
     addSettingByName(settings, catalog, StrId::STR_DISABLE_TOUCHSCREEN);
     addSettingByName(settings, catalog, StrId::STR_TOUCH_READER_CONTROLS);
     const auto taps = buildControlsTapsGesturesSettingsList(catalog);
     addSettingByName(settings, taps, StrId::STR_PAGE_TURN);
+    addSettingByName(settings, taps, StrId::STR_MANGA_LOOKUP_HOLD);
   }
   settings.push_back(SettingInfo::SectionHeader(StrId::STR_SIDE_BUTTONS));
   const auto side = buildControlsSideButtonSettingsList(catalog);

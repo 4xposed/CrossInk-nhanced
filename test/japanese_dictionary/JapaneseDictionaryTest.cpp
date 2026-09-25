@@ -2468,6 +2468,29 @@ TEST_F(JapaneseDictionaryTest, ValidSparseIndexMissDoesNotSearchTheWholeDictiona
   EXPECT_LE(hal_storage_test::readCount - before, 4u);
 }
 
+TEST_F(JapaneseDictionaryTest, CancellableSparseIndexProbeKeepsBoundedIndexReadsWhole) {
+  std::vector<InputRecord> records;
+  records.reserve(8192);
+  for (unsigned i = 0; i < 8192; ++i) {
+    char word[16];
+    std::snprintf(word, sizeof(word), "word%05u", i * 2);
+    records.push_back({word, "definition"});
+  }
+  writeVocab(std::move(records), true);
+  bool cancelled = false;
+  DictIndex index;
+  index.setCancellation({[](void* context) { return *static_cast<bool*>(context); }, &cancelled});
+  ASSERT_EQ(index.open(), JapaneseDictStatus::Found);
+  const auto before = hal_storage_test::readCount;
+  hal_storage_test::maximumReadBytes = 0;
+  DictProbe result;
+  EXPECT_EQ(index.probeExact("word08193", result), JapaneseDictStatus::NotFound);
+  // The Japanese backend always installs cancellation. Its hot per-probe index
+  // buffers must stay single SD reads, not 512-byte chunks.
+  EXPECT_LE(hal_storage_test::readCount - before, 4u);
+  EXPECT_GT(hal_storage_test::maximumReadBytes, 512u);
+}
+
 TEST_F(JapaneseDictionaryTest, ValidSparseIndexFindsLastCheckpointWindow) {
   std::vector<InputRecord> records;
   records.reserve(97);
@@ -6275,6 +6298,28 @@ TEST(DictionaryLookupFlowTest, ExactTouchMissCanFinishWhenItsGlyphWasProcessedBu
   EXPECT_TRUE(dictionaryLookupInitialTouchMissIsConclusive(true, true, true, false));
   EXPECT_FALSE(dictionaryLookupInitialTouchMissIsConclusive(false, true, true, false));
   EXPECT_TRUE(dictionaryLookupInitialTouchMissIsConclusive(false, true, false, true));
+}
+
+TEST(DictionaryLookupFlowTest, ScanSliceThatOnlyChangesStatePublishesAndRenders) {
+  using State = DictionaryLookupFlowState;
+  // A held particle resolves to NotFound without discovering a candidate.
+  auto publish = dictionaryLookupScanSlicePublish(3, 3, false, false, State::Loading, State::NotFound, false);
+  EXPECT_TRUE(publish.publish);
+  EXPECT_TRUE(publish.requestRender);
+
+  // A later candidate alone still refreshes the snapshot without a redraw.
+  publish = dictionaryLookupScanSlicePublish(3, 4, false, false, State::Loading, State::Loading, false);
+  EXPECT_TRUE(publish.publish);
+  EXPECT_FALSE(publish.requestRender);
+
+  publish = dictionaryLookupScanSlicePublish(0, 1, false, false, State::Loading, State::Loading, false);
+  EXPECT_TRUE(publish.requestRender);
+  publish = dictionaryLookupScanSlicePublish(3, 3, false, true, State::Loading, State::Loading, false);
+  EXPECT_TRUE(publish.requestRender);
+
+  publish = dictionaryLookupScanSlicePublish(3, 3, false, false, State::Loading, State::Loading, true);
+  EXPECT_FALSE(publish.publish);
+  EXPECT_FALSE(publish.requestRender);
 }
 
 TEST(DictionaryLookupFlowTest, InitialBurstDefersLoadingRefreshButPublishesTheReadyDefinition) {

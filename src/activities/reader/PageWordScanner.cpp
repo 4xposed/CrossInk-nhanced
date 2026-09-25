@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+
+#include "PageTextViewport.h"
 namespace {
 constexpr uint16_t kFallbackCandidateCapacity = 256;
 constexpr size_t kMaxStarDictBytes = 255;
@@ -378,27 +380,36 @@ DictionaryStatus PageWordScanner::scanStarDict() {
   return DictionaryStatus::Found;
 }
 
-DictionaryStatus PageWordScanner::scanJapanese() {
-  const uint16_t firstGlyph = scanPos_++;
-  done_ = scanPos_ >= source_.glyphCount;
-  if (firstGlyph < skipUntil_) return DictionaryStatus::NotFound;
+namespace {
+struct JapanesePositionResult {
+  PageWordCandidate candidate{};
+  uint16_t skipUntil = 0;
+  bool setsSkip = false;
+  bool markerCheckFailed = false;
+};
 
-  const uint16_t paragraph = source_.glyphs[firstGlyph].paragraph;
+// One Japanese scan position is a pure function of the source, dictionary, and
+// position; only skipping depends on earlier positions. The progressive scanner
+// and the touch resolver share it so both segment the page identically.
+DictionaryStatus evaluateJapanesePosition(const PageTextSourceView source, const DictionaryProbeFn probe,
+                                          const uint16_t firstGlyph, JapanesePositionResult& out) {
+  out = {};
+  const uint16_t paragraph = source.glyphs[firstGlyph].paragraph;
   uint16_t scanStart = firstGlyph;
-  while (scanStart < source_.glyphCount && source_.glyphs[scanStart].paragraph == paragraph &&
-         isDigit(source_.glyphs[scanStart].codepoint)) {
+  while (scanStart < source.glyphCount && source.glyphs[scanStart].paragraph == paragraph &&
+         isDigit(source.glyphs[scanStart].codepoint)) {
     ++scanStart;
   }
   const uint16_t digitGlyphs = scanStart - firstGlyph;
-  if (scanStart >= source_.glyphCount || source_.glyphs[scanStart].paragraph != paragraph) {
+  if (scanStart >= source.glyphCount || source.glyphs[scanStart].paragraph != paragraph) {
     return DictionaryStatus::NotFound;
   }
 
   bool sokuonTeStart = false;
-  const uint32_t firstCodepoint = source_.glyphs[scanStart].codepoint;
+  const uint32_t firstCodepoint = source.glyphs[scanStart].codepoint;
   if (firstCodepoint == 0x3063) {
-    const bool teNext = scanStart + 1 < source_.glyphCount && source_.glyphs[scanStart + 1].paragraph == paragraph &&
-                        source_.glyphs[scanStart + 1].codepoint == 0x3066;
+    const bool teNext = scanStart + 1 < source.glyphCount && source.glyphs[scanStart + 1].paragraph == paragraph &&
+                        source.glyphs[scanStart + 1].codepoint == 0x3066;
     if (!teNext) return DictionaryStatus::NotFound;
     sokuonTeStart = true;
   } else if (isSuppressedSmallKana(firstCodepoint)) {
@@ -406,28 +417,28 @@ DictionaryStatus PageWordScanner::scanJapanese() {
   }
 
   JapaneseWindow window;
-  DictionaryStatus status = buildJapaneseWindow(source_, scanStart, window);
+  DictionaryStatus status = buildJapaneseWindow(source, scanStart, window);
   if (status != DictionaryStatus::Found) return status;
   DictionaryProbeResult result;
   status =
-      probe_.call(probe_.context, {{window.bytes, window.byteCount}, 0, DictionaryLookupMode::LongestAtOffset}, result);
+      probe.call(probe.context, {{window.bytes, window.byteCount}, 0, DictionaryLookupMode::LongestAtOffset}, result);
   uint8_t matchedGlyphs = 0;
-  if (result.markerCheckFailed) markerChecksComplete_ = false;
+  if (result.markerCheckFailed) out.markerCheckFailed = true;
   status = validateProbe(status, result, window, matchedGlyphs);
   if (status != DictionaryStatus::Found) return status;
   if (sokuonTeStart && result.transformed) return DictionaryStatus::NotFound;
 
-  if (matchedGlyphs >= 2 && isTrailingParticle(source_.glyphs[scanStart + matchedGlyphs - 1].codepoint) &&
-      isCjk(source_.glyphs[scanStart + matchedGlyphs - 2].codepoint)) {
+  if (matchedGlyphs >= 2 && isTrailingParticle(source.glyphs[scanStart + matchedGlyphs - 1].codepoint) &&
+      isCjk(source.glyphs[scanStart + matchedGlyphs - 2].codepoint)) {
     JapaneseWindow stemWindow = window;
     stemWindow.glyphCount = static_cast<uint8_t>(matchedGlyphs - 1);
     stemWindow.byteCount = stemWindow.byteEnds[stemWindow.glyphCount];
     DictionaryProbeResult stemResult;
     status =
-        probe_.call(probe_.context,
-                    {{stemWindow.bytes, stemWindow.byteCount}, 0, DictionaryLookupMode::LongestAtOffset}, stemResult);
+        probe.call(probe.context, {{stemWindow.bytes, stemWindow.byteCount}, 0, DictionaryLookupMode::LongestAtOffset},
+                   stemResult);
     uint8_t stemGlyphs = 0;
-    if (stemResult.markerCheckFailed) markerChecksComplete_ = false;
+    if (stemResult.markerCheckFailed) out.markerCheckFailed = true;
     status = validateProbe(status, stemResult, stemWindow, stemGlyphs);
     if (status == DictionaryStatus::Found && stemGlyphs == stemWindow.glyphCount &&
         stemResult.matchedBytes == stemWindow.byteCount) {
@@ -441,7 +452,7 @@ DictionaryStatus PageWordScanner::scanJapanese() {
   const uint8_t filterGlyphs = matchedGlyphs;
   bool allKana = !isCjk(firstCodepoint) && !isKatakana(firstCodepoint);
   for (uint8_t index = 0; allKana && index < filterGlyphs; ++index) {
-    const uint32_t codepoint = source_.glyphs[scanStart + index].codepoint;
+    const uint32_t codepoint = source.glyphs[scanStart + index].codepoint;
     if (isCjk(codepoint) || isKatakana(codepoint)) allKana = false;
   }
   if (allKana && !result.transformed && filterGlyphs >= 2 &&
@@ -450,58 +461,59 @@ DictionaryStatus PageWordScanner::scanJapanese() {
     return DictionaryStatus::NotFound;
   }
 
-  if (filterGlyphs >= 2 && isCaseParticle(firstCodepoint) && scanStart + 1 < source_.glyphCount &&
-      source_.glyphs[scanStart + 1].paragraph == paragraph) {
+  if (filterGlyphs >= 2 && isCaseParticle(firstCodepoint) && scanStart + 1 < source.glyphCount &&
+      source.glyphs[scanStart + 1].paragraph == paragraph) {
     JapaneseWindow nextWindow;
-    status = buildJapaneseWindow(source_, static_cast<uint16_t>(scanStart + 1), nextWindow);
+    status = buildJapaneseWindow(source, static_cast<uint16_t>(scanStart + 1), nextWindow);
     if (status != DictionaryStatus::Found) return status;
     DictionaryProbeResult nextResult;
     status =
-        probe_.call(probe_.context,
-                    {{nextWindow.bytes, nextWindow.byteCount}, 0, DictionaryLookupMode::LongestAtOffset}, nextResult);
+        probe.call(probe.context, {{nextWindow.bytes, nextWindow.byteCount}, 0, DictionaryLookupMode::LongestAtOffset},
+                   nextResult);
     uint8_t nextGlyphs = 0;
-    if (nextResult.markerCheckFailed) markerChecksComplete_ = false;
+    if (nextResult.markerCheckFailed) out.markerCheckFailed = true;
     status = validateProbe(status, nextResult, nextWindow, nextGlyphs);
     if (status == DictionaryStatus::Found && nextGlyphs >= filterGlyphs) return DictionaryStatus::NotFound;
     if (status != DictionaryStatus::NotFound && status != DictionaryStatus::Found) return status;
   }
 
   if (isKatakana(firstCodepoint)) {
-    const uint8_t nameRun = katakanaRunBeforeHonorific(source_, scanStart, window);
+    const uint8_t nameRun = katakanaRunBeforeHonorific(source, scanStart, window);
     if (nameRun > matchedGlyphs) matchedGlyphs = nameRun;
   }
 
   const uint16_t candidateEnd = static_cast<uint16_t>(scanStart + matchedGlyphs);
   if (matchedGlyphs > 1 || digitGlyphs > 0) {
-    skipUntil_ = candidateEnd;
-    if (candidateEnd < source_.glyphCount && source_.glyphs[candidateEnd].paragraph == paragraph) {
-      const uint32_t next = source_.glyphs[candidateEnd].codepoint;
-      if (next == 0x3055 && candidateEnd + 1 < source_.glyphCount) {
-        const uint32_t after = source_.glyphs[candidateEnd + 1].codepoint;
-        if (after == 0x3093) skipUntil_ = static_cast<uint16_t>(candidateEnd + 2);
-        if (after == 0x307E && candidateEnd + 2 < source_.glyphCount &&
-            source_.glyphs[candidateEnd + 2].paragraph == paragraph) {
-          skipUntil_ = static_cast<uint16_t>(candidateEnd + 2);
+    out.setsSkip = true;
+    out.skipUntil = candidateEnd;
+    if (candidateEnd < source.glyphCount && source.glyphs[candidateEnd].paragraph == paragraph) {
+      const uint32_t next = source.glyphs[candidateEnd].codepoint;
+      if (next == 0x3055 && candidateEnd + 1 < source.glyphCount) {
+        const uint32_t after = source.glyphs[candidateEnd + 1].codepoint;
+        if (after == 0x3093) out.skipUntil = static_cast<uint16_t>(candidateEnd + 2);
+        if (after == 0x307E && candidateEnd + 2 < source.glyphCount &&
+            source.glyphs[candidateEnd + 2].paragraph == paragraph) {
+          out.skipUntil = static_cast<uint16_t>(candidateEnd + 2);
         }
-      } else if (next == 0x304F && candidateEnd + 1 < source_.glyphCount &&
-                 source_.glyphs[candidateEnd + 1].codepoint == 0x3093) {
-        skipUntil_ = static_cast<uint16_t>(candidateEnd + 2);
-      } else if (next == 0x3061 && candidateEnd + 2 < source_.glyphCount &&
-                 source_.glyphs[candidateEnd + 1].codepoint == 0x3083 &&
-                 source_.glyphs[candidateEnd + 2].codepoint == 0x3093) {
-        skipUntil_ = static_cast<uint16_t>(candidateEnd + 3);
+      } else if (next == 0x304F && candidateEnd + 1 < source.glyphCount &&
+                 source.glyphs[candidateEnd + 1].codepoint == 0x3093) {
+        out.skipUntil = static_cast<uint16_t>(candidateEnd + 2);
+      } else if (next == 0x3061 && candidateEnd + 2 < source.glyphCount &&
+                 source.glyphs[candidateEnd + 1].codepoint == 0x3083 &&
+                 source.glyphs[candidateEnd + 2].codepoint == 0x3093) {
+        out.skipUntil = static_cast<uint16_t>(candidateEnd + 3);
       } else if (next == 0x6C0F || next == 0x69D8) {
-        skipUntil_ = static_cast<uint16_t>(candidateEnd + 1);
+        out.skipUntil = static_cast<uint16_t>(candidateEnd + 1);
       } else if ((next == 0x58EB || next == 0x5E2B || next == 0x54E1) &&
-                 isCjk(source_.glyphs[scanStart + matchedGlyphs - 1].codepoint)) {
-        skipUntil_ = static_cast<uint16_t>(candidateEnd + 1);
+                 isCjk(source.glyphs[scanStart + matchedGlyphs - 1].codepoint)) {
+        out.skipUntil = static_cast<uint16_t>(candidateEnd + 1);
       }
     }
   }
 
   // Matcha advances skipUntil before filtering so progressive results never
   // disappear and filtered match interiors never become later candidates.
-  if (digitGlyphs == 0 && !passesDisplayFilter(source_, scanStart, filterGlyphs)) return DictionaryStatus::NotFound;
+  if (digitGlyphs == 0 && !passesDisplayFilter(source, scanStart, filterGlyphs)) return DictionaryStatus::NotFound;
 
   const uint16_t candidateGlyphs = candidateEnd - firstGlyph;
   if (candidateGlyphs == 0 || candidateGlyphs > UINT8_MAX || result.matchedBytes > UINT8_MAX) {
@@ -510,20 +522,35 @@ DictionaryStatus PageWordScanner::scanJapanese() {
   uint16_t firstPageWord = PageTextGlyph::kSyntheticPageWord;
   uint16_t lastPageWord = PageTextGlyph::kSyntheticPageWord;
   for (uint16_t index = firstGlyph; index < candidateEnd; ++index) {
-    const uint16_t pageWord = source_.glyphs[index].pageWord;
+    const uint16_t pageWord = source.glyphs[index].pageWord;
     if (pageWord == PageTextGlyph::kSyntheticPageWord) continue;
     if (firstPageWord == PageTextGlyph::kSyntheticPageWord) firstPageWord = pageWord;
     lastPageWord = pageWord;
   }
   if (firstPageWord == PageTextGlyph::kSyntheticPageWord) return DictionaryStatus::NotFound;
+  out.candidate = {firstGlyph, static_cast<uint8_t>(candidateGlyphs), static_cast<uint8_t>(result.matchedBytes),
+                   firstPageWord, lastPageWord};
+  return DictionaryStatus::Found;
+}
+}  // namespace
+
+DictionaryStatus PageWordScanner::scanJapanese() {
+  const uint16_t firstGlyph = scanPos_++;
+  done_ = scanPos_ >= source_.glyphCount;
+  if (firstGlyph < skipUntil_) return DictionaryStatus::NotFound;
+
+  JapanesePositionResult position;
+  const DictionaryStatus status = evaluateJapanesePosition(source_, probe_, firstGlyph, position);
+  if (position.markerCheckFailed) markerChecksComplete_ = false;
+  if (position.setsSkip) skipUntil_ = position.skipUntil;
+  if (status != DictionaryStatus::Found) return status;
   if (candidateCount_ >= candidateCapacity_) {
     LOG_ERR("WLS", "Page candidate capacity exhausted at %u entries", static_cast<unsigned>(candidateCount_));
     truncated_ = true;
     done_ = true;
     return DictionaryStatus::OutOfMemory;
   }
-  candidates_[candidateCount_++] = {firstGlyph, static_cast<uint8_t>(candidateGlyphs),
-                                    static_cast<uint8_t>(result.matchedBytes), firstPageWord, lastPageWord};
+  candidates_[candidateCount_++] = position.candidate;
   return DictionaryStatus::Found;
 }
 
@@ -580,4 +607,98 @@ void PageWordScanner::clear() {
   done_ = false;
   truncated_ = false;
   markerChecksComplete_ = true;
+}
+
+bool JapaneseTouchResolver::begin(const PageTextSourceView source, const DictionaryProbeFn probe, const int touchX,
+                                  const int touchY) {
+  clear();
+  if (!source.glyphs || !probe.call) return false;
+  // Same touched-glyph rule as the lookup activity: the first glyph box hit.
+  uint16_t touched = UINT16_MAX;
+  for (uint16_t index = 0; index < source.glyphCount; ++index) {
+    const auto& glyph = source.glyphs[index];
+    if (touchX >= glyph.x && touchX < glyph.x + glyph.width && touchY >= glyph.y && touchY < glyph.y + glyph.height) {
+      touched = index;
+      break;
+    }
+  }
+  if (touched == UINT16_MAX || touched < kLookbackGlyphs) return false;
+
+  // A digit run can carry a counter match arbitrarily far, so start the window
+  // after a non-digit glyph; the inherited-skip bound only holds from there.
+  uint16_t start = static_cast<uint16_t>(touched - kLookbackGlyphs);
+  for (uint8_t backoff = 0; start > 0 && isDigit(source.glyphs[start - 1].codepoint); ++backoff) {
+    if (backoff == kMaxDigitBackoff) return false;
+    --start;
+  }
+
+  source_ = source;
+  probe_ = probe;
+  touchX_ = touchX;
+  touchY_ = touchY;
+  touchedGlyph_ = touched;
+  position_ = start;
+  // Hypothesis 0 inherits no skip; the rest inherit each possible bound inside
+  // the window. An earlier match ends at most 8 glyphs past its start, plus a
+  // three-glyph honorific skip.
+  hypotheses_[0].skipUntil = start;
+  for (uint8_t index = 1; index < kHypotheses; ++index) {
+    hypotheses_[index].skipUntil = static_cast<uint16_t>(start + index);
+  }
+  outcome_ = Outcome::Pending;
+  return true;
+}
+
+DictionaryStatus JapaneseTouchResolver::stepOne() {
+  if (outcome_ != Outcome::Pending) return DictionaryStatus::NotFound;
+  const uint16_t position = position_++;
+  bool needed = false;
+  for (const auto& hypothesis : hypotheses_) {
+    if (!hypothesis.resolved && hypothesis.skipUntil <= position) needed = true;
+  }
+  DictionaryStatus status = DictionaryStatus::NotFound;
+  if (needed) {
+    JapanesePositionResult result;
+    status = evaluateJapanesePosition(source_, probe_, position, result);
+    ++evaluatedPositions_;
+    if (status != DictionaryStatus::Found && status != DictionaryStatus::NotFound) {
+      outcome_ = Outcome::Undecided;
+      return status;
+    }
+    const bool hit =
+        status == DictionaryStatus::Found &&
+        pageTextRangeContains(source_, result.candidate.firstGlyph, result.candidate.glyphCount, touchX_, touchY_);
+    for (auto& hypothesis : hypotheses_) {
+      if (hypothesis.resolved || hypothesis.skipUntil > position) continue;
+      if (result.setsSkip) hypothesis.skipUntil = result.skipUntil;
+      if (hit) {
+        hypothesis.resolved = true;
+        hypothesis.candidate = result.candidate;
+      }
+    }
+  }
+  // The progressive scan concludes an exact miss once the touched glyph itself
+  // has been processed, so later candidates never matter.
+  bool allResolved = true;
+  for (const auto& hypothesis : hypotheses_) allResolved = allResolved && hypothesis.resolved;
+  if (allResolved || position >= touchedGlyph_) decide();
+  return status;
+}
+
+void JapaneseTouchResolver::decide() {
+  const Hypothesis& first = hypotheses_[0];
+  for (const auto& hypothesis : hypotheses_) {
+    const bool same = hypothesis.resolved == first.resolved &&
+                      (!first.resolved || (hypothesis.candidate.firstGlyph == first.candidate.firstGlyph &&
+                                           hypothesis.candidate.glyphCount == first.candidate.glyphCount &&
+                                           hypothesis.candidate.matchedBytes == first.candidate.matchedBytes &&
+                                           hypothesis.candidate.firstPageWord == first.candidate.firstPageWord &&
+                                           hypothesis.candidate.lastPageWord == first.candidate.lastPageWord));
+    if (!same) {
+      outcome_ = Outcome::Undecided;
+      return;
+    }
+  }
+  candidate_ = first.candidate;
+  outcome_ = first.resolved ? Outcome::Candidate : Outcome::NoCandidate;
 }

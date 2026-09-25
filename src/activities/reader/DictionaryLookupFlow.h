@@ -97,6 +97,25 @@ constexpr bool dictionaryLookupInitialTouchMissIsConclusive(const bool exactAuto
   return !touchesGlyph || touchedGlyphProcessed;
 }
 
+struct DictionaryLookupScanSlicePublish {
+  bool publish = false;
+  bool requestRender = false;
+};
+
+// A scan slice can end the lookup without discovering a candidate, e.g. when a
+// held particle resolves to NotFound. That state change must reach the screen,
+// or the panel keeps showing the stale Loading snapshot indefinitely.
+constexpr DictionaryLookupScanSlicePublish dictionaryLookupScanSlicePublish(const uint16_t beforeCount,
+                                                                            const uint16_t afterCount,
+                                                                            const bool beforeDone, const bool afterDone,
+                                                                            const DictionaryLookupFlowState beforeState,
+                                                                            const DictionaryLookupFlowState afterState,
+                                                                            const bool waitingForNextCandidate) {
+  const bool stateChanged = beforeState != afterState;
+  const bool publish = beforeCount != afterCount || beforeDone != afterDone || stateChanged;
+  return {publish, publish && (afterDone || beforeCount == 0 || waitingForNextCandidate || stateChanged)};
+}
+
 struct DictionaryLookupCandidatePresentation {
   uint16_t cursor = 0;
   uint16_t discoveredCount = 0;
@@ -132,6 +151,13 @@ class DictionaryLookupFlow {
   void onScanProgress(uint16_t discoveredCount, bool scanComplete, DictionaryStatus status);
   void onInitializationFailed(DictionaryStatus status);
   bool selectInitialCandidate(uint16_t candidateIndex);
+  // A provisional lookup shows a touched word that is proven, but not yet
+  // discovered by the progressive scan, so it has no candidate ordinal yet.
+  // Candidate navigation waits until the scan adopts or replaces it.
+  bool beginProvisionalLookup();
+  bool adoptProvisional(uint16_t candidateIndex);
+  bool replaceProvisional(uint16_t candidateIndex);
+  void abandonProvisional(DictionaryStatus status);
 
   bool moveCursor(int delta);
   bool replaceCurrentLookup();
@@ -158,6 +184,7 @@ class DictionaryLookupFlow {
   bool directMode() const { return directMode_; }
   bool initialSelectionDeferred() const { return initialSelectionDeferred_; }
   bool hasSelection() const { return hasSelection_; }
+  bool provisional() const { return provisional_; }
   bool canStillProduceResult() const {
     return !exiting_ &&
            (state_ == DictionaryLookupFlowState::Loading || (!directMode_ && !scanComplete_ && !scanFailed_));
@@ -198,6 +225,8 @@ class DictionaryLookupFlow {
   bool workerOwned_ = false;
   bool replacementPending_ = false;
   bool initialSelectionDeferred_ = false;
+  bool provisional_ = false;
+  DictionaryStatus provisionalFailure_ = DictionaryStatus::Found;
   bool exiting_ = false;
 };
 

@@ -78,7 +78,6 @@
 #include "util/ScreenshotUtil.h"
 
 namespace {
-constexpr unsigned long TOUCH_DICTIONARY_LOOKUP_HOLD_MS = 1000;
 // pagesPerRefresh now comes from SETTINGS.getRefreshFrequency()
 constexpr unsigned long longPressMenuMs = 600;
 constexpr uint16_t DEFAULT_AUTO_PAGE_TURN_INTERVAL_S = 30;
@@ -3474,7 +3473,8 @@ bool EpubReaderActivity::handleTouchDictionaryLookup() {
     int touchY = 0;
     unsigned long heldMs = 0;
     const bool candidate = mappedInput.isScreenTouchTapCandidate(touchX, touchY, heldMs);
-    if (touchLookupHold.capture(candidate, touchX, touchY, heldMs)) {
+    if (touchLookupHold.capture(candidate, touchX, touchY, heldMs,
+                                CrossPointSettings::lookupHoldMs(SETTINGS.bookLookupHoldTenths))) {
       mappedInput.suppressCurrentTouchContact();
       backgroundBuildYieldForInput.store(true, std::memory_order_relaxed);
       LOG_DBG("DICT", "Touch lookup queued at %d,%d after %lums", touchX, touchY, heldMs);
@@ -3502,7 +3502,7 @@ bool EpubReaderActivity::handleTouchDictionaryLookup() {
     touchDictionaryLookupHandled = false;
     return false;
   }
-  if (touchDictionaryLookupHandled || heldMs < TOUCH_DICTIONARY_LOOKUP_HOLD_MS) {
+  if (touchDictionaryLookupHandled || heldMs < CrossPointSettings::lookupHoldMs(SETTINGS.bookLookupHoldTenths)) {
     return false;
   }
 

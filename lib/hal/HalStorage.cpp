@@ -213,11 +213,16 @@ UsbDriveState HalStorage::usbDriveState() const {
 
 class HalStorage::StorageLock {
  public:
-  StorageLock() : spiLock() { xSemaphoreTake(HalStorage::getInstance().storageMutex, portMAX_DELAY); }
+  StorageLock() { xSemaphoreTake(HalStorage::getInstance().storageMutex, portMAX_DELAY); }
   ~StorageLock() { xSemaphoreGive(HalStorage::getInstance().storageMutex); }
 
  private:
+#if !FREEINK_SD_SDMMC
+  // SPI-mode cards share the bus with the display. Native SDMMC slots use their
+  // own pins, so taking the display lock there only stalls SD reads for the
+  // whole duration of a panel refresh.
   HalSpiBus::Lock spiLock;
+#endif
 };
 
 #define HAL_STORAGE_WRAPPED_CALL(method, ...) \

@@ -1124,7 +1124,8 @@ void MangaReaderActivity::loop() {
   if (TouchUi::enabled(mappedInput) && SETTINGS.touchReaderControls) {
     int x = 0, y = 0;
     unsigned long held = 0;
-    if (mappedInput.isScreenTouchTapCandidate(x, y, held) && held >= 500) {
+    if (mappedInput.isScreenTouchTapCandidate(x, y, held) &&
+        held >= CrossPointSettings::lookupHoldMs(SETTINGS.mangaLookupHoldTenths)) {
       if (queueShortcut(MenuAction::Lookup, x, y)) mappedInput.suppressCurrentTouchContact();
       return;
     }

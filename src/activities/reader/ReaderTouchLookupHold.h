@@ -4,12 +4,14 @@
 // Coordinates belong to the original contact, even if the finger moves or lifts.
 class ReaderTouchLookupHold {
  public:
-  bool capture(bool candidate, int x, int y, unsigned long heldMs) {
+  static constexpr unsigned long kDefaultHoldMs = 500UL;
+
+  bool capture(bool candidate, int x, int y, unsigned long heldMs, unsigned long holdMs = kDefaultHoldMs) {
     if (!candidate) {
       handled_ = false;
       return false;
     }
-    if (pending_ || handled_ || heldMs < 500UL) return false;
+    if (pending_ || handled_ || heldMs < holdMs) return false;
     x_ = x;
     y_ = y;
     handled_ = true;

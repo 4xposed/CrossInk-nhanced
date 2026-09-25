@@ -73,3 +73,53 @@ class PageWordScanner {
   bool done_ = false;
   bool truncated_ = false;
 };
+
+// Decides which Japanese candidate a fresh progressive PageWordScanner would
+// select for an exact initial touch, without scanning the whole page prefix.
+// A scan position depends on earlier positions only through the skip bound
+// left by an earlier match, and a match starting before the lookback window can
+// extend that bound at most kMaxInheritedSkip glyphs into it. Replaying the
+// window under every possible inherited bound is therefore exact whenever all
+// bounds select the same candidate; otherwise the caller keeps scanning
+// sequentially. Borrowed source/probe storage must outlive the resolver.
+class JapaneseTouchResolver {
+ public:
+  enum class Outcome : uint8_t { Idle, Pending, Candidate, NoCandidate, Undecided };
+  static constexpr uint16_t kLookbackGlyphs = 16;
+
+  // Returns false (and stays Idle) when the touch is not on a glyph or is close
+  // enough to the page start that the sequential scan answers just as quickly.
+  bool begin(PageTextSourceView source, DictionaryProbeFn probe, int touchX, int touchY);
+  // Evaluates one scan position. Probe failures end in Undecided.
+  DictionaryStatus stepOne();
+  Outcome outcome() const { return outcome_; }
+  bool pending() const { return outcome_ == Outcome::Pending; }
+  const PageWordCandidate& candidate() const { return candidate_; }
+  uint16_t touchedGlyph() const { return touchedGlyph_; }
+  uint16_t evaluatedPositions() const { return evaluatedPositions_; }
+  void clear() { *this = JapaneseTouchResolver{}; }
+
+ private:
+  static constexpr uint8_t kMaxInheritedSkip = 10;
+  static constexpr uint8_t kHypotheses = kMaxInheritedSkip + 1;
+  static constexpr uint8_t kMaxDigitBackoff = 32;
+
+  struct Hypothesis {
+    PageWordCandidate candidate{};
+    uint16_t skipUntil = 0;
+    bool resolved = false;
+  };
+
+  void decide();
+
+  PageTextSourceView source_{};
+  DictionaryProbeFn probe_{};
+  Hypothesis hypotheses_[kHypotheses]{};
+  PageWordCandidate candidate_{};
+  int touchX_ = 0;
+  int touchY_ = 0;
+  uint16_t touchedGlyph_ = 0;
+  uint16_t position_ = 0;
+  uint16_t evaluatedPositions_ = 0;
+  Outcome outcome_ = Outcome::Idle;
+};

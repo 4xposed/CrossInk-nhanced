@@ -13,7 +13,20 @@ if os.environ.get('CROSSINK_MEMORY_CHECKS') == '1':
     def write_stack_manifest(source, target, env):
         manifest = build_directory / 'memory-stack-manifest.json'
         manifest.parent.mkdir(parents=True, exist_ok=True)
-        manifest.write_text(json.dumps(dict(sorted(expected_reports.items())), indent=2) + '\n')
+        # When pioarduino recompiles the ESP-IDF libs (custom_sdkconfig), the
+        # build runs twice and the pass finishing last may have registered only
+        # a few sources. Merge instead of overwriting, keeping only entries whose
+        # report and source still exist so stale coverage cannot hide gaps.
+        reports = {}
+        if manifest.is_file():
+            try:
+                reports = json.loads(manifest.read_text())
+            except ValueError:
+                reports = {}
+        reports.update(expected_reports)
+        reports = {report: source_path for report, source_path in reports.items()
+                   if (build_directory / report).is_file() and (root / source_path).is_file()}
+        manifest.write_text(json.dumps(dict(sorted(reports.items())), indent=2) + '\n')
 
     env.AddPostAction('buildprog', write_stack_manifest)
     # Refresh coverage even when the firmware itself is already up to date.

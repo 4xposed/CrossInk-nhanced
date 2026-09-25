@@ -934,5 +934,13 @@ STR_ANKI_TERM_EXISTS: "登録済み"
 STR_ANKI_TERM_FAILED: "保存失敗"
 
 STR_ANKI_FRONT_SIZE: "Anki表面の文字サイズ"
+STR_BOOK_LOOKUP_HOLD: "本の辞書長押し時間"
+STR_MANGA_LOOKUP_HOLD: "マンガの辞書長押し時間"
+STR_HOLD_0_2S: "0.2秒"
+STR_HOLD_0_3S: "0.3秒"
+STR_HOLD_0_5S: "0.5秒"
+STR_HOLD_0_8S: "0.8秒"
+STR_HOLD_1S: "1秒"
+STR_HOLD_1_5S: "1.5秒"
 
 STR_HOLD_SAVE: "長押し: 保存"

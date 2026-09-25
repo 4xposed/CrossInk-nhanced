@@ -943,5 +943,13 @@ STR_ANKI_TERM_EXISTS: "Already in Anki"
 STR_ANKI_TERM_FAILED: "Save failed"
 
 STR_ANKI_FRONT_SIZE: "Anki Front Size"
+STR_BOOK_LOOKUP_HOLD: "Book Lookup Hold"
+STR_MANGA_LOOKUP_HOLD: "Manga Lookup Hold"
+STR_HOLD_0_2S: "0.2 s"
+STR_HOLD_0_3S: "0.3 s"
+STR_HOLD_0_5S: "0.5 s"
+STR_HOLD_0_8S: "0.8 s"
+STR_HOLD_1S: "1 s"
+STR_HOLD_1_5S: "1.5 s"
 
 STR_HOLD_SAVE: "Hold: Save"
