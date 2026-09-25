@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+#include <cerrno>
 #include <cstring>
 #include <utility>
 namespace storage_test {

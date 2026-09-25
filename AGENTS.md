@@ -150,6 +150,7 @@ SDK.
 ## Build And Verification
 
 - PlatformIO is the source of truth. Personal overrides belong in `platformio.local.ini`.
+- `mise.toml` pins the CI tool versions. Run `mise run ci:fast` before pushing (installed as a pre-push hook by `mise run hooks:install`) and `mise run ci:full` to mirror every CI gate. It needs GCC 14 (`brew install gcc@14` on macOS) for the Linux-like native build, matching CI and the ESP32 toolchain.
 - Host environment may be macOS, Linux, WSL, or Windows Git Bash. Check `uname -s` before recommending platform-specific shell commands.
 - Logging uses `LOG_INF`, `LOG_DBG`, and `LOG_ERR`.
 - The simulator env in this repo is `simulator`.

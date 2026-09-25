@@ -1,5 +1,6 @@
 #include <Bitmap.h>
 #include <CooperativeCancellation.h>
+#include <JPEGDEC.h>  // HAS_NEON
 #include <JpegToBmpConverter.h>
 #include <PngToBmpConverter.h>
 #include <gtest/gtest.h>
@@ -7,6 +8,13 @@
 #include <filesystem>
 #include <fstream>
 #include <vector>
+// JPEGDEC's NEON IDCT (arm64 hosts) rounds differently from the scalar IDCT
+// that x86 hosts and the ESP32-C3 run; baseline JPEG rows differ between them.
+#ifdef HAS_NEON
+static const char* const kGoldens = "/goldens.txt";
+#else
+static const char* const kGoldens = "/goldens-scalar.txt";
+#endif
 class BufferPrint : public Print {
  public:
   std::vector<uint8_t> bytes;
@@ -26,7 +34,7 @@ static bool convert(const std::string& name, BufferPrint& out, int w, int h, Coo
   return ok;
 }
 TEST(RealCover, PreservesPreChangePixelCrcs) {
-  std::ifstream f(std::string(COVER_FIXTURES) + "/goldens.txt");
+  std::ifstream f(std::string(COVER_FIXTURES) + kGoldens);
   std::string name, fnv, crc;
   int w, h, ok;
   size_t size, count = 0;
@@ -63,13 +71,23 @@ void* coverTestMalloc(size_t n) {
   if (++allocationIndex == failAllocation) return nullptr;
   return std::malloc(n);
 }
+// Inject failures but allocate through the default operator new so the default
+// operator delete (and the sanitizer runtime's pairing checks) still match.
 void* operator new[](size_t n, const std::nothrow_t&) noexcept {
   if (++allocationIndex == failAllocation) return nullptr;
-  return std::malloc(n);
+  try {
+    return ::operator new[](n);
+  } catch (...) {
+    return nullptr;
+  }
 }
 void* operator new(size_t n, const std::nothrow_t&) noexcept {
   if (++allocationIndex == failAllocation) return nullptr;
-  return std::malloc(n);
+  try {
+    return ::operator new(n);
+  } catch (...) {
+    return nullptr;
+  }
 }
 // Each ditherer keeps all of its error rows in one contiguous allocation.
 constexpr int kDitherRowAllocations = 1;
@@ -625,7 +643,7 @@ TEST_F(PublishedCover, DiagnosticsDistinguishEveryResult) {
 }
 
 TEST_F(PublishedCover, EveryGoldenCodecGeometryPublishesAndReusesWithMcg3Identity) {
-  std::ifstream f(std::string(COVER_FIXTURES) + "/goldens.txt");
+  std::ifstream f(std::string(COVER_FIXTURES) + kGoldens);
   std::string name, fnv, crc;
   int w, h, ok;
   size_t size, count = 0;

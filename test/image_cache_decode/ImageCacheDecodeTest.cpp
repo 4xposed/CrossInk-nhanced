@@ -1,5 +1,6 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <JPEGDEC.h>  // HAS_NEON
 #include <JpegToFramebufferConverter.h>
 #include <PngToFramebufferConverter.h>
 #include <gtest/gtest.h>
@@ -90,14 +91,24 @@ TEST_P(ImageCacheDecodeTest, RealCodecCacheMatchesForegroundAcrossScalingDitherA
   }
 }
 
+// JPEGDEC's NEON IDCT (arm64 hosts) rounds differently from the scalar IDCT
+// that x86 hosts and the ESP32-C3 run, so JPEG goldens exist for both.
+#ifdef HAS_NEON
+constexpr const char* kJpegGoldenFormat = "JPEG-neon";
+#else
+constexpr const char* kJpegGoldenFormat = "JPEG-scalar";
+#endif
+
 TEST_P(ImageCacheDecodeTest, MatchesOriginalForegroundGoldenHashes) {
   std::ifstream golden(std::string(FIXTURE_DIR) + "/foreground-fnv64.txt");
   ASSERT_TRUE(golden.good());
   std::string format;
   int width, height, dither;
   uint64_t expected;
+  int checked = 0;
   while (golden >> format >> width >> height >> dither >> expected) {
-    if ((format == "JPEG") != GetParam()) continue;
+    if (format != (GetParam() ? kJpegGoldenFormat : "PNG")) continue;
+    ++checked;
     config.render.maxWidth = width;
     config.render.maxHeight = height;
     config.render.useDithering = dither;
@@ -109,6 +120,7 @@ TEST_P(ImageCacheDecodeTest, MatchesOriginalForegroundGoldenHashes) {
     }
     EXPECT_EQ(hash, expected) << format << " " << width << "x" << height << " dither=" << dither;
   }
+  EXPECT_EQ(checked, 8);
 }
 
 TEST_P(ImageCacheDecodeTest, EveryCancellationPollIncludingLastBlockAndFinalRowsAborts) {

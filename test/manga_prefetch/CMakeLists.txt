@@ -26,7 +26,7 @@ target_include_directories(MangaPrefetchWorkerTest PRIVATE stubs ../image_cache_
   ${REPO_ROOT}/lib/MangaPanel ${REPO_ROOT}/lib/GfxRenderer ${REPO_ROOT}/lib/uzlib/src
   ${REPO_ROOT}/lib/Memory ${REPO_ROOT}/lib/CooperativeCancellation
   ${IMAGE_CODEC_DEPS}/JPEGDEC/src ${PNG_SRC})
-target_compile_definitions(MangaPrefetchWorkerTest PRIVATE SIMULATOR __LINUX__ PNG_MAX_BUFFERED_PIXELS=16416
+target_compile_definitions(MangaPrefetchWorkerTest PRIVATE SIMULATOR __LINUX__ ${JPEGDEC_HOST_DEFINITIONS} PNG_MAX_BUFFERED_PIXELS=16416
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../image_cache_decode/fixtures")
 target_link_libraries(MangaPrefetchWorkerTest PRIVATE crosspoint_test_common GTest::gtest_main)
 gtest_discover_tests(MangaPrefetchWorkerTest)

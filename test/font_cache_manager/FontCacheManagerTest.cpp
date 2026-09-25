@@ -28,9 +28,29 @@ void* operator new(const size_t size) {
   throw std::bad_alloc();
 }
 
+// Replace every allocation form this binary can reach. The sanitizer runtime
+// supplies its own nothrow/array forms, so a partial set pairs its allocations
+// with this free() (and libstdc++'s stable_sort in gtest uses nothrow new).
+void* operator new(const size_t size, const std::nothrow_t&) noexcept {
+  if (countHeapAllocations) heapAllocationCount++;
+  return std::malloc(size);
+}
+
+void* operator new[](const size_t size) { return ::operator new(size); }
+
+void* operator new[](const size_t size, const std::nothrow_t& tag) noexcept { return ::operator new(size, tag); }
+
 void operator delete(void* allocation) noexcept { std::free(allocation); }
 
 void operator delete(void* allocation, size_t) noexcept { std::free(allocation); }
+
+void operator delete(void* allocation, const std::nothrow_t&) noexcept { std::free(allocation); }
+
+void operator delete[](void* allocation) noexcept { std::free(allocation); }
+
+void operator delete[](void* allocation, size_t) noexcept { std::free(allocation); }
+
+void operator delete[](void* allocation, const std::nothrow_t&) noexcept { std::free(allocation); }
 
 TEST(FontCacheManagerTest, PrewarmScopeBatchesEachFontAndResolvedStyleSeparately) {
   SdCardFont readerFont;

@@ -16,6 +16,8 @@ Its rows are padded to 12 bytes. It exercises the existing non-dithered BMP path
 `goldens.txt` columns: filename, requested width, requested height, baseline success, complete BMP byte length,
 FNV-1a 64-bit pixel hash, standard CRC32 of pixel bytes (after the 62-byte BMP header/palette).
 The 50 CRC values were captured before implementation; `RealCoverTest` compares current converter output with these literals.
+`goldens-scalar.txt` holds the same rows for hosts without NEON (x86 CI), which run JPEGDEC's scalar IDCT like the
+ESP32-C3; only the baseline JPEG rows differ. It was captured from a NEON-disabled JPEGDEC build whose output matched CI.
 Adaptive contain can reduce an output axis: the 200 × 390 request for these sources produces a 200 × 300 BMP.
 
 Covered requested sizes: carousel center 296 × 468, side 200 × 390; normal Home 150 × 226, 246 × 370,

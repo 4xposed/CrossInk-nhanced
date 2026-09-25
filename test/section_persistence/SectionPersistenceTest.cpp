@@ -1,11 +1,15 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+// Standard headers must be included above: the macros below would rewrite
+// their template parameter lists if a project header pulled them in first.
 #define class struct
 #define private public
 #include "Epub/Section.h"
