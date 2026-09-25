@@ -48,3 +48,14 @@ TEST(ReaderTouchLookupHold, ResetDiscardsQueuedLookupForOldPage) {
   EXPECT_FALSE(hold.pending());
   EXPECT_TRUE(hold.capture(true, 50, 60, 500));
 }
+
+TEST(ReaderTouchLookupHold, HonorsAConfiguredHoldDuration) {
+  ReaderTouchLookupHold quick;
+  EXPECT_TRUE(quick.capture(true, 100, 200, 300, 300));
+
+  ReaderTouchLookupHold slow;
+  EXPECT_FALSE(slow.capture(true, 100, 200, 1499, 1500));
+  EXPECT_FALSE(slow.pending());
+  EXPECT_TRUE(slow.capture(true, 100, 200, 1500, 1500));
+  EXPECT_TRUE(slow.pending());
+}

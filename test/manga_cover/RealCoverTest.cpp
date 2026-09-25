@@ -63,13 +63,23 @@ void* coverTestMalloc(size_t n) {
   if (++allocationIndex == failAllocation) return nullptr;
   return std::malloc(n);
 }
+// Inject failures but allocate through the default operator new so the default
+// operator delete (and the sanitizer runtime's pairing checks) still match.
 void* operator new[](size_t n, const std::nothrow_t&) noexcept {
   if (++allocationIndex == failAllocation) return nullptr;
-  return std::malloc(n);
+  try {
+    return ::operator new[](n);
+  } catch (...) {
+    return nullptr;
+  }
 }
 void* operator new(size_t n, const std::nothrow_t&) noexcept {
   if (++allocationIndex == failAllocation) return nullptr;
-  return std::malloc(n);
+  try {
+    return ::operator new(n);
+  } catch (...) {
+    return nullptr;
+  }
 }
 // Each ditherer keeps all of its error rows in one contiguous allocation.
 constexpr int kDitherRowAllocations = 1;

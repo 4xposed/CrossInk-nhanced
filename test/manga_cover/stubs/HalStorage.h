@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <cstdio>
 #include <string>
 namespace storage_test {

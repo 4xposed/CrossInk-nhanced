@@ -1,0 +1,63 @@
+# Local tool pins and CI mirrors. Keep versions in step with
+# .github/workflows/ci.yml and .github/workflows/memory-checks.yml.
+#   mise install              # tools below
+#   mise run hooks:install    # pre-push hook running ci:fast
+#   mise run ci:fast          # before every push
+#   mise run ci:full          # everything CI runs, including memory budgets
+# GCC is not pinned here: install GCC 14 with `brew install gcc@14` on macOS. It
+# builds the native tests against libstdc++ 14, the headers CI's native jobs pin
+# and the ESP32 toolchain's GCC version.
+
+[tools]
+python = "3.14.7"
+uv = "0.12.18"
+cmake = "4.4.3"
+jq = "1.8.2"
+# pioarduino loads its helper packages from ~/.platformio/penv, built for the
+# interpreter that runs PlatformIO; keep it on CI's Python 3.14.
+"pipx:pioarduino/platformio-core" = { version = "v6.1.19", uvx_args = "--python 3.14" }
+"pipx:clang-format" = "21.1.8"
+"pipx:clang-tidy" = "21.1.6"
+
+[settings]
+pypi.uvx = true
+
+[tasks."ci:format"]
+description = "clang-format 21 over the tree, failing if it rewrites anything"
+run = "scripts/ci_local.sh format"
+
+[tasks."ci:native"]
+description = "Native tests built with GCC/libstdc++ like CI's Linux runners"
+run = "scripts/ci_local.sh native"
+
+[tasks."ci:cppcheck"]
+description = "cppcheck 2.11 on files changed from origin/main (all boards)"
+run = "scripts/ci_local.sh cppcheck"
+
+[tasks."ci:cppcheck-all"]
+description = "cppcheck 2.11 over every file for all boards, as CI runs it"
+run = "scripts/ci_local.sh cppcheck-all"
+
+[tasks."ci:sanitizers"]
+description = "Native tests under AddressSanitizer and UBSan"
+run = "scripts/ci_local.sh sanitizers"
+
+[tasks."ci:tidy"]
+description = "clang-tidy memory-lint against the recorded baseline"
+run = "scripts/ci_local.sh tidy"
+
+[tasks."ci:memory"]
+description = "Stack and static-RAM budgets for default and x4-pro"
+run = "scripts/ci_local.sh memory"
+
+[tasks."ci:fast"]
+description = "Pre-push checks: format, native (GCC), cppcheck on changed files"
+run = "scripts/ci_local.sh fast"
+
+[tasks."ci:full"]
+description = "Every CI gate: fast checks plus full cppcheck, sanitizers, tidy, memory"
+run = "scripts/ci_local.sh full"
+
+[tasks."hooks:install"]
+description = "Install a git pre-push hook that runs ci:fast"
+run = "mise generate git-pre-commit --hook pre-push --task ci:fast --write"

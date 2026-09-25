@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -1335,8 +1336,9 @@ TEST_F(DictionaryRegistryTest, AllocationFailureInFolderOrNestedEnumerationFails
 }
 
 TEST_F(DictionaryRegistryTest, NormalizesPrimaryLanguageAndRejectsTraversalOrDeeperLanguageInput) {
+  // One folder spelling: SD cards and macOS fold case, Linux hosts do not.
   writeRegistryDictionary("/dictionaries/EN/Beta/dict-data");
-  writeRegistryDictionary("/dictionaries/en/alpha/dict-data");
+  writeRegistryDictionary("/dictionaries/EN/alpha/dict-data");
   writeRegistryDictionary("/dictionaries/jp/kana/dict-data");
   writeRegistryDictionary("/dictionaries/fr/standard/dict-data");
 
@@ -4202,6 +4204,171 @@ TEST(PageWordScannerTest, AllocationFailurePublishesNoBorrowedStateAndClearAllow
                           {&recorder, ScannerProbeRecorder::call}),
             DictionaryStatus::Found);
   EXPECT_EQ(scanner.stepOne(), DictionaryStatus::Found);
+}
+
+namespace {
+// Sequential truth for an exact touch: the first discovered candidate whose
+// glyph boxes contain the point, or none once the touched glyph was processed.
+int sequentialTouchTruth(const std::vector<PageTextGlyph>& glyphs, ScannerProbeRecorder& recorder, const int x,
+                         const int y, const uint16_t touched, PageWordCandidate& out) {
+  const PageTextSourceView view{glyphs.data(), static_cast<uint16_t>(glyphs.size()), 1};
+  PageWordScanner scanner;
+  EXPECT_EQ(scanner.begin(view, DictionaryBackendKind::Japanese, {&recorder, ScannerProbeRecorder::call}),
+            DictionaryStatus::Found);
+  while (!scanner.done()) {
+    scanner.stepOne();
+    for (uint16_t index = 0; index < scanner.candidateCount(); ++index) {
+      const auto* candidate = scanner.candidate(index);
+      if (pageTextRangeContains(view, candidate->firstGlyph, candidate->glyphCount, x, y)) {
+        out = *candidate;
+        return index;
+      }
+    }
+    if (scanner.hasProcessedGlyph(touched)) break;
+  }
+  return -1;
+}
+}  // namespace
+
+TEST(JapaneseTouchResolverTest, AgreesWithTheSequentialScanForEveryDecidedTouch) {
+  // Multi-glyph words, filtered particles, honorific and counter skips, and a
+  // katakana name run all shift the progressive skip bound.
+  const std::u32string text =
+      U"日本語辞書は猫である。田中さんと12匹の猫が来た。ムーミンちゃんは辞書を読んだ。名前はまだ無い日本語辞書猫犬鳥魚"
+      U"。";
+  auto glyphs = makeScannerGlyphs(text);
+  ScannerProbeRecorder recorder{{{"日本語辞書"},
+                                 {"日本"},
+                                 {"猫"},
+                                 {"田中"},
+                                 {"匹"},
+                                 {"ムー"},
+                                 {"辞書"},
+                                 {"読んだ", DictionaryStatus::Found, SIZE_MAX, true},
+                                 {"名前"},
+                                 {"無い"},
+                                 {"犬"},
+                                 {"鳥魚"},
+                                 {"来た", DictionaryStatus::Found, SIZE_MAX, true}}};
+  const PageTextSourceView view{glyphs.data(), static_cast<uint16_t>(glyphs.size()), 1};
+  int candidates = 0;
+  int misses = 0;
+  for (uint16_t touched = JapaneseTouchResolver::kLookbackGlyphs; touched < glyphs.size(); ++touched) {
+    SCOPED_TRACE(touched);
+    const int x = glyphs[touched].x + 4;
+    const int y = glyphs[touched].y + 8;
+    PageWordCandidate truth{};
+    const int truthIndex = sequentialTouchTruth(glyphs, recorder, x, y, touched, truth);
+    JapaneseTouchResolver resolver;
+    ASSERT_TRUE(resolver.begin(view, {&recorder, ScannerProbeRecorder::call}, x, y));
+    while (resolver.pending()) resolver.stepOne();
+    switch (resolver.outcome()) {
+      case JapaneseTouchResolver::Outcome::Candidate:
+        ASSERT_GE(truthIndex, 0);
+        EXPECT_EQ(resolver.candidate().firstGlyph, truth.firstGlyph);
+        EXPECT_EQ(resolver.candidate().glyphCount, truth.glyphCount);
+        EXPECT_EQ(resolver.candidate().matchedBytes, truth.matchedBytes);
+        EXPECT_EQ(resolver.candidate().firstPageWord, truth.firstPageWord);
+        EXPECT_EQ(resolver.candidate().lastPageWord, truth.lastPageWord);
+        ++candidates;
+        break;
+      case JapaneseTouchResolver::Outcome::NoCandidate:
+        EXPECT_LT(truthIndex, 0);
+        ++misses;
+        break;
+      case JapaneseTouchResolver::Outcome::Undecided:
+        break;
+      case JapaneseTouchResolver::Outcome::Idle:
+      case JapaneseTouchResolver::Outcome::Pending:
+        ADD_FAILURE() << "resolver did not finish";
+    }
+  }
+  EXPECT_GT(candidates, 10);
+  EXPECT_GT(misses, 3);
+}
+
+TEST(JapaneseTouchResolverTest, ProbesOnlyTheLookbackWindowOfALongPage) {
+  auto glyphs = makeScannerGlyphs(std::u32string(400, U'猫'));
+  ScannerProbeRecorder recorder{{{"猫"}}};
+  const uint16_t touched = 390;
+  JapaneseTouchResolver resolver;
+  ASSERT_TRUE(resolver.begin({glyphs.data(), static_cast<uint16_t>(glyphs.size()), 1},
+                             {&recorder, ScannerProbeRecorder::call}, glyphs[touched].x + 4, 8));
+  while (resolver.pending()) resolver.stepOne();
+  ASSERT_EQ(resolver.outcome(), JapaneseTouchResolver::Outcome::Candidate);
+  EXPECT_EQ(resolver.candidate().firstGlyph, touched);
+  EXPECT_LE(recorder.texts.size(), JapaneseTouchResolver::kLookbackGlyphs + 1U);
+}
+
+TEST(JapaneseTouchResolverTest, StaysIdleNearThePageStartOffTextAndAfterAnUnboundedDigitRun) {
+  auto glyphs = makeScannerGlyphs(U"猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫");
+  ScannerProbeRecorder recorder{{{"猫"}}};
+  const PageTextSourceView view{glyphs.data(), static_cast<uint16_t>(glyphs.size()), 1};
+  JapaneseTouchResolver resolver;
+  EXPECT_FALSE(resolver.begin(view, {&recorder, ScannerProbeRecorder::call}, glyphs[3].x + 4, 8));
+  EXPECT_FALSE(resolver.begin(view, {&recorder, ScannerProbeRecorder::call}, glyphs[18].x + 4, 400));
+  EXPECT_EQ(resolver.outcome(), JapaneseTouchResolver::Outcome::Idle);
+
+  auto digits = makeScannerGlyphs(std::u32string(60, U'1') + U"匹猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫猫");
+  const PageTextSourceView digitView{digits.data(), static_cast<uint16_t>(digits.size()), 1};
+  EXPECT_FALSE(resolver.begin(digitView, {&recorder, ScannerProbeRecorder::call}, digits[62].x + 4, 8));
+  EXPECT_TRUE(recorder.texts.empty());
+}
+
+TEST(DictionaryLookupFlowTest, ProvisionalLookupIsAdoptedWithoutRepeatingWork) {
+  DictionaryLookupFlow flow;
+  flow.beginPage(0, 0, false, 0, /*deferInitialSelection=*/true);
+  ASSERT_TRUE(flow.beginProvisionalLookup());
+  EXPECT_TRUE(flow.provisional());
+  EXPECT_FALSE(flow.hasSelection());
+  const auto lookup = flow.takeCommand();
+  ASSERT_EQ(lookup.action, DictionaryLookupFlowAction::StartLookup);
+  flow.onLookupFinished(lookup.generation, DictionaryStatus::Found);
+  EXPECT_EQ(flow.takeCommand().action, DictionaryLookupFlowAction::StartDefinitionCollection);
+  flow.onDefinitionEvent(lookup.generation, DictionaryLookupFlowDefinitionEvent::Ready, 2, 0);
+  ASSERT_EQ(flow.state(), DictionaryLookupFlowState::Ready);
+
+  // The deferred scan neither starts its own lookup nor lets navigation guess
+  // an ordinal before the touched word has been discovered.
+  flow.onScanProgress(3, false, DictionaryStatus::Found);
+  EXPECT_EQ(flow.takeCommand().action, DictionaryLookupFlowAction::None);
+  EXPECT_FALSE(flow.moveCursor(1));
+  EXPECT_FALSE(flow.beginProvisionalLookup());
+
+  ASSERT_TRUE(flow.adoptProvisional(2));
+  EXPECT_FALSE(flow.provisional());
+  EXPECT_TRUE(flow.hasSelection());
+  EXPECT_EQ(flow.cursor(), 2);
+  EXPECT_EQ(flow.generation(), lookup.generation);
+  EXPECT_EQ(flow.state(), DictionaryLookupFlowState::Ready);
+  EXPECT_EQ(flow.takeCommand().action, DictionaryLookupFlowAction::None);
+  EXPECT_TRUE(flow.moveCursor(-1));
+}
+
+TEST(DictionaryLookupFlowTest, ProvisionalMismatchJoinsTheWorkerBeforeReplacingOrFailing) {
+  DictionaryLookupFlow flow;
+  flow.beginPage(0, 0, false, 0, true);
+  ASSERT_TRUE(flow.beginProvisionalLookup());
+  (void)flow.takeCommand();
+  flow.onScanProgress(2, false, DictionaryStatus::Found);
+  ASSERT_TRUE(flow.replaceProvisional(1));
+  EXPECT_EQ(flow.takeCommand().action, DictionaryLookupFlowAction::CancelAndJoin);
+  flow.onWorkerReleased();
+  const auto replacement = flow.takeCommand();
+  EXPECT_EQ(replacement.action, DictionaryLookupFlowAction::StartLookup);
+  EXPECT_EQ(replacement.candidateIndex, 1);
+  EXPECT_TRUE(flow.hasSelection());
+
+  DictionaryLookupFlow failed;
+  failed.beginPage(0, 0, false, 0, true);
+  ASSERT_TRUE(failed.beginProvisionalLookup());
+  (void)failed.takeCommand();
+  failed.abandonProvisional(DictionaryStatus::NotFound);
+  EXPECT_EQ(failed.takeCommand().action, DictionaryLookupFlowAction::CancelAndJoin);
+  failed.onWorkerReleased();
+  EXPECT_EQ(failed.state(), DictionaryLookupFlowState::NotFound);
+  EXPECT_FALSE(failed.workerOwned());
+  EXPECT_EQ(failed.takeCommand().action, DictionaryLookupFlowAction::None);
 }
 
 TEST(PageWordScannerTest, EmptySourceBeginsFoundAndAlreadyDone) {
