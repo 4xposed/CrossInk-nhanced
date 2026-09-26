@@ -38,6 +38,14 @@ set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 set(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+# JPEGDEC's x86 SSE marker filter builds its 0xFF mask by comparing an
+# uninitialized register with itself; clang may fold that to anything and then
+# rejects every JPEG. Use the scalar filter the device runs. (NO_SIMD cannot be
+# set on arm64: JPEGDEC.h still enables NEON there without its header.)
+set(JPEGDEC_HOST_DEFINITIONS)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  set(JPEGDEC_HOST_DEFINITIONS NO_SIMD)
+endif()
 
 add_library(crosspoint_test_common INTERFACE)
 target_include_directories(crosspoint_test_common INTERFACE

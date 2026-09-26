@@ -10,5 +10,8 @@ archived at `/private/tmp/crossink-prefetch-before`, with real local JPEGDEC and
 PNGdec sources. Columns: format, output width, output height, dithering, hash.
 Origin is (7,9), screen extents 512×512, exact dimensions enabled. These hashes
 check compatibility with the original foreground output independently of the
-new cache-only implementation. The runtime tests additionally compare the full
+new cache-only implementation. JPEG rows are recorded twice: `JPEG-neon` for arm64
+hosts, where JPEGDEC uses its NEON IDCT, and `JPEG-scalar` for x86 hosts, which
+use the scalar IDCT like the ESP32-C3. Full- and half-size decodes differ between
+them; quarter and eighth scale match. The runtime tests additionally compare the full
 bytes against foreground rendering in every orientation.

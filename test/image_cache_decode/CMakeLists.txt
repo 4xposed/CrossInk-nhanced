@@ -17,7 +17,7 @@ add_executable(ImageCacheDecodeTest ImageCacheDecodeTest.cpp stubs/HalStorage.cp
 target_include_directories(ImageCacheDecodeTest PRIVATE stubs ${CONVERTERS}
   ${REPO_ROOT}/lib/Memory ${REPO_ROOT}/lib/CooperativeCancellation
   ${IMAGE_CODEC_DEPS}/JPEGDEC/src ${PNG_SRC})
-target_compile_definitions(ImageCacheDecodeTest PRIVATE __LINUX__ PNG_MAX_BUFFERED_PIXELS=16416
+target_compile_definitions(ImageCacheDecodeTest PRIVATE __LINUX__ ${JPEGDEC_HOST_DEFINITIONS} PNG_MAX_BUFFERED_PIXELS=16416
   FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 target_link_libraries(ImageCacheDecodeTest PRIVATE crosspoint_test_common GTest::gtest_main)
 gtest_discover_tests(ImageCacheDecodeTest)

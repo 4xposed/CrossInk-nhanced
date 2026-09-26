@@ -26,7 +26,7 @@ if(EXISTS "${COVER_CODEC_DEPS}/JPEGDEC/src/JPEGDEC.cpp")
   ${REPO_ROOT}/lib/JpegToBmpConverter ${REPO_ROOT}/lib/PngToBmpConverter
   ${REPO_ROOT}/lib/GfxRenderer ${REPO_ROOT}/lib/Memory ${REPO_ROOT}/lib/miniz/src
   ${REPO_ROOT}/lib/CooperativeCancellation ${COVER_CODEC_DEPS}/JPEGDEC/src)
- target_compile_definitions(RealCoverTest PRIVATE __LINUX__ ARDUINO_ARCH_ESP32=1 CROSSINK_MEMORY_TEST=1 COVER_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures" MANGA_FIXTURE_DIR="${REPO_ROOT}/test/manga_format/fixtures")
+ target_compile_definitions(RealCoverTest PRIVATE __LINUX__ ${JPEGDEC_HOST_DEFINITIONS} ARDUINO_ARCH_ESP32=1 CROSSINK_MEMORY_TEST=1 COVER_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures" MANGA_FIXTURE_DIR="${REPO_ROOT}/test/manga_format/fixtures")
  target_link_libraries(RealCoverTest PRIVATE crosspoint_test_common GTest::gtest_main)
  gtest_discover_tests(RealCoverTest)
 endif()
