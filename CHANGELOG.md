@@ -7,6 +7,27 @@ CrossInknhanced is a fork of [CrossInk](https://github.com/uxjulia/CrossInk).
 Changes inherited from CrossInk are listed in the
 [CrossInk changelog](https://github.com/uxjulia/CrossInk/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+## [0.1.1] - 2026-09-30
+
+### Added
+
+- Choose how long to hold a word before the dictionary opens, separately for books and manga (0.2–1.5 s).
+- Add `mise` tool pins and local CI tasks (`mise run ci:fast`, `mise run ci:full`) with an optional pre-push hook.
+- Add staged memory regression checks for stack usage, native sanitizers, allocation budgets, focused static analysis, and static RAM.
+
+### Fixed
+
+- Remove tracked temporary session files whose names prevented Windows checkouts.
+- Restore CI formatting and static-analysis checks, keeping generated boot artwork out of source formatting.
+- Make the X3/X4 stack-usage check reliable when the build recompiles ESP-IDF, and clear the remaining static-analysis findings.
+- Show "not found" when a held particle or punctuation mark has no dictionary entry, instead of staying on Loading indefinitely.
+- Speed up Japanese dictionary lookups by reading dictionary index blocks in one SD access again.
+- Show the definition of a held Japanese word without first scanning every earlier word on the page.
+- Keep dictionary lookups reading from the SD card while the X4 Pro screen refreshes.
+- Select the held word instead of a nearby word that wraps across the line break.
+
 ## [0.1.0] - 2026-09-23
 
 First release of CrossInknhanced, based on CrossInk v1.6.0.
@@ -66,4 +87,6 @@ First release of CrossInknhanced, based on CrossInk v1.6.0.
 - Failed image decoding closes source files and discards incomplete pixel caches, so reading recovers cleanly.
 - Word-scan caches verify complete dictionary indexes before reuse, so replacing a dictionary with one of the same size cannot restore stale results.
 
+[Unreleased]: https://github.com/4xposed/CrossInk-nhanced/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/4xposed/CrossInk-nhanced/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/4xposed/CrossInk-nhanced/releases/tag/v0.1.0
